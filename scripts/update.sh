@@ -2,7 +2,7 @@
 
 COMMIT_MSG="${1:-$(date +"%Y-%m-%d %H:%M:%S")}"
 REMOTE="${2:-origin}"
-BRANCH="${3:-testing}"
+BRANCH="${3:-codex/v1-btree-ca-sa-router}"
 
 git fetch
 git pull "$REMOTE" "$BRANCH"
