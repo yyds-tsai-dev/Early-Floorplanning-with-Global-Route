@@ -1,0 +1,11 @@
+{
+    "schema_version": 1,
+    "commit": "",
+    "indexed_at": "2026-06-14T08:47:18Z",
+    "project": "home-yyds-Early-Floorplanning-with-Global-Route",
+    "nodes": 314,
+    "edges": 489,
+    "original_size": 1572864,
+    "compressed_size": 186086,
+    "compression_level": 9
+}
