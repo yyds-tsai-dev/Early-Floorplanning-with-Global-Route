@@ -40,6 +40,26 @@ _Avoid_: route every move, route only at the end
 The approved Version 1.0 main approach combining boundary-aware B*-tree simulated annealing, constraints-aware moves, cheap per-step proxies, and periodic exact routing evaluation.
 _Avoid_: full negotiated router first, placement-only SA
 
+**Long-Term Placement/Search Objective**:
+The current strategic objective after the 2026-06-14 discussion. The user explicitly prefers long-term optimizer quality over short implementation time. Large rewrites, longer implementation cycles, and multiple data structures are acceptable when they improve placement/search quality.
+_Avoid_: quick-only optimization, conservative router-only tuning
+
+**Placement Engine Interface**:
+The planned abstraction that lets the solver run different placement representations behind the same scoring, routing, validation, and output pipeline.
+_Avoid_: hard-wiring SA to one data structure in `main.cpp`
+
+**Sequence-Pair Engine**:
+A planned placement backend using two block permutations and constraint-graph/longest-path decode. It is intended for broad global topology exploration and comparison against B*-tree search.
+_Avoid_: treating sequence-pair as a quick replacement that prevents B*-tree work
+
+**B*-Tree Engine**:
+A planned placement backend using real B*-tree topology and contour decode. It is intended for compact local refinement and direct comparison against sequence-pair search.
+_Avoid_: the current order-only first-open-slot placement being called real B*-tree
+
+**Hybrid Placement Search**:
+The planned long-term mode that runs Sequence-Pair global exploration first, converts the best placement into a B*-tree-compatible seed, then runs B*-tree local refinement.
+_Avoid_: choosing one representation permanently before measuring both
+
 ## Relationships
 
 - A **Bundle Route** uses one or more **Channels** and may use one or more **Feedthroughs**.
@@ -49,6 +69,10 @@ _Avoid_: full negotiated router first, placement-only SA
 - **Channel-First Fallback Routing** may introduce **Feedthroughs** only after channel-only routing fails for a bundle.
 - **Periodic Exact Routing Evaluation** keeps **B*-Tree SA Placement** routing-aware without running full routing on every move.
 - **B*-Tree CA-SA Periodic Router** is the Version 1.0 main approach.
+- **Long-Term Placement/Search Objective** supersedes conservative v1-only optimization as the active strategic direction.
+- **Placement Engine Interface** owns the boundary between search representations and shared evaluation.
+- **Sequence-Pair Engine** and **B*-Tree Engine** should both feed the same `cheapScore`, `exactScore`, `validateSolution`, and `.cfg` writer.
+- **Hybrid Placement Search** combines **Sequence-Pair Engine** global exploration with **B*-Tree Engine** local refinement.
 
 ## Example Dialogue
 
@@ -69,6 +93,12 @@ _Avoid_: full negotiated router first, placement-only SA
 >
 > **Dev:** "What is the approved v1.0 architecture?"
 > **Domain expert:** "**B*-Tree CA-SA Periodic Router**: boundary-aware B*-tree SA plus periodic exact routing."
+>
+> **Dev:** "Should we keep making conservative router-only improvements?"
+> **Domain expert:** "No. The active direction is the **Long-Term Placement/Search Objective**: build a shared placement engine interface, implement both **Sequence-Pair Engine** and **B*-Tree Engine**, and compare them under the same evaluator."
+>
+> **Dev:** "Do we need to choose sequence-pair or B*-tree now?"
+> **Domain expert:** "No. Implement both. Use **Hybrid Placement Search** later to combine sequence-pair global exploration with B*-tree local refinement."
 
 ## Flagged Ambiguities
 
@@ -78,3 +108,20 @@ _Avoid_: full negotiated router first, placement-only SA
 - "edge-block handling" was resolved to mean **Boundary-Constrained Edge Move**, not fixed-only placement or soft penalty.
 - "routing-aware SA" was resolved to mean **Periodic Exact Routing Evaluation**, not full routing on every SA move.
 - "v1.0 main approach" was resolved to mean **B*-Tree CA-SA Periodic Router**.
+- "placement/search direction after 2026-06-14" was resolved to mean **Long-Term Placement/Search Objective**, not quick conservative tuning.
+- "Sequence-pair versus B*-tree" was resolved to mean implement and compare both through a **Placement Engine Interface**, not pick only one.
+- "hybrid optimizer" was resolved to mean sequence-pair global exploration followed by B*-tree local refinement.
+
+## Current Strategic Design
+
+The active long-term design is documented in `docs/superpowers/specs/2026-06-14-long-term-placement-engine-design.md`.
+
+Future implementation should move toward:
+
+- `--engine sp`
+- `--engine bstar`
+- `--engine hybrid`
+- deterministic engine comparison under the same evaluator
+- replacing the current order-only first-open-slot placement with real representation-backed decode
+
+Short-term routing or evaluator patches are still allowed, but they should support this placement/search architecture rather than distract from it.
