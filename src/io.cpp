@@ -56,6 +56,10 @@ double parseDouble(const std::string& s, double fallback = 0.0) {
     }
 }
 
+bool hasPercent(const std::string& s) {
+    return s.find('%') != std::string::npos;
+}
+
 std::vector<std::string> splitLocations(const std::string& s) {
     std::vector<std::string> out;
     std::stringstream ss(s);
@@ -115,7 +119,13 @@ Problem parseProblem(const std::string& path) {
             parseAspect(b, row.size() > 4 ? row[4] : "1");
             b.type = parseType(row.size() > 5 ? row[5] : "SOFT");
             b.locations = splitLocations(row.size() > 6 ? row[6] : "");
-            for (std::size_t i = 7; i < row.size() && i < 11; ++i) {
+            std::size_t ft_start = 7;
+            if (row.size() > 7 && !row[7].empty() && !hasPercent(row[7])) {
+                b.port_edge = static_cast<int>(std::llround(parseDouble(row[7], 0.0)));
+                ft_start = 8;
+            }
+            for (std::size_t i = ft_start; i < row.size() && b.ft_rates.size() < 4; ++i) {
+                if (row[i].empty()) continue;
                 b.ft_rates.push_back(parseDouble(row[i]) / 100.0);
             }
             while (b.ft_rates.size() < 4) b.ft_rates.push_back(0.2);

@@ -18,33 +18,46 @@ bool locHasBottom(const std::string& loc) { return !loc.empty() && loc[0] == 'B'
 bool locHasLeft(const std::string& loc) { return !loc.empty() && loc[0] == 'L'; }
 bool locHasRight(const std::string& loc) { return !loc.empty() && loc[0] == 'R'; }
 
-Rect placeEdge(const Problem& p, const Block& b, const std::string& loc) {
+bool locInTopBand(const std::string& loc) { return loc.find('T') != std::string::npos; }
+bool locInBottomBand(const std::string& loc) { return loc.find('B') != std::string::npos; }
+bool locInLeftBand(const std::string& loc) { return loc.find('L') != std::string::npos; }
+bool locInRightBand(const std::string& loc) { return loc.find('R') != std::string::npos; }
+
+Rect placeEdge(const Problem& p, const Block& b, const std::vector<std::string>& locs) {
     Rect r = dimensionFor(b, 1.0);
     double third_w = p.outline_w / 3.0;
     double third_h = p.outline_h / 3.0;
-    if (locHasTop(loc)) r.y = p.outline_h - r.h;
-    if (locHasBottom(loc)) r.y = 0.0;
-    if (locHasLeft(loc)) r.x = 0.0;
-    if (locHasRight(loc)) r.x = p.outline_w - r.w;
+    bool top = false, bottom = false, left = false, right = false;
+    bool mid_x = false, mid_y = false;
+    for (const auto& loc : locs) {
+        top = top || locHasTop(loc);
+        bottom = bottom || locHasBottom(loc);
+        left = left || locHasLeft(loc);
+        right = right || locHasRight(loc);
+        mid_x = mid_x || loc == "TM" || loc == "BM";
+        mid_y = mid_y || loc == "LM" || loc == "RM";
+        if (!left && locInLeftBand(loc)) r.x = 0.0;
+        if (!right && locInRightBand(loc)) r.x = p.outline_w - r.w;
+        if (!top && locInTopBand(loc)) r.y = p.outline_h - r.h;
+        if (!bottom && locInBottomBand(loc)) r.y = 0.0;
+    }
 
-    if (loc == "TM") r.x = std::max(0.0, (p.outline_w - r.w) * 0.5);
-    if (loc == "TR") r.x = p.outline_w - r.w;
-    if (loc == "TL") r.x = 0.0;
-    if (loc == "BM") r.x = std::max(0.0, (p.outline_w - r.w) * 0.5);
-    if (loc == "BR") r.x = p.outline_w - r.w;
-    if (loc == "BL") r.x = 0.0;
-    if (loc == "LM") r.y = std::max(0.0, (p.outline_h - r.h) * 0.5);
-    if (loc == "LB") r.y = 0.0;
-    if (loc == "LT") r.y = p.outline_h - r.h;
-    if (loc == "RM") r.y = std::max(0.0, (p.outline_h - r.h) * 0.5);
-    if (loc == "RB") r.y = 0.0;
-    if (loc == "RT") r.y = p.outline_h - r.h;
+    if (top) r.y = p.outline_h - r.h;
+    if (bottom) r.y = 0.0;
+    if (left) r.x = 0.0;
+    if (right) r.x = p.outline_w - r.w;
+    if (!left && !right && mid_x) r.x = std::max(0.0, (p.outline_w - r.w) * 0.5);
+    if (!top && !bottom && mid_y) r.y = std::max(0.0, (p.outline_h - r.h) * 0.5);
 
-    if (loc == "TM" || loc == "BM") r.x = std::min(std::max(r.x, third_w), 2.0 * third_w - r.w);
-    if (loc == "LM" || loc == "RM") r.y = std::min(std::max(r.y, third_h), 2.0 * third_h - r.h);
+    if (!left && !right && mid_x) r.x = std::min(std::max(r.x, third_w), 2.0 * third_w - r.w);
+    if (!top && !bottom && mid_y) r.y = std::min(std::max(r.y, third_h), 2.0 * third_h - r.h);
     r.x = std::max(0.0, std::min(r.x, p.outline_w - r.w));
     r.y = std::max(0.0, std::min(r.y, p.outline_h - r.h));
     return r;
+}
+
+Rect placeEdge(const Problem& p, const Block& b, const std::string& loc) {
+    return placeEdge(p, b, std::vector<std::string>{loc});
 }
 
 bool collidesWithPlaced(const std::vector<Rect>& rects, const std::vector<bool>& placed, int self, const Rect& candidate) {
@@ -93,8 +106,8 @@ Placement makeSeedPlacement(const Problem& problem) {
     for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
         const auto& b = problem.blocks[i];
         if (isEdge(b.type)) {
-            std::string loc = b.locations.empty() ? "TL" : b.locations.front();
-            placement.rects[i] = placeEdge(problem, b, loc);
+            std::vector<std::string> locs = b.locations.empty() ? std::vector<std::string>{"TL"} : b.locations;
+            placement.rects[i] = placeEdge(problem, b, locs);
         }
     }
 
@@ -133,12 +146,10 @@ Placement decodeState(const Problem& problem, const BTreeState& state) {
         p.rects[i] = dimensionFor(problem.blocks[i], ar);
         if (isEdge(problem.blocks[i].type)) {
             const auto& locs = problem.blocks[i].locations;
-            int idx = state.edge_location_choice[i];
             if (locs.empty()) {
                 p.rects[i] = placeEdge(problem, problem.blocks[i], "TL");
             } else {
-                idx = std::max(0, std::min(idx, static_cast<int>(locs.size()) - 1));
-                p.rects[i] = placeEdge(problem, problem.blocks[i], locs[idx]);
+                p.rects[i] = placeEdge(problem, problem.blocks[i], locs);
             }
         }
     }

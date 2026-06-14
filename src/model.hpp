@@ -36,6 +36,7 @@ struct Block {
     BlockType type = BlockType::Soft;
     std::vector<std::string> locations;
     std::vector<double> ft_rates;
+    int port_edge = 0;
 };
 
 struct Bundle {
@@ -62,6 +63,8 @@ struct Channel {
     std::string name;
     Rect rect;
     double usage = 0.0;
+    double horizontal_usage = 0.0;
+    double vertical_usage = 0.0;
 };
 
 struct RouteStep {
@@ -82,6 +85,7 @@ struct Route {
 struct RoutingResult {
     std::vector<Channel> channels;
     std::vector<Route> routes;
+    std::vector<double> soft_feedthrough_nets;
     double total_wirelength = 0.0;
     double channel_overflow = 0.0;
     double feedthrough_mismatch = 0.0;
