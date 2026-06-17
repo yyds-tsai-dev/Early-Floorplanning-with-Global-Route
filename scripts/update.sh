@@ -2,9 +2,8 @@
 
 COMMIT_MSG="${1:-$(date +"%Y-%m-%d %H:%M:%S")}"
 REMOTE="${2:-origin}"
-BRANCH="${3:-v1-btree-ca-sa-router}"
+BRANCH="${3:-$(git branch --show-current)}"
 
-git fetch
 git pull "$REMOTE" "$BRANCH"
 git status
 git add -A
