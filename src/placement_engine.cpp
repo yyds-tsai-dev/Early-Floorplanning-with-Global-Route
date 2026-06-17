@@ -1,0 +1,520 @@
+#include "placement_engine.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <stdexcept>
+
+namespace efgr {
+namespace {
+
+Rect dimensionFor(const Block& block, double aspect) {
+    if (!isSoft(block.type)) return Rect{0.0, 0.0, block.width, block.height};
+    double ar = std::max(block.ar_min, std::min(block.ar_max, aspect));
+    double w = std::sqrt(std::max(1.0, block.area * ar));
+    double h = block.area / w;
+    return Rect{0.0, 0.0, w, h};
+}
+
+bool locHasTop(const std::string& loc) { return !loc.empty() && loc[0] == 'T'; }
+bool locHasBottom(const std::string& loc) { return !loc.empty() && loc[0] == 'B'; }
+bool locHasLeft(const std::string& loc) { return !loc.empty() && loc[0] == 'L'; }
+bool locHasRight(const std::string& loc) { return !loc.empty() && loc[0] == 'R'; }
+
+bool locInTopBand(const std::string& loc) { return loc.find('T') != std::string::npos; }
+bool locInBottomBand(const std::string& loc) { return loc.find('B') != std::string::npos; }
+bool locInLeftBand(const std::string& loc) { return loc.find('L') != std::string::npos; }
+bool locInRightBand(const std::string& loc) { return loc.find('R') != std::string::npos; }
+
+Rect placeEdge(const Problem& problem, const Block& block, const std::vector<std::string>& locs) {
+    Rect r = dimensionFor(block, 1.0);
+    double third_w = problem.outline_w / 3.0;
+    double third_h = problem.outline_h / 3.0;
+    bool top = false, bottom = false, left = false, right = false;
+    bool mid_x = false, mid_y = false;
+    for (const auto& loc : locs) {
+        top = top || locHasTop(loc);
+        bottom = bottom || locHasBottom(loc);
+        left = left || locHasLeft(loc);
+        right = right || locHasRight(loc);
+        mid_x = mid_x || loc == "TM" || loc == "BM";
+        mid_y = mid_y || loc == "LM" || loc == "RM";
+        if (!left && locInLeftBand(loc)) r.x = 0.0;
+        if (!right && locInRightBand(loc)) r.x = problem.outline_w - r.w;
+        if (!top && locInTopBand(loc)) r.y = problem.outline_h - r.h;
+        if (!bottom && locInBottomBand(loc)) r.y = 0.0;
+    }
+
+    if (top) r.y = problem.outline_h - r.h;
+    if (bottom) r.y = 0.0;
+    if (left) r.x = 0.0;
+    if (right) r.x = problem.outline_w - r.w;
+    if (!left && !right && mid_x) r.x = std::max(0.0, (problem.outline_w - r.w) * 0.5);
+    if (!top && !bottom && mid_y) r.y = std::max(0.0, (problem.outline_h - r.h) * 0.5);
+
+    if (!left && !right && mid_x) r.x = std::min(std::max(r.x, third_w), 2.0 * third_w - r.w);
+    if (!top && !bottom && mid_y) r.y = std::min(std::max(r.y, third_h), 2.0 * third_h - r.h);
+    r.x = std::max(0.0, std::min(r.x, problem.outline_w - r.w));
+    r.y = std::max(0.0, std::min(r.y, problem.outline_h - r.h));
+    return r;
+}
+
+std::vector<std::string> chosenEdgeLocation(const Problem& problem, const PlacementState& state, int block_idx) {
+    const auto& locs = problem.blocks[block_idx].locations;
+    if (locs.empty()) return {"TL"};
+    int choice = 0;
+    if (block_idx >= 0 && static_cast<std::size_t>(block_idx) < state.edge_location_choice.size()) {
+        choice = state.edge_location_choice[block_idx];
+    }
+    choice %= static_cast<int>(locs.size());
+    if (choice < 0) choice += static_cast<int>(locs.size());
+    return {locs[choice]};
+}
+
+std::vector<int> movableBlocks(const Problem& problem) {
+    std::vector<int> ids;
+    for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
+        if (!isEdge(problem.blocks[i].type)) ids.push_back(static_cast<int>(i));
+    }
+    return ids;
+}
+
+std::vector<double> initialAspect(const Problem& problem) {
+    std::vector<double> aspect(problem.blocks.size(), 1.0);
+    for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
+        if (isSoft(problem.blocks[i].type)) {
+            aspect[i] = std::max(problem.blocks[i].ar_min, std::min(problem.blocks[i].ar_max, 1.0));
+        }
+    }
+    return aspect;
+}
+
+PlacementState baseState(const Problem& problem) {
+    PlacementState state;
+    state.soft_aspect = initialAspect(problem);
+    state.edge_location_choice.assign(problem.blocks.size(), 0);
+    return state;
+}
+
+Placement basePlacement(const Problem& problem, const PlacementState& state) {
+    Placement placement;
+    placement.rects.resize(problem.blocks.size());
+    placement.aspect = state.soft_aspect.empty() ? initialAspect(problem) : state.soft_aspect;
+    if (placement.aspect.size() < problem.blocks.size()) placement.aspect.resize(problem.blocks.size(), 1.0);
+
+    for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
+        double ar = isSoft(problem.blocks[i].type) ? placement.aspect[i] : 1.0;
+        placement.rects[i] = dimensionFor(problem.blocks[i], ar);
+        if (isEdge(problem.blocks[i].type)) {
+            placement.rects[i] = placeEdge(problem, problem.blocks[i],
+                                           chosenEdgeLocation(problem, state, static_cast<int>(i)));
+        }
+    }
+    return placement;
+}
+
+bool collidesWithPlaced(const std::vector<Rect>& rects, const std::vector<bool>& placed, int self,
+                        const Rect& candidate) {
+    for (std::size_t i = 0; i < rects.size(); ++i) {
+        if (static_cast<int>(i) == self || !placed[i]) continue;
+        if (overlaps(candidate, rects[i])) return true;
+    }
+    return false;
+}
+
+double maxTopOverlap(const std::vector<Rect>& rects, const std::vector<bool>& placed, int self, double x, double w) {
+    double y = 0.0;
+    Rect probe{x, 0.0, w, 1.0};
+    for (std::size_t i = 0; i < rects.size(); ++i) {
+        if (static_cast<int>(i) == self || !placed[i]) continue;
+        probe.y = rects[i].y;
+        probe.h = rects[i].h;
+        if (probe.x + kEps < rects[i].right() && rects[i].x + kEps < probe.right()) {
+            y = std::max(y, rects[i].top());
+        }
+    }
+    return y;
+}
+
+void placeAtFirstOpenSlot(const Problem& problem, Placement& placement, std::vector<bool>& placed, int idx) {
+    Rect r = placement.rects[idx];
+    double step = 10.0;
+    for (double y = 0.0; y + r.h <= problem.outline_h + kEps; y += step) {
+        for (double x = 0.0; x + r.w <= problem.outline_w + kEps; x += step) {
+            Rect candidate{x, y, r.w, r.h};
+            if (!collidesWithPlaced(placement.rects, placed, idx, candidate)) {
+                placement.rects[idx] = candidate;
+                placed[idx] = true;
+                return;
+            }
+        }
+    }
+    placement.rects[idx] = r;
+    placed[idx] = true;
+}
+
+void placeWithContour(const Problem& problem, Placement& placement, std::vector<bool>& placed, int idx, double desired_x,
+                      double desired_y) {
+    Rect r = placement.rects[idx];
+    if (problem.outline_w > r.w) {
+        r.x = std::max(0.0, std::min(desired_x, problem.outline_w - r.w));
+    } else {
+        r.x = 0.0;
+    }
+    r.y = std::max(std::max(0.0, desired_y), maxTopOverlap(placement.rects, placed, idx, r.x, r.w));
+
+    for (int guard = 0; guard < static_cast<int>(placement.rects.size()) + 2; ++guard) {
+        if (!collidesWithPlaced(placement.rects, placed, idx, r)) break;
+        r.y = std::max(r.y, maxTopOverlap(placement.rects, placed, idx, r.x, r.w));
+    }
+
+    placement.rects[idx] = r;
+    if (r.top() > problem.outline_h + kEps || collidesWithPlaced(placement.rects, placed, idx, r)) {
+        placeAtFirstOpenSlot(problem, placement, placed, idx);
+    } else {
+        placed[idx] = true;
+    }
+}
+
+void mutateSoftAspect(const Problem& problem, PlacementState& state, std::mt19937& rng) {
+    std::vector<int> softs;
+    for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
+        if (isSoft(problem.blocks[i].type)) softs.push_back(static_cast<int>(i));
+    }
+    if (softs.empty()) return;
+    if (state.soft_aspect.size() < problem.blocks.size()) state.soft_aspect = initialAspect(problem);
+    std::uniform_int_distribution<int> pick(0, static_cast<int>(softs.size()) - 1);
+    std::uniform_real_distribution<double> factor(0.85, 1.15);
+    int idx = softs[pick(rng)];
+    state.soft_aspect[idx] = std::max(problem.blocks[idx].ar_min,
+                                      std::min(problem.blocks[idx].ar_max, state.soft_aspect[idx] * factor(rng)));
+}
+
+void mutateEdgeChoice(const Problem& problem, PlacementState& state, std::mt19937& rng) {
+    std::vector<int> edges;
+    for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
+        if (isEdge(problem.blocks[i].type) && problem.blocks[i].locations.size() > 1) {
+            edges.push_back(static_cast<int>(i));
+        }
+    }
+    if (edges.empty()) return;
+    if (state.edge_location_choice.size() < problem.blocks.size()) {
+        state.edge_location_choice.assign(problem.blocks.size(), 0);
+    }
+    std::uniform_int_distribution<int> pick(0, static_cast<int>(edges.size()) - 1);
+    int idx = edges[pick(rng)];
+    state.edge_location_choice[idx] =
+        (state.edge_location_choice[idx] + 1) % static_cast<int>(problem.blocks[idx].locations.size());
+}
+
+bool sameElements(std::vector<int> a, std::vector<int> b) {
+    std::sort(a.begin(), a.end());
+    std::sort(b.begin(), b.end());
+    return a == b;
+}
+
+class SequencePairEngine final : public PlacementEngine {
+public:
+    std::string name() const override { return "sp"; }
+
+    PlacementState initialState(const Problem& problem, std::mt19937&) const override {
+        PlacementState state = baseState(problem);
+        state.sequence_pos = movableBlocks(problem);
+        state.sequence_neg = state.sequence_pos;
+        return state;
+    }
+
+    PlacementState seedFromPlacement(const Problem& problem, const Placement& placement, std::mt19937&) const override {
+        PlacementState state = baseState(problem);
+        state.sequence_pos = movableBlocks(problem);
+        std::sort(state.sequence_pos.begin(), state.sequence_pos.end(), [&](int a, int b) {
+            if (std::abs(placement.rects[a].x - placement.rects[b].x) > kEps) {
+                return placement.rects[a].x < placement.rects[b].x;
+            }
+            return placement.rects[a].y < placement.rects[b].y;
+        });
+        state.sequence_neg = state.sequence_pos;
+        std::sort(state.sequence_neg.begin(), state.sequence_neg.end(), [&](int a, int b) {
+            if (std::abs(placement.rects[a].y - placement.rects[b].y) > kEps) {
+                return placement.rects[a].y < placement.rects[b].y;
+            }
+            return placement.rects[a].x < placement.rects[b].x;
+        });
+        return state;
+    }
+
+    void mutate(const Problem& problem, PlacementState& state, std::mt19937& rng) const override {
+        if (state.sequence_pos.empty() || state.sequence_neg.empty()) state = initialState(problem, rng);
+        std::uniform_int_distribution<int> move_dist(0, 4);
+        int move = move_dist(rng);
+        if (move <= 2 && state.sequence_pos.size() >= 2) {
+            std::uniform_int_distribution<int> pick(0, static_cast<int>(state.sequence_pos.size()) - 1);
+            int a = pick(rng);
+            int b = pick(rng);
+            if (move == 0 || move == 2) std::swap(state.sequence_pos[a], state.sequence_pos[b]);
+            if (move == 1 || move == 2) std::swap(state.sequence_neg[a], state.sequence_neg[b]);
+        } else if (move == 3) {
+            mutateSoftAspect(problem, state, rng);
+        } else {
+            mutateEdgeChoice(problem, state, rng);
+        }
+    }
+
+    Placement decode(const Problem& problem, const PlacementState& state) const override {
+        Placement placement = basePlacement(problem, state);
+        std::vector<int> blocks = state.sequence_pos.empty() ? movableBlocks(problem) : state.sequence_pos;
+        std::vector<int> neg = state.sequence_neg.empty() ? blocks : state.sequence_neg;
+
+        std::vector<int> pos_rank(problem.blocks.size(), -1);
+        std::vector<int> neg_rank(problem.blocks.size(), -1);
+        for (std::size_t i = 0; i < blocks.size(); ++i) pos_rank[blocks[i]] = static_cast<int>(i);
+        for (std::size_t i = 0; i < neg.size(); ++i) neg_rank[neg[i]] = static_cast<int>(i);
+
+        struct Constraint {
+            int from;
+            int to;
+            double weight;
+        };
+        std::vector<Constraint> horizontal;
+        std::vector<Constraint> vertical;
+        for (std::size_t i = 0; i < blocks.size(); ++i) {
+            for (std::size_t j = i + 1; j < blocks.size(); ++j) {
+                int a = blocks[i];
+                int b = blocks[j];
+                if (pos_rank[a] < 0 || pos_rank[b] < 0 || neg_rank[a] < 0 || neg_rank[b] < 0) continue;
+                if (pos_rank[a] < pos_rank[b] && neg_rank[a] < neg_rank[b]) {
+                    horizontal.push_back(Constraint{a, b, placement.rects[a].w});
+                } else if (pos_rank[a] < pos_rank[b]) {
+                    vertical.push_back(Constraint{a, b, placement.rects[a].h});
+                } else if (neg_rank[a] < neg_rank[b]) {
+                    vertical.push_back(Constraint{b, a, placement.rects[b].h});
+                } else {
+                    horizontal.push_back(Constraint{b, a, placement.rects[b].w});
+                }
+            }
+        }
+
+        std::vector<double> x(problem.blocks.size(), 0.0);
+        std::vector<double> y(problem.blocks.size(), 0.0);
+        for (std::size_t pass = 0; pass < blocks.size(); ++pass) {
+            for (const auto& c : horizontal) x[c.to] = std::max(x[c.to], x[c.from] + c.weight);
+            for (const auto& c : vertical) y[c.to] = std::max(y[c.to], y[c.from] + c.weight);
+        }
+
+        std::vector<bool> placed(problem.blocks.size(), false);
+        for (std::size_t i = 0; i < problem.blocks.size(); ++i) placed[i] = isEdge(problem.blocks[i].type);
+        for (int idx : blocks) {
+            placement.rects[idx].x = x[idx];
+            placement.rects[idx].y = y[idx];
+        }
+        std::vector<int> order = blocks;
+        std::sort(order.begin(), order.end(), [&](int a, int b) {
+            if (std::abs(placement.rects[a].x - placement.rects[b].x) > kEps) {
+                return placement.rects[a].x < placement.rects[b].x;
+            }
+            return placement.rects[a].y < placement.rects[b].y;
+        });
+        for (int idx : order) {
+            placeWithContour(problem, placement, placed, idx, placement.rects[idx].x, placement.rects[idx].y);
+        }
+        return placement;
+    }
+
+    bool isValidState(const Problem& problem, const PlacementState& state) const override {
+        std::vector<int> expected = movableBlocks(problem);
+        return sameElements(expected, state.sequence_pos) && sameElements(expected, state.sequence_neg);
+    }
+};
+
+class BStarEngine final : public PlacementEngine {
+public:
+    std::string name() const override { return "bstar"; }
+
+    PlacementState initialState(const Problem& problem, std::mt19937&) const override {
+        PlacementState state = baseState(problem);
+        state.nodes = movableBlocks(problem);
+        int n = static_cast<int>(state.nodes.size());
+        state.parent.assign(n, -1);
+        state.left.assign(n, -1);
+        state.right.assign(n, -1);
+        state.root = n > 0 ? 0 : -1;
+        for (int i = 1; i < n; ++i) {
+            state.parent[i] = i - 1;
+            state.left[i - 1] = i;
+        }
+        return state;
+    }
+
+    PlacementState seedFromPlacement(const Problem& problem, const Placement& placement, std::mt19937&) const override {
+        PlacementState state = baseState(problem);
+        state.nodes = movableBlocks(problem);
+        std::sort(state.nodes.begin(), state.nodes.end(), [&](int a, int b) {
+            if (std::abs(placement.rects[a].x - placement.rects[b].x) > kEps) {
+                return placement.rects[a].x < placement.rects[b].x;
+            }
+            return placement.rects[a].y < placement.rects[b].y;
+        });
+        int n = static_cast<int>(state.nodes.size());
+        state.parent.assign(n, -1);
+        state.left.assign(n, -1);
+        state.right.assign(n, -1);
+        state.root = n > 0 ? 0 : -1;
+        for (int i = 1; i < n; ++i) {
+            state.parent[i] = i - 1;
+            state.left[i - 1] = i;
+        }
+        return state;
+    }
+
+    void mutate(const Problem& problem, PlacementState& state, std::mt19937& rng) const override {
+        if (!isValidState(problem, state)) state = initialState(problem, rng);
+        std::uniform_int_distribution<int> move_dist(0, 3);
+        int move = move_dist(rng);
+        int n = static_cast<int>(state.nodes.size());
+        if (move == 0 && n >= 2) {
+            std::uniform_int_distribution<int> pick(0, n - 1);
+            int a = pick(rng);
+            int b = pick(rng);
+            std::swap(state.nodes[a], state.nodes[b]);
+        } else if (move == 1 && n >= 2) {
+            moveLeaf(state, rng);
+        } else if (move == 2) {
+            mutateSoftAspect(problem, state, rng);
+        } else {
+            mutateEdgeChoice(problem, state, rng);
+        }
+    }
+
+    Placement decode(const Problem& problem, const PlacementState& state) const override {
+        Placement placement = basePlacement(problem, state);
+        if (state.root < 0 || state.nodes.empty()) return placement;
+
+        std::vector<bool> placed(problem.blocks.size(), false);
+        for (std::size_t i = 0; i < problem.blocks.size(); ++i) placed[i] = isEdge(problem.blocks[i].type);
+
+        std::vector<int> stack{state.root};
+        std::vector<bool> seen(state.nodes.size(), false);
+        while (!stack.empty()) {
+            int node = stack.back();
+            stack.pop_back();
+            if (node < 0 || node >= static_cast<int>(state.nodes.size()) || seen[node]) continue;
+            seen[node] = true;
+
+            int block_idx = state.nodes[node];
+            double desired_x = 0.0;
+            int parent = state.parent[node];
+            if (parent >= 0 && parent < static_cast<int>(state.nodes.size())) {
+                int parent_block = state.nodes[parent];
+                if (state.left[parent] == node) {
+                    desired_x = placement.rects[parent_block].right();
+                } else {
+                    desired_x = placement.rects[parent_block].x;
+                }
+            }
+            placeWithContour(problem, placement, placed, block_idx, desired_x, 0.0);
+
+            if (node < static_cast<int>(state.right.size()) && state.right[node] >= 0) stack.push_back(state.right[node]);
+            if (node < static_cast<int>(state.left.size()) && state.left[node] >= 0) stack.push_back(state.left[node]);
+        }
+
+        for (std::size_t i = 0; i < state.nodes.size(); ++i) {
+            if (!seen[i]) placeWithContour(problem, placement, placed, state.nodes[i], 0.0, 0.0);
+        }
+        return placement;
+    }
+
+    bool isValidState(const Problem& problem, const PlacementState& state) const override {
+        std::vector<int> expected = movableBlocks(problem);
+        if (!sameElements(expected, state.nodes)) return false;
+        int n = static_cast<int>(state.nodes.size());
+        if (n == 0) return state.root == -1;
+        if (state.root < 0 || state.root >= n) return false;
+        if (state.parent.size() != state.nodes.size() || state.left.size() != state.nodes.size() ||
+            state.right.size() != state.nodes.size()) {
+            return false;
+        }
+        if (state.parent[state.root] != -1) return false;
+
+        std::vector<int> seen(n, 0);
+        return validateNode(state, state.root, -1, seen) && std::all_of(seen.begin(), seen.end(), [](int v) {
+                   return v == 1;
+               });
+    }
+
+private:
+    static bool validateNode(const PlacementState& state, int node, int expected_parent, std::vector<int>& seen) {
+        if (node < 0 || node >= static_cast<int>(state.nodes.size())) return false;
+        if (seen[node] != 0) return false;
+        if (state.parent[node] != expected_parent) return false;
+        seen[node] = 1;
+        int left = state.left[node];
+        int right = state.right[node];
+        if (left >= 0 && !validateNode(state, left, node, seen)) return false;
+        if (right >= 0 && !validateNode(state, right, node, seen)) return false;
+        return true;
+    }
+
+    static void moveLeaf(PlacementState& state, std::mt19937& rng) {
+        std::vector<int> leaves;
+        int n = static_cast<int>(state.nodes.size());
+        for (int i = 0; i < n; ++i) {
+            if (i != state.root && state.left[i] < 0 && state.right[i] < 0) leaves.push_back(i);
+        }
+        if (leaves.empty()) return;
+
+        std::uniform_int_distribution<int> pick_leaf(0, static_cast<int>(leaves.size()) - 1);
+        int leaf = leaves[pick_leaf(rng)];
+        int old_parent = state.parent[leaf];
+        if (old_parent >= 0) {
+            if (state.left[old_parent] == leaf) state.left[old_parent] = -1;
+            if (state.right[old_parent] == leaf) state.right[old_parent] = -1;
+        }
+        state.parent[leaf] = -1;
+
+        std::vector<int> targets;
+        for (int i = 0; i < n; ++i) {
+            if (i == leaf) continue;
+            if (state.left[i] < 0 || state.right[i] < 0) targets.push_back(i);
+        }
+        if (targets.empty()) {
+            state.parent[leaf] = old_parent;
+            if (old_parent >= 0) state.left[old_parent] = leaf;
+            return;
+        }
+
+        std::uniform_int_distribution<int> pick_target(0, static_cast<int>(targets.size()) - 1);
+        int target = targets[pick_target(rng)];
+        bool use_left = state.left[target] < 0;
+        if (state.left[target] < 0 && state.right[target] < 0) {
+            std::uniform_int_distribution<int> side(0, 1);
+            use_left = side(rng) == 0;
+        }
+        if (use_left) {
+            state.left[target] = leaf;
+        } else {
+            state.right[target] = leaf;
+        }
+        state.parent[leaf] = target;
+    }
+};
+
+}  // namespace
+
+PlacementState PlacementEngine::seedFromPlacement(const Problem& problem, const Placement&, std::mt19937& rng) const {
+    return initialState(problem, rng);
+}
+
+std::unique_ptr<PlacementEngine> makePlacementEngine(const std::string& name) {
+    if (name == "sp" || name == "sequence-pair" || name == "sequence_pair") {
+        return std::unique_ptr<PlacementEngine>(new SequencePairEngine());
+    }
+    if (name == "bstar" || name == "b-tree" || name == "btree") {
+        return std::unique_ptr<PlacementEngine>(new BStarEngine());
+    }
+    throw std::invalid_argument("unknown placement engine: " + name);
+}
+
+std::vector<std::string> placementEngineNames() {
+    return {"sp", "bstar", "hybrid"};
+}
+
+}  // namespace efgr
