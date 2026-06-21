@@ -9,6 +9,52 @@
 #include "eval.hpp"
 
 namespace efgr {
+namespace {
+
+bool axisOverlap(double a0, double a1, double b0, double b1) {
+    return std::min(a1, b1) - std::max(a0, b0) > kEps;
+}
+
+Placement compactTowardOrigin(const Problem& problem, Placement placement) {
+    std::vector<int> order;
+    for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
+        if (!isEdge(problem.blocks[i].type)) order.push_back(static_cast<int>(i));
+    }
+    std::sort(order.begin(), order.end(), [&](int a, int b) {
+        double ka = placement.rects[a].x + placement.rects[a].y;
+        double kb = placement.rects[b].x + placement.rects[b].y;
+        if (std::abs(ka - kb) > kEps) return ka < kb;
+        return a < b;
+    });
+
+    for (int pass = 0; pass < 3; ++pass) {
+        for (int idx : order) {
+            Rect& r = placement.rects[idx];
+            double x = 0.0;
+            for (std::size_t j = 0; j < placement.rects.size(); ++j) {
+                if (static_cast<int>(j) == idx) continue;
+                const Rect& o = placement.rects[j];
+                if (o.right() <= r.x + kEps && axisOverlap(r.y, r.top(), o.y, o.top())) {
+                    x = std::max(x, o.right());
+                }
+            }
+            r.x = std::min(std::max(0.0, x), std::max(0.0, problem.outline_w - r.w));
+
+            double y = 0.0;
+            for (std::size_t j = 0; j < placement.rects.size(); ++j) {
+                if (static_cast<int>(j) == idx) continue;
+                const Rect& o = placement.rects[j];
+                if (o.top() <= r.y + kEps && axisOverlap(r.x, r.right(), o.x, o.right())) {
+                    y = std::max(y, o.top());
+                }
+            }
+            r.y = std::min(std::max(0.0, y), std::max(0.0, problem.outline_h - r.h));
+        }
+    }
+    return placement;
+}
+
+}  // namespace
 
 std::string placementKey(const Placement& placement) {
     std::ostringstream out;
@@ -58,6 +104,26 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
     };
     result.best_score = exactCached(result.best_placement, &result.best_routing);
 
+    struct CheapCandidate {
+        double value;
+        Placement placement;
+        std::string key;
+    };
+    std::vector<CheapCandidate> top_candidates;
+    auto rememberCandidate = [&](const Placement& placement, const Score& score) {
+        std::string key = placementKey(placement);
+        for (const auto& candidate : top_candidates) {
+            if (candidate.key == key) return;
+        }
+        top_candidates.push_back(CheapCandidate{score.value, placement, key});
+        std::sort(top_candidates.begin(), top_candidates.end(), [](const CheapCandidate& a, const CheapCandidate& b) {
+            return a.value < b.value;
+        });
+        constexpr std::size_t kTopCheapCandidates = 16;
+        if (top_candidates.size() > kTopCheapCandidates) top_candidates.resize(kTopCheapCandidates);
+    };
+    rememberCandidate(result.best_placement, current_score);
+
     double temp = std::max(1.0, options.initial_temperature);
     int exact_interval = std::max(1, options.exact_interval);
     for (int iter = 1; iter <= options.iters; ++iter) {
@@ -67,6 +133,7 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
 
         Placement cand_place = engine.decode(problem, candidate);
         Score cand_score = cheapScore(problem, cand_place);
+        rememberCandidate(cand_place, cand_score);
         double delta = cand_score.value - current_score.value;
         std::uniform_real_distribution<double> unit(0.0, 1.0);
         if (delta <= 0.0 || std::exp(-delta / std::max(1.0, temp)) > unit(rng)) {
@@ -86,6 +153,24 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
             }
         }
         temp *= options.cooling;
+    }
+
+    for (const auto& candidate : top_candidates) {
+        RoutingResult routing;
+        Score exact = exactCached(candidate.placement, &routing);
+        if (exact.value < result.best_score.value) {
+            result.best_score = exact;
+            result.best_placement = candidate.placement;
+            result.best_routing = routing;
+        }
+
+        Placement compacted = compactTowardOrigin(problem, candidate.placement);
+        Score compact_exact = exactCached(compacted, &routing);
+        if (compact_exact.value < result.best_score.value) {
+            result.best_score = compact_exact;
+            result.best_placement = compacted;
+            result.best_routing = routing;
+        }
     }
 
     (void)best_state;

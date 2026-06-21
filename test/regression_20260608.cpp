@@ -36,8 +36,8 @@ int testHorizontalChannelCapacityUsesHeight() {
     p.outline_w = 70.0;
     p.outline_h = 100.0;
     p.blocks = {
-        Block{"SRC", 1000.0, 10.0, 100.0, 1.0, 1.0, BlockType::Macro, {}, {0.2, 0.4, 0.8, 1.0}, 0},
-        Block{"DST", 1000.0, 10.0, 100.0, 1.0, 1.0, BlockType::Macro, {}, {0.2, 0.4, 0.8, 1.0}, 0},
+        Block{"SRC", 1000.0, 10.0, 100.0, 1.0, 1.0, BlockType::Macro, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
+        Block{"DST", 1000.0, 10.0, 100.0, 1.0, 1.0, BlockType::Macro, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
     };
     p.block_index["SRC"] = 0;
     p.block_index["DST"] = 1;
@@ -60,9 +60,9 @@ int testFeedthroughMismatchIsMeasured() {
     p.outline_w = 200.0;
     p.outline_h = 100.0;
     p.blocks = {
-        Block{"SRC", 1000.0, 10.0, 100.0, 1.0, 1.0, BlockType::Macro, {}, {0.2, 0.4, 0.8, 1.0}, 0},
-        Block{"MID", 10000.0, 0.0, 0.0, 1.0, 1.0, BlockType::Soft, {}, {0.2, 0.4, 0.8, 1.0}, 0},
-        Block{"DST", 1000.0, 10.0, 100.0, 1.0, 1.0, BlockType::Macro, {}, {0.2, 0.4, 0.8, 1.0}, 0},
+        Block{"SRC", 1000.0, 10.0, 100.0, 1.0, 1.0, BlockType::Macro, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
+        Block{"MID", 10000.0, 0.0, 0.0, 1.0, 1.0, BlockType::Soft, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
+        Block{"DST", 1000.0, 10.0, 100.0, 1.0, 1.0, BlockType::Macro, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
     };
     p.block_index["SRC"] = 0;
     p.block_index["MID"] = 1;
@@ -90,9 +90,9 @@ int testLargeBundleSplitsAcrossParallelChannels() {
     p.outline_w = 200.0;
     p.outline_h = 100.0;
     p.blocks = {
-        Block{"SRC", 1000.0, 10.0, 100.0, 1.0, 1.0, BlockType::Macro, {}, {0.2, 0.4, 0.8, 1.0}, 0},
-        Block{"OBS", 200.0, 10.0, 20.0, 1.0, 1.0, BlockType::Macro, {}, {0.2, 0.4, 0.8, 1.0}, 0},
-        Block{"DST", 1000.0, 10.0, 100.0, 1.0, 1.0, BlockType::Macro, {}, {0.2, 0.4, 0.8, 1.0}, 0},
+        Block{"SRC", 1000.0, 10.0, 100.0, 1.0, 1.0, BlockType::Macro, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
+        Block{"OBS", 200.0, 10.0, 20.0, 1.0, 1.0, BlockType::Macro, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
+        Block{"DST", 1000.0, 10.0, 100.0, 1.0, 1.0, BlockType::Macro, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
     };
     p.block_index["SRC"] = 0;
     p.block_index["OBS"] = 1;

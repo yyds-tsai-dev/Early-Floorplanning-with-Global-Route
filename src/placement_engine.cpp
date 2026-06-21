@@ -25,6 +25,9 @@ bool locInBottomBand(const std::string& loc) { return loc.find('B') != std::stri
 bool locInLeftBand(const std::string& loc) { return loc.find('L') != std::string::npos; }
 bool locInRightBand(const std::string& loc) { return loc.find('R') != std::string::npos; }
 
+bool collidesWithPlaced(const std::vector<Rect>& rects, const std::vector<bool>& placed, int self,
+                        const Rect& candidate);
+
 Rect placeEdge(const Problem& problem, const Block& block, const std::vector<std::string>& locs) {
     Rect r = dimensionFor(block, 1.0);
     double third_w = problem.outline_w / 3.0;
@@ -56,6 +59,152 @@ Rect placeEdge(const Problem& problem, const Block& block, const std::vector<std
     r.x = std::max(0.0, std::min(r.x, problem.outline_w - r.w));
     r.y = std::max(0.0, std::min(r.y, problem.outline_h - r.h));
     return r;
+}
+
+char locSide(const std::string& loc) {
+    return loc.empty() ? '\0' : loc[0];
+}
+
+std::pair<double, double> locSegment(const Problem& problem, const std::string& loc) {
+    double third_w = problem.outline_w / 3.0;
+    double third_h = problem.outline_h / 3.0;
+    if (loc == "TL" || loc == "BL") return {0.0, third_w};
+    if (loc == "TM" || loc == "BM") return {third_w, 2.0 * third_w};
+    if (loc == "TR" || loc == "BR") return {2.0 * third_w, problem.outline_w};
+    if (loc == "LB" || loc == "RB") return {0.0, third_h};
+    if (loc == "LM" || loc == "RM") return {third_h, 2.0 * third_h};
+    if (loc == "LT" || loc == "RT") return {2.0 * third_h, problem.outline_h};
+    return {0.0, 0.0};
+}
+
+bool positiveOverlap(double a0, double a1, double b0, double b1) {
+    return std::min(a1, b1) - std::max(a0, b0) > kEps;
+}
+
+bool rectTouchesLocation(const Problem& problem, const Rect& rect, const std::string& loc) {
+    auto [lo, hi] = locSegment(problem, loc);
+    char side = locSide(loc);
+    if (side == 'T') return std::abs(rect.top() - problem.outline_h) < kEps && positiveOverlap(rect.x, rect.right(), lo, hi);
+    if (side == 'B') return std::abs(rect.y) < kEps && positiveOverlap(rect.x, rect.right(), lo, hi);
+    if (side == 'L') return std::abs(rect.x) < kEps && positiveOverlap(rect.y, rect.top(), lo, hi);
+    if (side == 'R') return std::abs(rect.right() - problem.outline_w) < kEps && positiveOverlap(rect.y, rect.top(), lo, hi);
+    return true;
+}
+
+bool edgeRectLegal(const Problem& problem, const Block& block, const Rect& rect) {
+    if (block.locations.empty()) return true;
+    std::vector<char> sides;
+    for (const auto& loc : block.locations) {
+        char side = locSide(loc);
+        if (std::find(sides.begin(), sides.end(), side) == sides.end()) sides.push_back(side);
+    }
+    if (sides.size() == 1) {
+        for (const auto& loc : block.locations) {
+            if (rectTouchesLocation(problem, rect, loc)) return true;
+        }
+        return false;
+    }
+    for (const auto& loc : block.locations) {
+        if (!rectTouchesLocation(problem, rect, loc)) return false;
+    }
+    return true;
+}
+
+bool hasMultipleBoundarySides(const Block& block) {
+    std::vector<char> sides;
+    for (const auto& loc : block.locations) {
+        char side = locSide(loc);
+        if (std::find(sides.begin(), sides.end(), side) == sides.end()) sides.push_back(side);
+    }
+    return sides.size() > 1;
+}
+
+void addCandidate(std::vector<double>& values, double value, double lo, double hi) {
+    values.push_back(std::max(lo, std::min(hi, value)));
+}
+
+Rect firstLegalEdgeSlot(const Problem& problem, const Block& block, const std::vector<Rect>& rects,
+                        const std::vector<bool>& placed, int idx) {
+    Rect base = dimensionFor(block, 1.0);
+    std::vector<std::string> locs = block.locations.empty() ? std::vector<std::string>{"TL"} : block.locations;
+    if (hasMultipleBoundarySides(block)) return placeEdge(problem, block, locs);
+
+    char side = locSide(locs.front());
+    std::vector<double> coords;
+    double lo = 0.0;
+    double hi = 0.0;
+    if (side == 'T' || side == 'B') {
+        hi = std::max(0.0, problem.outline_w - base.w);
+        for (const auto& loc : locs) {
+            auto [seg_lo, seg_hi] = locSegment(problem, loc);
+            addCandidate(coords, seg_lo, lo, hi);
+            addCandidate(coords, seg_hi - base.w, lo, hi);
+        }
+        for (std::size_t i = 0; i < rects.size(); ++i) {
+            if (!placed[i]) continue;
+            addCandidate(coords, rects[i].right(), lo, hi);
+            addCandidate(coords, rects[i].x - base.w, lo, hi);
+        }
+    } else {
+        hi = std::max(0.0, problem.outline_h - base.h);
+        for (const auto& loc : locs) {
+            auto [seg_lo, seg_hi] = locSegment(problem, loc);
+            addCandidate(coords, seg_lo, lo, hi);
+            addCandidate(coords, seg_hi - base.h, lo, hi);
+        }
+        for (std::size_t i = 0; i < rects.size(); ++i) {
+            if (!placed[i]) continue;
+            addCandidate(coords, rects[i].top(), lo, hi);
+            addCandidate(coords, rects[i].y - base.h, lo, hi);
+        }
+    }
+    std::sort(coords.begin(), coords.end());
+    coords.erase(std::unique(coords.begin(), coords.end(), [](double a, double b) {
+                     return std::abs(a - b) < kEps;
+                 }),
+                 coords.end());
+
+    for (double coord : coords) {
+        Rect candidate = base;
+        if (side == 'T') {
+            candidate.x = coord;
+            candidate.y = problem.outline_h - candidate.h;
+        } else if (side == 'B') {
+            candidate.x = coord;
+            candidate.y = 0.0;
+        } else if (side == 'L') {
+            candidate.x = 0.0;
+            candidate.y = coord;
+        } else if (side == 'R') {
+            candidate.x = problem.outline_w - candidate.w;
+            candidate.y = coord;
+        }
+        if (!edgeRectLegal(problem, block, candidate)) continue;
+        if (!collidesWithPlaced(rects, placed, idx, candidate)) return candidate;
+    }
+    return placeEdge(problem, block, locs);
+}
+
+void legalizeEdgeBlocks(const Problem& problem, Placement& placement) {
+    std::vector<int> edges;
+    for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
+        if (isEdge(problem.blocks[i].type)) edges.push_back(static_cast<int>(i));
+    }
+    std::sort(edges.begin(), edges.end(), [&](int a, int b) {
+        bool ac = hasMultipleBoundarySides(problem.blocks[a]);
+        bool bc = hasMultipleBoundarySides(problem.blocks[b]);
+        if (ac != bc) return ac > bc;
+        double as = std::max(placement.rects[a].w, placement.rects[a].h);
+        double bs = std::max(placement.rects[b].w, placement.rects[b].h);
+        if (std::abs(as - bs) > kEps) return as > bs;
+        return a < b;
+    });
+
+    std::vector<bool> placed(problem.blocks.size(), false);
+    for (int idx : edges) {
+        placement.rects[idx] = firstLegalEdgeSlot(problem, problem.blocks[idx], placement.rects, placed, idx);
+        placed[idx] = true;
+    }
 }
 
 std::vector<std::string> chosenEdgeLocation(const Problem& problem, const PlacementState& state, int block_idx) {
@@ -109,6 +258,7 @@ Placement basePlacement(const Problem& problem, const PlacementState& state) {
                                            chosenEdgeLocation(problem, state, static_cast<int>(i)));
         }
     }
+    legalizeEdgeBlocks(problem, placement);
     return placement;
 }
 

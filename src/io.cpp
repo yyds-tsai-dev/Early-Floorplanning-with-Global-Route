@@ -25,14 +25,26 @@ std::vector<std::vector<std::string>> readCsv(const std::string& path) {
             } else {
                 in_quote = !in_quote;
             }
-        } else if (c == ',' && !in_quote) {
-            row.push_back(trim(field));
-            field.clear();
-        } else if ((c == '\n' || c == '\r') && !in_quote) {
-            if (c == '\r' && in.peek() == '\n') in.get(c);
-            row.push_back(trim(field));
-            field.clear();
-            rows.push_back(row);
+            } else if (c == ',' && !in_quote) {
+                if (rows.empty() && row.empty() && field.size() >= 3 &&
+                    static_cast<unsigned char>(field[0]) == 0xEF &&
+                    static_cast<unsigned char>(field[1]) == 0xBB &&
+                    static_cast<unsigned char>(field[2]) == 0xBF) {
+                    field.erase(0, 3);
+                }
+                row.push_back(trim(field));
+                field.clear();
+            } else if ((c == '\n' || c == '\r') && !in_quote) {
+                if (c == '\r' && in.peek() == '\n') in.get(c);
+                if (rows.empty() && row.empty() && field.size() >= 3 &&
+                    static_cast<unsigned char>(field[0]) == 0xEF &&
+                    static_cast<unsigned char>(field[1]) == 0xBB &&
+                    static_cast<unsigned char>(field[2]) == 0xBF) {
+                    field.erase(0, 3);
+                }
+                row.push_back(trim(field));
+                field.clear();
+                rows.push_back(row);
             row.clear();
         } else {
             field.push_back(c);
@@ -71,6 +83,17 @@ std::vector<std::string> splitLocations(const std::string& s) {
     return out;
 }
 
+std::vector<int> splitEdges(const std::string& s) {
+    std::vector<int> out;
+    std::stringstream ss(s);
+    std::string item;
+    while (std::getline(ss, item, ',')) {
+        int edge = static_cast<int>(std::llround(parseDouble(item, 0.0)));
+        if (edge >= 1 && edge <= 4) out.push_back(edge);
+    }
+    return out;
+}
+
 void parseAspect(Block& b, const std::string& value) {
     std::string v = trim(value);
     auto pos = v.find(',');
@@ -92,6 +115,23 @@ BlockType parseType(const std::string& s) {
     if (t.find("EDGE") != std::string::npos) return BlockType::Edge;
     if (t.find("MACRO") != std::string::npos || t.find("HARD") != std::string::npos) return BlockType::Macro;
     return BlockType::Soft;
+}
+
+std::pair<double, double> usedOutline(const Problem& problem, const Placement& placement,
+                                      const RoutingResult& routing) {
+    double w = 0.0;
+    double h = 0.0;
+    for (const auto& r : placement.rects) {
+        w = std::max(w, r.right());
+        h = std::max(h, r.top());
+    }
+    for (const auto& ch : routing.channels) {
+        w = std::max(w, ch.rect.right());
+        h = std::max(h, ch.rect.top());
+    }
+    w = std::max(1.0, std::min(problem.outline_w, w));
+    h = std::max(1.0, std::min(problem.outline_h, h));
+    return {w, h};
 }
 
 }  // namespace
@@ -121,7 +161,8 @@ Problem parseProblem(const std::string& path) {
             b.locations = splitLocations(row.size() > 6 ? row[6] : "");
             std::size_t ft_start = 7;
             if (row.size() > 7 && !row[7].empty() && !hasPercent(row[7])) {
-                b.port_edge = static_cast<int>(std::llround(parseDouble(row[7], 0.0)));
+                b.port_edges = splitEdges(row[7]);
+                b.port_edge = b.port_edges.empty() ? 0 : b.port_edges.front();
                 ft_start = 8;
             }
             for (std::size_t i = ft_start; i < row.size() && b.ft_rates.size() < 4; ++i) {
@@ -172,7 +213,8 @@ void writeCfg(const std::string& path, const Problem& problem, const Placement& 
     std::ofstream out(path);
     if (!out) throw std::runtime_error("cannot open output cfg: " + path);
     out << std::fixed << std::setprecision(3);
-    out << "OUTLINE " << problem.outline_w << " " << problem.outline_h << "\nEND\n";
+    auto [used_w, used_h] = usedOutline(problem, placement, routing);
+    out << "OUTLINE " << used_w << " " << used_h << "\nEND\n";
     out << "BLOCK\n";
     for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
         const auto& r = placement.rects[i];

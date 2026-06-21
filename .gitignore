@@ -1,3 +1,16 @@
+# Build outputs
 bin/
-src/*.o
+
+# Object files
+*.o
+
+# Python virtual environments
+.venv/
+
+# Local worktrees
 .worktrees/
+
+# Archive files
+*.rar
+
+/tmp

@@ -7,35 +7,60 @@ bool near(double a, double b) {
     return std::abs(a - b) < kEps;
 }
 
-bool inRange(double lo, double value, double hi) {
-    return value + kEps >= lo && value <= hi + kEps;
+char locSide(const std::string& loc) {
+    return loc.empty() ? '\0' : loc[0];
+}
+
+bool positiveOverlap(double a0, double a1, double b0, double b1) {
+    return std::min(a1, b1) - std::max(a0, b0) > kEps;
+}
+
+std::pair<double, double> locSegment(const Problem& problem, const std::string& loc) {
+    double third_w = problem.outline_w / 3.0;
+    double third_h = problem.outline_h / 3.0;
+    if (loc == "TL" || loc == "BL") return {0.0, third_w};
+    if (loc == "TM" || loc == "BM") return {third_w, 2.0 * third_w};
+    if (loc == "TR" || loc == "BR") return {2.0 * third_w, problem.outline_w};
+    if (loc == "LB" || loc == "RB") return {0.0, third_h};
+    if (loc == "LM" || loc == "RM") return {third_h, 2.0 * third_h};
+    if (loc == "LT" || loc == "RT") return {2.0 * third_h, problem.outline_h};
+    return {0.0, 0.0};
 }
 
 bool satisfiesEdgeLocation(const Rect& r, const Problem& problem, const std::string& loc) {
-    double third_w = problem.outline_w / 3.0;
-    double third_h = problem.outline_h / 3.0;
-    if (loc == "TL") return near(r.top(), problem.outline_h) && inRange(0.0, r.x, third_w) && r.right() <= third_w + kEps;
-    if (loc == "TM") return near(r.top(), problem.outline_h) && inRange(third_w, r.x, 2.0 * third_w) && r.right() <= 2.0 * third_w + kEps;
-    if (loc == "TR") return near(r.top(), problem.outline_h) && r.x + kEps >= 2.0 * third_w && near(r.right(), problem.outline_w);
-    if (loc == "BL") return near(r.y, 0.0) && inRange(0.0, r.x, third_w) && r.right() <= third_w + kEps;
-    if (loc == "BM") return near(r.y, 0.0) && inRange(third_w, r.x, 2.0 * third_w) && r.right() <= 2.0 * third_w + kEps;
-    if (loc == "BR") return near(r.y, 0.0) && r.x + kEps >= 2.0 * third_w && near(r.right(), problem.outline_w);
-    if (loc == "LT") return near(r.x, 0.0) && r.y + kEps >= 2.0 * third_h && near(r.top(), problem.outline_h);
-    if (loc == "LM") return near(r.x, 0.0) && inRange(third_h, r.y, 2.0 * third_h) && r.top() <= 2.0 * third_h + kEps;
-    if (loc == "LB") return near(r.x, 0.0) && inRange(0.0, r.y, third_h) && r.top() <= third_h + kEps;
-    if (loc == "RT") return near(r.right(), problem.outline_w) && r.y + kEps >= 2.0 * third_h && near(r.top(), problem.outline_h);
-    if (loc == "RM") return near(r.right(), problem.outline_w) && inRange(third_h, r.y, 2.0 * third_h) && r.top() <= 2.0 * third_h + kEps;
-    if (loc == "RB") return near(r.right(), problem.outline_w) && inRange(0.0, r.y, third_h) && r.top() <= third_h + kEps;
+    char side = locSide(loc);
+    auto [lo, hi] = locSegment(problem, loc);
+    if (side == 'T') return near(r.top(), problem.outline_h) && positiveOverlap(r.x, r.right(), lo, hi);
+    if (side == 'B') return near(r.y, 0.0) && positiveOverlap(r.x, r.right(), lo, hi);
+    if (side == 'L') return near(r.x, 0.0) && positiveOverlap(r.y, r.top(), lo, hi);
+    if (side == 'R') return near(r.right(), problem.outline_w) && positiveOverlap(r.y, r.top(), lo, hi);
     return true;
 }
 
-bool satisfiesEdgeBoundary(const Rect& r, const Problem& problem, const std::string& loc) {
-    if (loc.empty()) return true;
-    if (loc[0] == 'T') return near(r.top(), problem.outline_h);
-    if (loc[0] == 'B') return near(r.y, 0.0);
-    if (loc[0] == 'L') return near(r.x, 0.0);
-    if (loc[0] == 'R') return near(r.right(), problem.outline_w);
+bool satisfiesEdgeLocations(const Rect& r, const Problem& problem, const std::vector<std::string>& locs) {
+    if (locs.empty()) return true;
+    std::vector<char> sides;
+    for (const auto& loc : locs) {
+        char side = locSide(loc);
+        if (std::find(sides.begin(), sides.end(), side) == sides.end()) sides.push_back(side);
+    }
+    if (sides.size() == 1) {
+        for (const auto& loc : locs) {
+            if (satisfiesEdgeLocation(r, problem, loc)) return true;
+        }
+        return false;
+    }
+    for (const auto& loc : locs) {
+        if (!satisfiesEdgeLocation(r, problem, loc)) return false;
+    }
     return true;
+}
+
+bool portAllows(const Block& block, int edge) {
+    if (!block.port_edges.empty()) {
+        return std::find(block.port_edges.begin(), block.port_edges.end(), edge) != block.port_edges.end();
+    }
+    return block.port_edge <= 0 || block.port_edge == edge;
 }
 
 }  // namespace
@@ -57,13 +82,8 @@ ValidationResult validateSolution(const Problem& problem, const Placement& place
             }
         }
         if (isEdge(problem.blocks[i].type)) {
-            for (const auto& loc : problem.blocks[i].locations) {
-                bool ok = problem.blocks[i].locations.size() > 1
-                              ? satisfiesEdgeBoundary(r, problem, loc)
-                              : satisfiesEdgeLocation(r, problem, loc);
-                if (!ok) {
-                    fail("edge location violation: " + problem.blocks[i].name + " " + loc);
-                }
+            if (!satisfiesEdgeLocations(r, problem, problem.blocks[i].locations)) {
+                fail("edge location violation: " + problem.blocks[i].name);
             }
         }
         for (std::size_t j = i + 1; j < placement.rects.size(); ++j) {
@@ -75,13 +95,13 @@ ValidationResult validateSolution(const Problem& problem, const Placement& place
         if (!route.open && !route.steps.empty()) {
             if (route.source >= 0 && route.source < static_cast<int>(problem.blocks.size())) {
                 const auto& source = problem.blocks[route.source];
-                if (source.port_edge > 0 && route.steps.front().edge != source.port_edge) {
+                if (!portAllows(source, route.steps.front().edge)) {
                     fail("source port edge violation: " + source.name);
                 }
             }
             if (route.target >= 0 && route.target < static_cast<int>(problem.blocks.size())) {
                 const auto& target = problem.blocks[route.target];
-                if (target.port_edge > 0 && route.steps.back().edge != target.port_edge) {
+                if (!portAllows(target, route.steps.back().edge)) {
                     fail("target port edge violation: " + target.name);
                 }
             }
