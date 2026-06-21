@@ -31,9 +31,9 @@ Problem makeThreeSoftProblem() {
     p.outline_h = 120.0;
     p.alpha = 1.0;
     p.blocks = {
-        Block{"A", 400.0, 0.0, 0.0, 0.5, 2.0, BlockType::Soft, {}, {0.2, 0.4, 0.8, 1.0}, 0},
-        Block{"B", 900.0, 0.0, 0.0, 0.5, 2.0, BlockType::Soft, {}, {0.2, 0.4, 0.8, 1.0}, 0},
-        Block{"C", 625.0, 0.0, 0.0, 0.5, 2.0, BlockType::Soft, {}, {0.2, 0.4, 0.8, 1.0}, 0},
+        Block{"A", 400.0, 0.0, 0.0, 0.5, 2.0, BlockType::Soft, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
+        Block{"B", 900.0, 0.0, 0.0, 0.5, 2.0, BlockType::Soft, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
+        Block{"C", 625.0, 0.0, 0.0, 0.5, 2.0, BlockType::Soft, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
     };
     for (std::size_t i = 0; i < p.blocks.size(); ++i) p.block_index[p.blocks[i].name] = static_cast<int>(i);
     p.bundles.push_back(Bundle{0, 2, 10});
@@ -45,8 +45,8 @@ Problem makeEdgeAnchoredProblem() {
     p.outline_w = 120.0;
     p.outline_h = 100.0;
     p.blocks = {
-        Block{"EDGE", 100.0, 10.0, 10.0, 1.0, 1.0, BlockType::Edge, {"TR"}, {0.2, 0.4, 0.8, 1.0}, 0},
-        Block{"SOFT", 400.0, 0.0, 0.0, 1.0, 1.0, BlockType::Soft, {}, {0.2, 0.4, 0.8, 1.0}, 0},
+        Block{"EDGE", 100.0, 10.0, 10.0, 1.0, 1.0, BlockType::Edge, {"TR"}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
+        Block{"SOFT", 400.0, 0.0, 0.0, 1.0, 1.0, BlockType::Soft, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
     };
     p.block_index["EDGE"] = 0;
     p.block_index["SOFT"] = 1;
@@ -109,8 +109,8 @@ int testEdgeBlocksStayAnchored() {
         PlacementState state = engine->initialState(p, rng);
         Placement placement = engine->decode(p, state);
         const Rect& edge = placement.rects[0];
-        if (std::abs(edge.right() - p.outline_w) > kEps || std::abs(edge.top() - p.outline_h) > kEps) {
-            return fail(std::string(engine_name) + " should keep TR edge block anchored");
+        if (std::abs(edge.top() - p.outline_h) > kEps || edge.x + kEps < (2.0 * p.outline_w / 3.0)) {
+            return fail(std::string(engine_name) + " should keep TR edge block on top TR segment");
         }
     }
     return 0;

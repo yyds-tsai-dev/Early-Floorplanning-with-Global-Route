@@ -42,6 +42,13 @@ double ftRateFor(const Block& block, double nets) {
     return block.ft_rates.size() > 3 ? block.ft_rates[3] : block.ft_rates.back();
 }
 
+bool portAllows(const Block& block, int edge) {
+    if (!block.port_edges.empty()) {
+        return std::find(block.port_edges.begin(), block.port_edges.end(), edge) != block.port_edges.end();
+    }
+    return block.port_edge <= 0 || block.port_edge == edge;
+}
+
 }  // namespace
 
 std::vector<Channel> extractChannels(const Problem& problem, const Placement& placement) {
@@ -111,11 +118,11 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement) {
     };
 
     auto endpointEdgeAllowed = [&](int u, int v, int source, int target) {
-        if (u < n_blocks && (u == source || u == target) && problem.blocks[u].port_edge > 0) {
-            if (edgeFromTo(rects[u], rects[v]) != problem.blocks[u].port_edge) return false;
+        if (u < n_blocks && (u == source || u == target)) {
+            if (!portAllows(problem.blocks[u], edgeFromTo(rects[u], rects[v]))) return false;
         }
-        if (v < n_blocks && (v == source || v == target) && problem.blocks[v].port_edge > 0) {
-            if (edgeFromTo(rects[v], rects[u]) != problem.blocks[v].port_edge) return false;
+        if (v < n_blocks && (v == source || v == target)) {
+            if (!portAllows(problem.blocks[v], edgeFromTo(rects[v], rects[u]))) return false;
         }
         return true;
     };

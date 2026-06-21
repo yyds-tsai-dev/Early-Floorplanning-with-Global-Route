@@ -14,37 +14,49 @@ using namespace efgr;
 namespace {
 
 int argInt(int argc, char** argv, const std::string& name, int fallback) {
-    for (int i = 3; i + 1 < argc; ++i) {
+    for (int i = 0; i + 1 < argc; ++i) {
         if (argv[i] == name) return std::atoi(argv[i + 1]);
     }
     return fallback;
 }
 
 double argDouble(int argc, char** argv, const std::string& name, double fallback) {
-    for (int i = 3; i + 1 < argc; ++i) {
+    for (int i = 0; i + 1 < argc; ++i) {
         if (argv[i] == name) return std::atof(argv[i + 1]);
     }
     return fallback;
 }
 
 std::string argString(int argc, char** argv, const std::string& name, const std::string& fallback) {
-    for (int i = 3; i + 1 < argc; ++i) {
+    for (int i = 0; i + 1 < argc; ++i) {
         if (argv[i] == name) return argv[i + 1];
     }
     return fallback;
 }
 
+std::string defaultOutputPath(const std::string& input_path) {
+    const std::size_t slash = input_path.find_last_of("/\\");
+    const std::size_t dot = input_path.find_last_of('.');
+    if (dot != std::string::npos && (slash == std::string::npos || dot > slash)) {
+        return input_path.substr(0, dot) + ".cfg";
+    }
+    return input_path + ".cfg";
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc < 3) {
+    if (argc < 2) {
         std::cerr << "usage: " << argv[0]
-                  << " input.csv output.cfg [--engine sp|bstar|hybrid] [--iters N] [--seed N] [--alpha X]"
+                  << " input.csv [output.cfg] [--engine sp|bstar|hybrid] [--iters N] [--seed N] [--alpha X]"
                   << " [--exact-interval N]\n";
         return 2;
     }
 
     try {
+        const std::string input_path = argv[1];
+        const bool has_output_arg = argc >= 3 && std::string(argv[2]).rfind("--", 0) != 0;
+        const std::string output_path = has_output_arg ? argv[2] : defaultOutputPath(input_path);
         Problem problem = parseProblem(argv[1]);
         SearchOptions options;
         options.iters = argInt(argc, argv, "--iters", 1000);
@@ -63,7 +75,7 @@ int main(int argc, char** argv) {
         }
 
         auto validation = validateSolution(problem, result.best_placement, result.best_routing);
-        writeCfg(argv[2], problem, result.best_placement, result.best_routing);
+        writeCfg(output_path, problem, result.best_placement, result.best_routing);
 
         std::cerr << "engine=" << result.engine_name
                   << " iters=" << result.iterations

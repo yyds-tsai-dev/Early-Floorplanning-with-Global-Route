@@ -37,6 +37,7 @@ struct Block {
     std::vector<std::string> locations;
     std::vector<double> ft_rates;
     int port_edge = 0;
+    std::vector<int> port_edges;
 };
 
 struct Bundle {
