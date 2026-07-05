@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "eval.hpp"
+#include "ft.hpp"
 
 namespace efgr {
 namespace {
@@ -65,6 +66,40 @@ std::string placementKey(const Placement& placement) {
             << std::llround(r.h * 1000.0) << ';';
     }
     return out.str();
+}
+
+void finalizeFeedthrough(const Problem& problem, const PlacementEngine& engine, SearchResult& result) {
+    if (result.best_routing.feedthrough_mismatch <= kEps) return;
+    Problem inflated = problem;
+    Placement placement = result.best_placement;
+    RoutingResult routing = result.best_routing;
+    std::mt19937 rng(0x9e3779b9u);
+    for (int pass = 0; pass < 3; ++pass) {
+        bool grew = false;
+        for (std::size_t i = 0; i < inflated.blocks.size(); ++i) {
+            if (!isSoft(inflated.blocks[i].type)) continue;
+            double nets = i < routing.soft_feedthrough_nets.size() ? routing.soft_feedthrough_nets[i] : 0.0;
+            if (nets <= 0.0) continue;
+            double base = problem.blocks[i].ft_base_area > 0.0 ? problem.blocks[i].ft_base_area : problem.blocks[i].area;
+            double required = ftRequiredArea(base, ftExtend(nets, ftTierRate(problem.blocks[i], nets)));
+            if (required > inflated.blocks[i].area + kEps) {
+                inflated.blocks[i].area = required;
+                grew = true;
+            }
+        }
+        if (!grew) break;
+        PlacementState state = engine.seedFromPlacement(inflated, placement, rng);
+        placement = engine.decode(inflated, state);
+        RoutingResult new_routing;
+        Score exact = exactScore(inflated, placement, &new_routing);
+        routing = new_routing;
+        if (new_routing.feedthrough_mismatch <= kEps && new_routing.open_routes == 0 &&
+            exact.value < result.best_score.value) {
+            result.best_score = exact;
+            result.best_placement = placement;
+            result.best_routing = new_routing;
+        }
+    }
 }
 
 SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& engine, const SearchOptions& options) {
@@ -175,6 +210,7 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
 
     (void)best_state;
     (void)current_place;
+    finalizeFeedthrough(problem, engine, result);
     return result;
 }
 

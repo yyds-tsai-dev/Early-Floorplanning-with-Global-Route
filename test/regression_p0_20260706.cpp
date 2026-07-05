@@ -3,11 +3,15 @@
 #include <cstdio>
 #include <fstream>
 #include <iostream>
+#include <memory>
 
 #include "../src/eval.hpp"
 #include "../src/ft.hpp"
 #include "../src/io.hpp"
+#include "../src/placement_engine.hpp"
 #include "../src/routing.hpp"
+#include "../src/search.hpp"
+#include "../src/validate.hpp"
 
 namespace {
 using namespace efgr;
@@ -150,6 +154,69 @@ void testOutlineConsistencyEvalVsCfg() {
     std::cout << "testOutlineConsistencyEvalVsCfg ok\n";
 }
 
+void testFeedthroughFinalizeWritesBackArea() {
+    Problem p = forcedFtProblem();
+    p.outline_w = 620.0;  // headroom so the inflated decode still fits
+    p.outline_h = 340.0;
+
+    std::unique_ptr<PlacementEngine> engine = makePlacementEngine("bstar");
+    SearchOptions options;
+    options.iters = 200;
+    options.seed = 1;
+    options.exact_interval = 20;
+    SearchResult result = runPlacementSearch(p, *engine, options);
+
+    // After the finalize hook, the emitted solution must not owe FT area.
+    assert(result.best_routing.feedthrough_mismatch <= 1e-6);
+    // And if FT was used, the soft block's dims must cover the ceil'd required area.
+    double nets = result.best_routing.soft_feedthrough_nets.size() > 1 ? result.best_routing.soft_feedthrough_nets[1] : 0.0;
+    if (nets > 0.0) {
+        double required = ftRequiredArea(90000.0, ftExtend(nets, ftTierRate(p.blocks[1], nets)));
+        const Rect& r = result.best_placement.rects[1];
+        assert(r.w * r.h + 1e-6 >= required);
+    }
+    auto validation = validateSolution(p, result.best_placement, result.best_routing);
+    assert(validation.ok);
+    std::cout << "testFeedthroughFinalizeWritesBackArea ok\n";
+}
+
+void testFinalizeFeedthroughDirect() {
+    Problem p = forcedFtProblem();  // 500x300, FT forced
+    p.outline_w = 620.0;
+    // Extra headroom above the wall: BStarEngine::seedFromPlacement/decode does not
+    // preserve row layout on re-seed -- it re-derives geometry from a fresh
+    // contour-packed tree (sorted by original x,y), which can restack the inflated
+    // soft block above the wall rather than widening it in place. With outline_h
+    // == wall-top (340) there is zero headroom for that restack and the inflated
+    // candidate is rejected as out-of-outline. 700 gives enough headroom for the
+    // restacked decode to still fit, while the wall (y=300..340) still blocks
+    // channel routing over the top, forcing FT as required by the fixture.
+    p.outline_h = 700.0;
+    Placement pl = rowPlacement();
+    // Wall off the top so channel routing cannot connect BLK01->BLK03 (forces FT):
+    Block wall;
+    wall.name = "BLK04";
+    wall.area = 620.0 * 40.0;
+    wall.width = 620.0;
+    wall.height = 40.0;
+    wall.type = BlockType::Macro;
+    wall.ft_rates = {0.2, 0.4, 0.8, 1.0};
+    p.block_index[wall.name] = static_cast<int>(p.blocks.size());
+    p.blocks.push_back(wall);
+    pl.rects.push_back(Rect{0.0, 300.0, 620.0, 40.0});
+    pl.aspect.push_back(1.0);
+
+    SearchResult result;
+    result.best_placement = pl;
+    result.best_score = exactScore(p, pl, &result.best_routing);
+    assert(result.best_routing.feedthrough_mismatch > 0.0);  // precondition: FT happened, under-provisioned
+
+    std::unique_ptr<PlacementEngine> engine = makePlacementEngine("bstar");
+    finalizeFeedthrough(p, *engine, result);
+    assert(result.best_routing.feedthrough_mismatch <= 1e-6);
+    std::cout << "testFinalizeFeedthroughDirect ok\n";
+}
+
 }  // namespace
 
 int main() {
@@ -157,6 +224,8 @@ int main() {
     testRoutingMismatchUsesCeiledMath();
     testDirectAbutmentZeroWirelength();
     testOutlineConsistencyEvalVsCfg();
+    testFeedthroughFinalizeWritesBackArea();
+    testFinalizeFeedthroughDirect();
     std::cout << "p0 regressions passed\n";
     return 0;
 }

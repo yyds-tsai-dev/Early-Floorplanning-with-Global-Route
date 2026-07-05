@@ -29,5 +29,6 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
 SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& engine, const SearchOptions& options,
                                 const PlacementState& initial_state);
 SearchResult runHybridPlacementSearch(const Problem& problem, const SearchOptions& options);
+void finalizeFeedthrough(const Problem& problem, const PlacementEngine& engine, SearchResult& result);
 
 }  // namespace efgr
