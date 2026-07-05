@@ -29,6 +29,7 @@ struct Rect {
 struct Block {
     std::string name;
     double area = 0.0;
+    double ft_base_area = 0.0;  // original input area; FT required-area base (never inflated)
     double width = 0.0;
     double height = 0.0;
     double ar_min = 1.0;

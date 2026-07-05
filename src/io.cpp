@@ -154,6 +154,7 @@ Problem parseProblem(const std::string& path) {
             Block b;
             b.name = row[0];
             b.area = row.size() > 1 ? parseDouble(row[1]) : 0.0;
+            b.ft_base_area = b.area;
             b.width = row.size() > 2 ? parseDouble(row[2]) : 0.0;
             b.height = row.size() > 3 ? parseDouble(row[3]) : 0.0;
             parseAspect(b, row.size() > 4 ? row[4] : "1");

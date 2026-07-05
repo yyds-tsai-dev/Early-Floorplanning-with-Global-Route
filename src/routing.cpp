@@ -3,6 +3,8 @@
 #include <queue>
 #include <set>
 
+#include "ft.hpp"
+
 namespace efgr {
 namespace {
 
@@ -32,14 +34,6 @@ std::pair<double, double> guidePoint(const Rect& a, const Rect& b) {
     double lo = std::max(a.x, b.x);
     double hi = std::min(a.right(), b.right());
     return {(lo + hi) * 0.5, y};
-}
-
-double ftRateFor(const Block& block, double nets) {
-    if (block.ft_rates.empty()) return 0.0;
-    if (nets <= 3000.0) return block.ft_rates[0];
-    if (nets <= 6000.0) return block.ft_rates.size() > 1 ? block.ft_rates[1] : block.ft_rates.back();
-    if (nets <= 9000.0) return block.ft_rates.size() > 2 ? block.ft_rates[2] : block.ft_rates.back();
-    return block.ft_rates.size() > 3 ? block.ft_rates[3] : block.ft_rates.back();
 }
 
 bool portAllows(const Block& block, int edge) {
@@ -234,10 +228,9 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement) {
     for (std::size_t i = 0; i < result.soft_feedthrough_nets.size(); ++i) {
         double nets = result.soft_feedthrough_nets[i];
         if (nets <= 0.0 || !isSoft(problem.blocks[i].type)) continue;
-        double delta = (nets / 25.0) * ftRateFor(problem.blocks[i], nets) * 0.5;
-        double side = std::sqrt(std::max(1.0, problem.blocks[i].area)) + delta;
-        double required_area = side * side;
-        double actual_area = placement.rects[i].w * placement.rects[i].h;
+        double base = problem.blocks[i].ft_base_area > 0.0 ? problem.blocks[i].ft_base_area : problem.blocks[i].area;
+        double required_area = ftRequiredArea(base, ftExtend(nets, ftTierRate(problem.blocks[i], nets)));
+        double actual_area = round2(placement.rects[i].w * placement.rects[i].h);
         if (actual_area + kEps < required_area) result.feedthrough_mismatch += required_area - actual_area;
     }
     return result;

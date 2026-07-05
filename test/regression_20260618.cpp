@@ -45,8 +45,8 @@ Problem makeTwoMacroProblem(int nets) {
     p.outline_h = 1000.0;
     p.alpha = 0.2;
     p.blocks = {
-        Block{"A", 100.0, 10.0, 10.0, 1.0, 1.0, BlockType::Macro, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
-        Block{"B", 100.0, 10.0, 10.0, 1.0, 1.0, BlockType::Macro, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
+        Block{"A", 100.0, 100.0, 10.0, 10.0, 1.0, 1.0, BlockType::Macro, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
+        Block{"B", 100.0, 100.0, 10.0, 10.0, 1.0, 1.0, BlockType::Macro, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
     };
     p.block_index["A"] = 0;
     p.block_index["B"] = 1;
@@ -90,7 +90,7 @@ int testParallelLocationRequiresSegmentOverlap() {
     p.outline_w = 300.0;
     p.outline_h = 300.0;
     p.blocks = {
-        Block{"EDGE", 500.0, 50.0, 10.0, 1.0, 1.0, BlockType::Edge, {"TM", "TR"}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
+        Block{"EDGE", 500.0, 500.0, 50.0, 10.0, 1.0, 1.0, BlockType::Edge, {"TM", "TR"}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
     };
     p.block_index["EDGE"] = 0;
 
@@ -115,8 +115,8 @@ int testParallelEdgeBlocksPackWithoutOverlap() {
     p.outline_w = 6344.0;
     p.outline_h = 3691.0;
     p.blocks = {
-        Block{"BLK05", 616160.0, 3851.0, 160.0, 1.0, 1.0, BlockType::Edge, {"TL", "TM", "TR"}, {0.2, 0.4, 0.8, 1.0}, 4, {}},
-        Block{"BLK06", 111520.0, 340.0, 328.0, 1.0, 1.0, BlockType::Edge, {"TR", "RT"}, {0.2, 0.4, 0.8, 1.0}, 4, {}},
+        Block{"BLK05", 616160.0, 616160.0, 3851.0, 160.0, 1.0, 1.0, BlockType::Edge, {"TL", "TM", "TR"}, {0.2, 0.4, 0.8, 1.0}, 4, {}},
+        Block{"BLK06", 111520.0, 111520.0, 340.0, 328.0, 1.0, 1.0, BlockType::Edge, {"TR", "RT"}, {0.2, 0.4, 0.8, 1.0}, 4, {}},
     };
     p.block_index["BLK05"] = 0;
     p.block_index["BLK06"] = 1;

@@ -1,5 +1,7 @@
 #include "eval.hpp"
 
+#include "ft.hpp"
+
 namespace efgr {
 namespace {
 
@@ -13,14 +15,6 @@ std::pair<double, double> usedOutline(const Problem& problem, const Placement& p
     w = std::max(1.0, std::min(problem.outline_w, w));
     h = std::max(1.0, std::min(problem.outline_h, h));
     return {w, h};
-}
-
-double ftRateForProxy(const Block& block, double nets) {
-    if (block.ft_rates.empty()) return 0.0;
-    if (nets <= 3000.0) return block.ft_rates[0];
-    if (nets <= 6000.0) return block.ft_rates.size() > 1 ? block.ft_rates[1] : block.ft_rates.back();
-    if (nets <= 9000.0) return block.ft_rates.size() > 2 ? block.ft_rates[2] : block.ft_rates.back();
-    return block.ft_rates.size() > 3 ? block.ft_rates[3] : block.ft_rates.back();
 }
 
 bool intersectsOpen(const Rect& a, const Rect& b) {
@@ -51,9 +45,8 @@ double routeAwareProxyPenalty(const Problem& problem, const Placement& placement
             if (static_cast<int>(i) == bundle.source || static_cast<int>(i) == bundle.target) continue;
             if (!isSoft(problem.blocks[i].type)) continue;
             if (!intersectsOpen(bbox, placement.rects[i])) continue;
-            double delta = (bundle.nets / 25.0) * ftRateForProxy(problem.blocks[i], bundle.nets) * 0.5;
-            double side = std::sqrt(std::max(1.0, problem.blocks[i].area)) + delta;
-            double required_area = side * side;
+            double base = problem.blocks[i].ft_base_area > 0.0 ? problem.blocks[i].ft_base_area : problem.blocks[i].area;
+            double required_area = ftRequiredArea(base, ftExtend(bundle.nets, ftTierRate(problem.blocks[i], bundle.nets)));
             double actual_area = placement.rects[i].w * placement.rects[i].h;
             penalty += std::max(0.0, required_area - actual_area) * 1000.0;
         }
