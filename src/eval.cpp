@@ -3,7 +3,6 @@
 #include "ft.hpp"
 
 namespace efgr {
-namespace {
 
 std::pair<double, double> usedOutline(const Problem& problem, const Placement& placement) {
     double w = 0.0;
@@ -16,6 +15,25 @@ std::pair<double, double> usedOutline(const Problem& problem, const Placement& p
     h = std::max(1.0, std::min(problem.outline_h, h));
     return {w, h};
 }
+
+std::pair<double, double> usedOutline(const Problem& problem, const Placement& placement,
+                                       const RoutingResult& routing) {
+    double w = 0.0;
+    double h = 0.0;
+    for (const auto& r : placement.rects) {
+        w = std::max(w, r.right());
+        h = std::max(h, r.top());
+    }
+    for (const auto& ch : routing.channels) {
+        w = std::max(w, ch.rect.right());
+        h = std::max(h, ch.rect.top());
+    }
+    w = std::max(1.0, std::min(problem.outline_w, w));
+    h = std::max(1.0, std::min(problem.outline_h, h));
+    return {w, h};
+}
+
+namespace {
 
 bool intersectsOpen(const Rect& a, const Rect& b) {
     return a.x + kEps < b.right() && b.x + kEps < a.right() &&

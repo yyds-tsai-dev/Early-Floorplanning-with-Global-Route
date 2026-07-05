@@ -6,7 +6,7 @@ make
 g++ -std=c++17 -O2 -Wall -Wextra -pedantic \
   -I. \
   test/regression_20260608.cpp \
-  src/io.cpp src/floorplan.cpp src/routing.cpp \
+  src/io.cpp src/floorplan.cpp src/routing.cpp src/eval.cpp \
   -o /tmp/regression_20260608
 /tmp/regression_20260608
 

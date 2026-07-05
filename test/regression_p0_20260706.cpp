@@ -1,8 +1,12 @@
 #include <cassert>
 #include <cmath>
+#include <cstdio>
+#include <fstream>
 #include <iostream>
 
+#include "../src/eval.hpp"
 #include "../src/ft.hpp"
+#include "../src/io.hpp"
 #include "../src/routing.hpp"
 
 namespace {
@@ -121,12 +125,38 @@ void testDirectAbutmentZeroWirelength() {
     assert(near(r.total_wirelength, 0.0));
     std::cout << "testDirectAbutmentZeroWirelength ok\n";
 }
+void testOutlineConsistencyEvalVsCfg() {
+    Problem p = forcedFtProblem();
+    Placement pl = rowPlacement();
+    RoutingResult routing;
+    Score exact = exactScore(p, pl, &routing);
+    auto [w, h] = usedOutline(p, pl, routing);
+    assert(near(exact.outline_area, w * h, 1e-6));
+
+    const std::string tmp = "test/p0_outline_tmp.cfg";
+    writeCfg(tmp, p, pl, routing);
+    std::ifstream in(tmp);
+    assert(in.good());
+    std::string tok;
+    double cfg_w = -1.0, cfg_h = -1.0;
+    while (in >> tok) {
+        if (tok == "Outline" || tok == "OUTLINE") {
+            in >> cfg_w >> cfg_h;
+            break;
+        }
+    }
+    std::remove(tmp.c_str());
+    assert(near(cfg_w * cfg_h, exact.outline_area, 1e-6));
+    std::cout << "testOutlineConsistencyEvalVsCfg ok\n";
+}
+
 }  // namespace
 
 int main() {
     testFtMathOfficialExamples();
     testRoutingMismatchUsesCeiledMath();
     testDirectAbutmentZeroWirelength();
+    testOutlineConsistencyEvalVsCfg();
     std::cout << "p0 regressions passed\n";
     return 0;
 }

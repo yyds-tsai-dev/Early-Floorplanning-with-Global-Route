@@ -5,6 +5,8 @@
 #include <sstream>
 #include <stdexcept>
 
+#include "eval.hpp"
+
 namespace efgr {
 namespace {
 
@@ -115,23 +117,6 @@ BlockType parseType(const std::string& s) {
     if (t.find("EDGE") != std::string::npos) return BlockType::Edge;
     if (t.find("MACRO") != std::string::npos || t.find("HARD") != std::string::npos) return BlockType::Macro;
     return BlockType::Soft;
-}
-
-std::pair<double, double> usedOutline(const Problem& problem, const Placement& placement,
-                                      const RoutingResult& routing) {
-    double w = 0.0;
-    double h = 0.0;
-    for (const auto& r : placement.rects) {
-        w = std::max(w, r.right());
-        h = std::max(h, r.top());
-    }
-    for (const auto& ch : routing.channels) {
-        w = std::max(w, ch.rect.right());
-        h = std::max(h, ch.rect.top());
-    }
-    w = std::max(1.0, std::min(problem.outline_w, w));
-    h = std::max(1.0, std::min(problem.outline_h, h));
-    return {w, h};
 }
 
 }  // namespace
