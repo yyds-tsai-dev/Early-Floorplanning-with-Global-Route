@@ -1,5 +1,6 @@
 # Build outputs
 bin/
+test/p0_regression_bin
 
 # Object files
 *.o
