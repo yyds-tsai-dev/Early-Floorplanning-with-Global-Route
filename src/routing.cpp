@@ -177,7 +177,6 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement) {
         for (std::size_t i = 0; i + 1 < guides.size(); ++i) {
             route.wirelength += manhattan(guides[i].first, guides[i].second, guides[i + 1].first, guides[i + 1].second) * nets;
         }
-        if (guides.size() == 1) route.wirelength += nets;
 
         for (std::size_t i = 1; i + 1 < route.node_path.size(); ++i) {
             int node = route.node_path[i];
