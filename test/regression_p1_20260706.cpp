@@ -830,6 +830,43 @@ void testOutlineSweepProbesDistinctOutlinesCase0() {
     std::cout << "testOutlineSweepProbesDistinctOutlinesCase0 ok\n";
 }
 
+// T8 (P1 acceptance criteria, plan design §1.5): finalizeFeedthrough must grow the declared outline
+// toward MAX to absorb FT inflation on the two cases that previously showed a residual mismatch
+// (case1/hybrid, case3/hybrid). Runs the full hybrid search at the acceptance parameters (iters
+// 2000, seed 1) and asserts feedthrough_mismatch==0, open_routes==0, and validateSolution ok --
+// exactly the P1 acceptance gate from the plan. Both cases finish in single-digit seconds, so this
+// lives in the permanent regression file rather than a separate opt-in script.
+void runHybridAcceptance(const std::string& csv_path, const char* label) {
+    Problem problem = parseProblem(csv_path);
+    SearchOptions options;
+    options.iters = 2000;
+    options.seed = 1;
+    SearchResult result = runHybridPlacementSearch(problem, options);
+
+    if (result.best_routing.feedthrough_mismatch > kEps || result.best_routing.open_routes != 0) {
+        std::cerr << label << ": feedthrough_mismatch=" << result.best_routing.feedthrough_mismatch
+                   << " open_routes=" << result.best_routing.open_routes << "\n";
+    }
+    assert(result.best_routing.feedthrough_mismatch <= kEps);
+    assert(result.best_routing.open_routes == 0);
+
+    ValidationResult vr = validateSolution(problem, result.best_placement, result.best_routing);
+    if (!vr.ok) {
+        for (const auto& msg : vr.messages) std::cerr << label << " validate: " << msg << "\n";
+    }
+    assert(vr.ok);
+    std::cout << label << " ok (mismatch=" << result.best_routing.feedthrough_mismatch
+               << " open_routes=" << result.best_routing.open_routes << ")\n";
+}
+
+void testFinalizeFeedthroughAcceptanceCase1Hybrid() {
+    runHybridAcceptance("test/2026 ICCAD_case.case1.csv", "testFinalizeFeedthroughAcceptanceCase1Hybrid");
+}
+
+void testFinalizeFeedthroughAcceptanceCase3Hybrid() {
+    runHybridAcceptance("test/2026 ICCAD_case.case3.csv", "testFinalizeFeedthroughAcceptanceCase3Hybrid");
+}
+
 }  // namespace
 
 int main() {
@@ -853,6 +890,8 @@ int main() {
     testCompactedCandidateRestampValidatesEndToEnd();
     testAnchorAtOutlineStampsExactTargetNotTightCase0();
     testOutlineSweepProbesDistinctOutlinesCase0();
+    testFinalizeFeedthroughAcceptanceCase1Hybrid();
+    testFinalizeFeedthroughAcceptanceCase3Hybrid();
     std::cout << "p1 regressions passed\n";
     return 0;
 }
