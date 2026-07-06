@@ -71,9 +71,17 @@ ValidationResult validateSolution(const Problem& problem, const Placement& place
         vr.ok = false;
         vr.messages.push_back(msg);
     };
+    // Validate containment/thirds/flush against the placement's declared (shrink-wrapped)
+    // outline when stamped, falling back to the problem's outline (MAX) when unset (0) --
+    // design p1-design.md §1.6. The declared outline is always <= MAX, so this scoped Problem
+    // is strictly tighter than (or equal to) `problem`, never looser.
+    Problem scoped = problem;
+    if (placement.outline_w > 0.0) scoped.outline_w = placement.outline_w;
+    if (placement.outline_h > 0.0) scoped.outline_h = placement.outline_h;
+
     for (std::size_t i = 0; i < placement.rects.size(); ++i) {
         const auto& r = placement.rects[i];
-        if (r.x < -kEps || r.y < -kEps || r.right() > problem.outline_w + kEps || r.top() > problem.outline_h + kEps) {
+        if (r.x < -kEps || r.y < -kEps || r.right() > scoped.outline_w + kEps || r.top() > scoped.outline_h + kEps) {
             fail("outline violation: " + problem.blocks[i].name);
         }
         if (!isSoft(problem.blocks[i].type)) {
@@ -82,7 +90,7 @@ ValidationResult validateSolution(const Problem& problem, const Placement& place
             }
         }
         if (isEdge(problem.blocks[i].type)) {
-            if (!satisfiesEdgeLocations(r, problem, problem.blocks[i].locations)) {
+            if (!satisfiesEdgeLocations(r, scoped, problem.blocks[i].locations)) {
                 fail("edge location violation: " + problem.blocks[i].name);
             }
         }
