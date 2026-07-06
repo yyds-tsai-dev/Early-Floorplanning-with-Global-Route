@@ -740,6 +740,29 @@ bool edgeBlocksFeasibleAt(const Problem& problem, const Placement& placement, do
     return true;
 }
 
+// Verifies every rect in `placement` lies within [0,w]x[0,h] and no two rects overlap. Used as
+// the exact shrink-wrap's post-legalization gate (design §1.2.4, §3.1): legalizeEdgeBlocks'
+// corner/multi-side branch (firstLegalEdgeSlot -> placeEdge, see :130) places blindly with no
+// collision check, so this must independently confirm no overlap survived, not just trust that
+// legalizeEdgeBlocks "succeeded".
+bool placementLegalAt(const Problem& problem, const Placement& placement, double w, double h) {
+    for (std::size_t i = 0; i < placement.rects.size(); ++i) {
+        const Rect& r = placement.rects[i];
+        if (r.x < -kEps || r.y < -kEps || r.right() > w + kEps || r.top() > h + kEps) return false;
+        for (std::size_t j = i + 1; j < placement.rects.size(); ++j) {
+            if (overlaps(r, placement.rects[j])) return false;
+        }
+    }
+    Problem scoped = problem;
+    scoped.outline_w = w;
+    scoped.outline_h = h;
+    for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
+        if (!isEdge(problem.blocks[i].type)) continue;
+        if (!edgeRectLegal(scoped, problem.blocks[i], placement.rects[i])) return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 OutlineFit shrinkWrapEstimate(const Problem& problem, const Placement& placement) {
@@ -761,6 +784,53 @@ OutlineFit shrinkWrapEstimate(const Problem& problem, const Placement& placement
         return OutlineFit{problem.outline_w, problem.outline_h, true};
     }
     return OutlineFit{problem.outline_w, problem.outline_h, false};
+}
+
+OutlineFit shrinkWrapOutline(const Problem& problem, Placement& placement, int max_grow_steps) {
+    double w = 0.0;
+    double h = 0.0;
+    lowerBoundNeeds(problem, placement, &w, &h);
+    w = std::min(w, problem.outline_w);
+    h = std::min(h, problem.outline_h);
+
+    for (int guard = 0; guard < max_grow_steps; ++guard) {
+        Problem scoped = problem;
+        scoped.outline_w = w;
+        scoped.outline_h = h;
+
+        Placement trial = placement;
+        for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
+            if (isEdge(problem.blocks[i].type)) trial.rects[i] = dimensionFor(problem.blocks[i], 1.0);
+        }
+        legalizeEdgeBlocks(scoped, trial);
+
+        if (placementLegalAt(scoped, trial, w, h)) {
+            for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
+                if (isEdge(problem.blocks[i].type)) placement.rects[i] = trial.rects[i];
+            }
+            placement.outline_w = w;
+            placement.outline_h = h;
+            return OutlineFit{w, h, true};
+        }
+        w = std::min(problem.outline_w, w * 1.05 + kEps);
+        h = std::min(problem.outline_h, h * 1.05 + kEps);
+    }
+
+    // Fallback: re-legalize at MAX -- reproduces today's (pre-P1) layout, which decode already
+    // produced legally, so this is guaranteed to pass placementLegalAt.
+    Problem scoped = problem;
+    Placement trial = placement;
+    for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
+        if (isEdge(problem.blocks[i].type)) trial.rects[i] = dimensionFor(problem.blocks[i], 1.0);
+    }
+    legalizeEdgeBlocks(scoped, trial);
+    bool legal = placementLegalAt(scoped, trial, problem.outline_w, problem.outline_h);
+    for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
+        if (isEdge(problem.blocks[i].type)) placement.rects[i] = trial.rects[i];
+    }
+    placement.outline_w = problem.outline_w;
+    placement.outline_h = problem.outline_h;
+    return OutlineFit{problem.outline_w, problem.outline_h, legal};
 }
 
 }  // namespace efgr

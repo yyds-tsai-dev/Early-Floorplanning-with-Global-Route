@@ -49,4 +49,10 @@ struct OutlineFit {
 // Does NOT mutate placement; returns the estimated (W,H) for cheapScore.
 OutlineFit shrinkWrapEstimate(const Problem& problem, const Placement& placement);
 
+// Exact: re-legalizes edge blocks against the shrunk outline (grow-until-legal loop). Mutates
+// placement (edge rects re-anchored to the shrunk border + outline_w/h stamped). Core (non-edge)
+// rects are never moved. Falls back to problem's outline (MAX) if no smaller (W,H) is legal
+// within max_grow_steps -- always terminates legal (design p1-design.md §1.2.4).
+OutlineFit shrinkWrapOutline(const Problem& problem, Placement& placement, int max_grow_steps = 6);
+
 }  // namespace efgr

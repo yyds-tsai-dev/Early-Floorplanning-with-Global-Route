@@ -64,6 +64,20 @@ double coreBboxArea(const Problem& problem, const Placement& placement) {
     return std::max(1.0, w) * std::max(1.0, h);
 }
 
+// Scoped Problem copy (outline = the stamped declared W,H) for validating a shrink-wrapped
+// solution -- the real validateSolution still reads problem.outline_w/h (T6 fixes that); tests
+// build the scoped copy themselves per the T3 brief.
+Problem scopedAtDeclaredOutline(const Problem& problem, double w, double h) {
+    Problem scoped = problem;
+    scoped.outline_w = w;
+    scoped.outline_h = h;
+    return scoped;
+}
+
+bool rectsByteEqual(const Rect& a, const Rect& b) {
+    return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h;
+}
+
 void testShrinkWrapEstimateCase0BStarSeed1() {
     Problem problem = parseProblem("test/2026 ICCAD_case.case0.csv");
     std::unique_ptr<PlacementEngine> engine = makePlacementEngine("bstar");
@@ -163,6 +177,114 @@ void testShrinkWrapEstimateNoEdgeBlocksEqualsCoreBbox() {
     std::cout << "testShrinkWrapEstimateNoEdgeBlocksEqualsCoreBbox ok\n";
 }
 
+const char* kCaseFiles[5] = {
+    "test/2026 ICCAD_case.case0.csv",
+    "test/2026 ICCAD_case.case1.csv",
+    "test/2026 ICCAD_case.case2.csv",
+    "test/2026 ICCAD_case.case3.csv",
+    "test/2026 ICCAD_case.case4.csv",
+};
+
+// Runs shrinkWrapOutline on a bstar decode of `path` at the given seed and asserts the T3
+// invariants (brief items a/b/c): validateSolution ok against a scoped Problem at the stamped
+// outline, stamped dims within (0, MAX], and no core (non-edge) rect moved.
+void checkShrinkWrapOutlineInvariants(const std::string& path, unsigned seed) {
+    Problem problem = parseProblem(path);
+    std::unique_ptr<PlacementEngine> engine = makePlacementEngine("bstar");
+    std::mt19937 rng(seed);
+    PlacementState state = engine->initialState(problem, rng);
+    Placement before = engine->decode(problem, state);
+    Placement after = before;
+
+    OutlineFit fit = shrinkWrapOutline(problem, after);
+
+    assert(fit.legal);
+    assert(after.outline_w > 0.0 && after.outline_w <= problem.outline_w + kEps);
+    assert(after.outline_h > 0.0 && after.outline_h <= problem.outline_h + kEps);
+    assert(std::abs(fit.w - after.outline_w) < kEps);
+    assert(std::abs(fit.h - after.outline_h) < kEps);
+
+    for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
+        if (isEdge(problem.blocks[i].type)) continue;
+        assert(rectsByteEqual(before.rects[i], after.rects[i]));
+    }
+
+    Problem scoped = scopedAtDeclaredOutline(problem, after.outline_w, after.outline_h);
+    RoutingResult empty_routing;
+    ValidationResult vr = validateSolution(scoped, after, empty_routing);
+    if (!vr.ok) {
+        for (const auto& msg : vr.messages) std::cerr << "validate: " << msg << "\n";
+    }
+    assert(vr.ok);
+}
+
+void testShrinkWrapOutlineAllCasesBStarSeed1() {
+    for (const char* path : kCaseFiles) {
+        checkShrinkWrapOutlineInvariants(path, 1);
+    }
+    std::cout << "testShrinkWrapOutlineAllCasesBStarSeed1 ok\n";
+}
+
+void testShrinkWrapOutlineCase0FuzzSeeds() {
+    checkShrinkWrapOutlineInvariants(kCaseFiles[0], 2);
+    checkShrinkWrapOutlineInvariants(kCaseFiles[0], 3);
+    std::cout << "testShrinkWrapOutlineCase0FuzzSeeds ok\n";
+}
+
+// Targeted A19/A20 regression (design Q3): a synthetic mid-side (TM) edge block wider than the
+// shrunk outline's middle third must still legalize -- positiveOverlap only needs positive 1D
+// overlap with the third, not full containment, even after the outline shrinks.
+void testShrinkWrapOutlineMidSideBlockLongerThanShrunkThird() {
+    Problem problem;
+    auto addBlock = [&](const std::string& name, double w, double h, BlockType type,
+                         std::vector<std::string> locs) {
+        Block b;
+        b.name = name;
+        b.width = w;
+        b.height = h;
+        b.area = w * h;
+        b.ar_min = 1.0;
+        b.ar_max = 1.0;
+        b.type = type;
+        b.locations = std::move(locs);
+        b.ft_rates = {0.2, 0.4, 0.8, 1.0};
+        problem.block_index[name] = static_cast<int>(problem.blocks.size());
+        problem.blocks.push_back(b);
+    };
+
+    problem.outline_w = 3000.0;
+    problem.outline_h = 2000.0;
+    // TM block much wider than a shrunk third: at MAX the middle third is [1000,2000] (width
+    // 1000); this block is 1400 wide, already longer than a third at MAX, so it certainly stays
+    // longer than the middle third at any smaller shrunk W. A small core block anchors W_core
+    // low so the shrink-wrap actually has room to shrink.
+    addBlock("BLK_TM", 1400.0, 100.0, BlockType::Edge, {"TM"});
+    addBlock("BLK_CORE", 200.0, 150.0, BlockType::Macro, {});
+    problem.alpha = 0.2;
+
+    Placement placement;
+    placement.rects.resize(problem.blocks.size());
+    placement.aspect.assign(problem.blocks.size(), 1.0);
+    placement.rects[0] = Rect{(problem.outline_w - 1400.0) * 0.5, problem.outline_h - 100.0, 1400.0, 100.0};
+    placement.rects[1] = Rect{0.0, 0.0, 200.0, 150.0};
+
+    OutlineFit fit = shrinkWrapOutline(problem, placement);
+    assert(fit.legal);
+    assert(fit.w <= problem.outline_w + kEps);
+    assert(fit.h <= problem.outline_h + kEps);
+
+    Problem scoped = scopedAtDeclaredOutline(problem, fit.w, fit.h);
+    RoutingResult empty_routing;
+    ValidationResult vr = validateSolution(scoped, placement, empty_routing);
+    if (!vr.ok) {
+        for (const auto& msg : vr.messages) std::cerr << "validate: " << msg << "\n";
+    }
+    assert(vr.ok);
+    // Core block coordinates must be untouched by the shrink.
+    assert(placement.rects[1].x == 0.0 && placement.rects[1].y == 0.0);
+    std::cout << "testShrinkWrapOutlineMidSideBlockLongerThanShrunkThird ok\n";
+}
+
 }  // namespace
 
 int main() {
@@ -171,6 +293,9 @@ int main() {
     testShrinkWrapEstimateCase0BStarSeed1();
     testShrinkWrapEstimateCornerBlocksForceMax();
     testShrinkWrapEstimateNoEdgeBlocksEqualsCoreBbox();
+    testShrinkWrapOutlineAllCasesBStarSeed1();
+    testShrinkWrapOutlineCase0FuzzSeeds();
+    testShrinkWrapOutlineMidSideBlockLongerThanShrunkThird();
     std::cout << "p1 regressions passed\n";
     return 0;
 }
