@@ -1,5 +1,7 @@
 #include "eval.hpp"
 
+#include <tuple>
+
 #include "ft.hpp"
 
 namespace efgr {
@@ -73,12 +75,35 @@ double routeAwareProxyPenalty(const Problem& problem, const Placement& placement
     return penalty;
 }
 
+// Crude v1 whitespace/channel-demand proxy (design p1-design.md §1.3): for each bundle, reserve
+// area proportional to net count and the *aligned* axis distance between source/target centers
+// (min(dx,dy) -- zero when the pair is already adjacent on one axis, so no margin is charged).
+// Deliberately crude: biases cheapScore's SA gradient away from packings so tight they would
+// overflow, not a routing prediction. Clamped so the shrink-wrapped outline_area (W*H) plus this
+// margin never exceeds the MAX outline area -- the containment penalty (vs MAX) stays the hard
+// legality gate; this term only shapes the gradient between the shrunk area and MAX.
+double channelMarginProxy(const Problem& problem, const Placement& placement, double w, double h) {
+    double margin = 0.0;
+    for (const auto& bundle : problem.bundles) {
+        const auto& a = placement.rects[bundle.source];
+        const auto& b = placement.rects[bundle.target];
+        double dx = std::abs(a.cx() - b.cx());
+        double dy = std::abs(a.cy() - b.cy());
+        margin += (static_cast<double>(bundle.nets) / 25.0) * std::min(dx, dy);
+    }
+    double max_area = problem.outline_w * problem.outline_h;
+    double headroom = std::max(0.0, max_area - w * h);
+    return std::min(margin, headroom);
+}
+
 }  // namespace
 
 Score cheapScore(const Problem& problem, const Placement& placement) {
     Score score;
-    auto [used_w, used_h] = usedOutline(problem, placement);
-    score.outline_area = used_w * used_h;
+    double w = placement.outline_w;
+    double h = placement.outline_h;
+    if (w <= 0.0 || h <= 0.0) std::tie(w, h) = usedOutline(problem, placement);
+    score.outline_area = w * h + channelMarginProxy(problem, placement, w, h);
     double penalty = 0.0;
     for (std::size_t i = 0; i < placement.rects.size(); ++i) {
         const auto& r = placement.rects[i];

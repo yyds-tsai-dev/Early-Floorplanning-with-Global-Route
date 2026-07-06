@@ -466,6 +466,7 @@ public:
         for (int idx : order) {
             placeWithContour(problem, placement, placed, idx, placement.rects[idx].x, placement.rects[idx].y);
         }
+        shrinkWrapOutline(problem, placement);
         return placement;
     }
 
@@ -536,7 +537,10 @@ public:
 
     Placement decode(const Problem& problem, const PlacementState& state) const override {
         Placement placement = basePlacement(problem, state);
-        if (state.root < 0 || state.nodes.empty()) return placement;
+        if (state.root < 0 || state.nodes.empty()) {
+            shrinkWrapOutline(problem, placement);
+            return placement;
+        }
 
         std::vector<bool> placed(problem.blocks.size(), false);
         for (std::size_t i = 0; i < problem.blocks.size(); ++i) placed[i] = isEdge(problem.blocks[i].type);
@@ -569,6 +573,7 @@ public:
         for (std::size_t i = 0; i < state.nodes.size(); ++i) {
             if (!seen[i]) placeWithContour(problem, placement, placed, state.nodes[i], 0.0, 0.0);
         }
+        shrinkWrapOutline(problem, placement);
         return placement;
     }
 
