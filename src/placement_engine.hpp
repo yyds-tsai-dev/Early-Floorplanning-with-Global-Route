@@ -39,4 +39,14 @@ public:
 std::unique_ptr<PlacementEngine> makePlacementEngine(const std::string& name);
 std::vector<std::string> placementEngineNames();
 
+struct OutlineFit {
+    double w = 0.0;
+    double h = 0.0;
+    bool legal = true;
+};
+
+// Cheap: O(n) lower-bound arithmetic + thirds feasibility probe only, no edge relegalization loop.
+// Does NOT mutate placement; returns the estimated (W,H) for cheapScore.
+OutlineFit shrinkWrapEstimate(const Problem& problem, const Placement& placement);
+
 }  // namespace efgr

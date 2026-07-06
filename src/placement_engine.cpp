@@ -667,4 +667,100 @@ std::vector<std::string> placementEngineNames() {
     return {"sp", "bstar", "hybrid"};
 }
 
+namespace {
+
+// Cheap per-axis lower bound from core (non-edge) block extents and edge block width/height
+// needs (design p1-design.md §1.2.1). Does not consider thirds feasibility -- that is probed
+// separately in shrinkWrapEstimate.
+void lowerBoundNeeds(const Problem& problem, const Placement& placement, double* w_min, double* h_min) {
+    double w_core = 0.0;
+    double h_core = 0.0;
+    double w_edge = 0.0;
+    double h_edge = 0.0;
+    for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
+        const Rect& r = placement.rects[i];
+        if (!isEdge(problem.blocks[i].type)) {
+            w_core = std::max(w_core, r.right());
+            h_core = std::max(h_core, r.top());
+            continue;
+        }
+        // Edge block flush to its border occupies its own width/height regardless of anchor
+        // side; corner (multi-side) blocks force both axes simultaneously.
+        w_edge = std::max(w_edge, r.w);
+        h_edge = std::max(h_edge, r.h);
+    }
+    *w_min = std::max({w_core, w_edge, 1.0});
+    *h_min = std::max({h_core, h_edge, 1.0});
+}
+
+// Cheap feasibility probe: on a scoped Problem at candidate (W,H), verify every edge block can
+// find a legal slot via firstLegalEdgeSlot, without mutating the caller's placement. Mirrors the
+// existing legalizeEdgeBlocks ordering (multi-side/corner blocks first, then largest extent) so
+// it estimates the same feasibility as the exact re-anchor loop would find (design §1.2.2-1.2.4).
+bool edgeBlocksFeasibleAt(const Problem& problem, const Placement& placement, double w, double h) {
+    Problem scoped = problem;
+    scoped.outline_w = w;
+    scoped.outline_h = h;
+
+    std::vector<int> edges;
+    for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
+        if (isEdge(problem.blocks[i].type)) edges.push_back(static_cast<int>(i));
+    }
+    if (edges.empty()) return true;
+
+    std::sort(edges.begin(), edges.end(), [&](int a, int b) {
+        bool ac = hasMultipleBoundarySides(problem.blocks[a]);
+        bool bc = hasMultipleBoundarySides(problem.blocks[b]);
+        if (ac != bc) return ac > bc;
+        double as = std::max(placement.rects[a].w, placement.rects[a].h);
+        double bs = std::max(placement.rects[b].w, placement.rects[b].h);
+        if (std::abs(as - bs) > kEps) return as > bs;
+        return a < b;
+    });
+
+    std::vector<Rect> rects = placement.rects;
+    for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
+        if (isEdge(problem.blocks[i].type)) rects[i] = dimensionFor(problem.blocks[i], 1.0);
+    }
+    std::vector<bool> placed(problem.blocks.size(), false);
+    for (int idx : edges) {
+        Rect slot = firstLegalEdgeSlot(scoped, problem.blocks[idx], rects, placed, idx);
+        if (!edgeRectLegal(scoped, problem.blocks[idx], slot)) return false;
+        if (slot.x < -kEps || slot.y < -kEps || slot.right() > w + kEps || slot.top() > h + kEps) return false;
+        // firstLegalEdgeSlot's multi-side (corner) branch defers straight to placeEdge, which is
+        // a pure function of outline dims + block dims + locations with no awareness of
+        // already-placed rects -- unlike the single-side branch it never runs collidesWithPlaced
+        // itself. Gate on it explicitly so two opposite corner blocks whose footprints overlap at
+        // a tight (W,H) are correctly rejected here (forcing the grow loop), matching the exact
+        // shrinkWrapOutline's "no state emits overlap" invariant (design §3.1).
+        if (collidesWithPlaced(rects, placed, idx, slot)) return false;
+        rects[idx] = slot;
+        placed[idx] = true;
+    }
+    return true;
+}
+
+}  // namespace
+
+OutlineFit shrinkWrapEstimate(const Problem& problem, const Placement& placement) {
+    double w = 0.0;
+    double h = 0.0;
+    lowerBoundNeeds(problem, placement, &w, &h);
+    w = std::min(w, problem.outline_w);
+    h = std::min(h, problem.outline_h);
+
+    constexpr int kMaxGrowSteps = 6;
+    for (int guard = 0; guard < kMaxGrowSteps; ++guard) {
+        if (edgeBlocksFeasibleAt(problem, placement, w, h)) {
+            return OutlineFit{w, h, true};
+        }
+        w = std::min(problem.outline_w, w * 1.05 + kEps);
+        h = std::min(problem.outline_h, h * 1.05 + kEps);
+    }
+    if (edgeBlocksFeasibleAt(problem, placement, problem.outline_w, problem.outline_h)) {
+        return OutlineFit{problem.outline_w, problem.outline_h, true};
+    }
+    return OutlineFit{problem.outline_w, problem.outline_h, false};
+}
+
 }  // namespace efgr
