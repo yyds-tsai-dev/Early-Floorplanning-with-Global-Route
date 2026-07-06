@@ -180,6 +180,58 @@ void testFeedthroughFinalizeWritesBackArea() {
     std::cout << "testFeedthroughFinalizeWritesBackArea ok\n";
 }
 
+void testAcceptFeedthroughPaydownRule() {
+    RoutingResult best;
+    best.feedthrough_mismatch = 5000.0;
+    best.open_routes = 0;
+    RoutingResult cand;
+    cand.open_routes = 0;
+
+    // The P0 defect: a candidate that pays mismatch down to 0 must commit even when
+    // its total score is far worse (re-decode spilled overflow/outline penalties).
+    cand.feedthrough_mismatch = 0.0;
+    assert(acceptFeedthroughPaydown(cand, 2.19e11, best, 6.39e10));
+    // Partial paydown commits too (old guard required mismatch == 0).
+    cand.feedthrough_mismatch = 4000.0;
+    assert(acceptFeedthroughPaydown(cand, 1e12, best, 6.39e10));
+    // Equal mismatch: only a lower total score commits (the compact/reclaim path).
+    cand.feedthrough_mismatch = 5000.0;
+    assert(acceptFeedthroughPaydown(cand, 6.0e10, best, 6.39e10));
+    assert(!acceptFeedthroughPaydown(cand, 7.0e10, best, 6.39e10));
+    // Higher mismatch never commits, no matter how good the total looks.
+    cand.feedthrough_mismatch = 6000.0;
+    assert(!acceptFeedthroughPaydown(cand, 1.0, best, 6.39e10));
+    // Open routes never commit.
+    cand.feedthrough_mismatch = 0.0;
+    cand.open_routes = 1;
+    assert(!acceptFeedthroughPaydown(cand, 1.0, best, 6.39e10));
+    std::cout << "testAcceptFeedthroughPaydownRule ok\n";
+}
+
+void testPaydownBetterLegSelection() {
+    RoutingResult a;
+    RoutingResult b;
+    a.open_routes = 0;
+    b.open_routes = 0;
+    // The mismatch-0 leg must win hybrid arbitration even at a much worse total,
+    // otherwise leg selection resurrects the finalizeFeedthrough commit defect.
+    a.feedthrough_mismatch = 0.0;
+    b.feedthrough_mismatch = 5000.0;
+    assert(paydownBetter(a, 2.0e11, b, 4.0e10));
+    assert(!paydownBetter(b, 4.0e10, a, 2.0e11));
+    // Equal mismatch: lower total wins (and exact ties keep the incumbent).
+    b.feedthrough_mismatch = 0.0;
+    assert(paydownBetter(a, 1.0e10, b, 2.0e10));
+    assert(!paydownBetter(a, 2.0e10, b, 1.0e10));
+    assert(!paydownBetter(a, 1.0e10, b, 1.0e10));
+    // Open routes are a hard fail and dominate any deduction.
+    a.open_routes = 1;
+    b.feedthrough_mismatch = 1.0e9;
+    assert(!paydownBetter(a, 1.0, b, 1.0e15));
+    assert(paydownBetter(b, 1.0e15, a, 1.0));
+    std::cout << "testPaydownBetterLegSelection ok\n";
+}
+
 void testFinalizeFeedthroughDirect() {
     Problem p = forcedFtProblem();  // 500x300, FT forced
     p.outline_w = 620.0;
@@ -225,6 +277,8 @@ int main() {
     testDirectAbutmentZeroWirelength();
     testOutlineConsistencyEvalVsCfg();
     testFeedthroughFinalizeWritesBackArea();
+    testAcceptFeedthroughPaydownRule();
+    testPaydownBetterLegSelection();
     testFinalizeFeedthroughDirect();
     std::cout << "p0 regressions passed\n";
     return 0;

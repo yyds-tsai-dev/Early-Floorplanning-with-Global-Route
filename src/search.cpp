@@ -8,6 +8,7 @@
 
 #include "eval.hpp"
 #include "ft.hpp"
+#include "validate.hpp"
 
 namespace efgr {
 namespace {
@@ -55,6 +56,19 @@ Placement compactTowardOrigin(const Problem& problem, Placement placement) {
     return placement;
 }
 
+bool fitsOutlineWithoutOverlap(const Problem& problem, const Placement& placement) {
+    for (std::size_t i = 0; i < placement.rects.size(); ++i) {
+        const Rect& r = placement.rects[i];
+        if (r.x < -kEps || r.y < -kEps || r.right() > problem.outline_w + kEps || r.top() > problem.outline_h + kEps) {
+            return false;
+        }
+        for (std::size_t j = i + 1; j < placement.rects.size(); ++j) {
+            if (overlaps(r, placement.rects[j])) return false;
+        }
+    }
+    return true;
+}
+
 }  // namespace
 
 std::string placementKey(const Placement& placement) {
@@ -70,12 +84,35 @@ std::string placementKey(const Placement& placement) {
     return out.str();
 }
 
+bool paydownBetter(const RoutingResult& a, double a_value, const RoutingResult& b, double b_value) {
+    if (a.open_routes != b.open_routes) return a.open_routes < b.open_routes;
+    if (a.feedthrough_mismatch < b.feedthrough_mismatch - kEps) return true;
+    if (b.feedthrough_mismatch < a.feedthrough_mismatch - kEps) return false;
+    return a_value < b_value;
+}
+
+bool acceptFeedthroughPaydown(const RoutingResult& candidate, double candidate_value,
+                              const RoutingResult& best, double best_value) {
+    if (candidate.open_routes != 0) return false;
+    if (candidate.feedthrough_mismatch < best.feedthrough_mismatch - kEps) return true;
+    return candidate.feedthrough_mismatch <= best.feedthrough_mismatch + kEps && candidate_value < best_value;
+}
+
 void finalizeFeedthrough(const Problem& problem, const PlacementEngine& engine, SearchResult& result) {
     if (result.best_routing.feedthrough_mismatch <= kEps) return;
     Problem inflated = problem;
     Placement placement = result.best_placement;
     RoutingResult routing = result.best_routing;
     std::mt19937 rng(0x9e3779b9u);
+    // Commit gate: mismatch paydown first, but never at the price of a solution main.cpp
+    // would report as invalid (the corrected decode can spill blocks past MAX).
+    auto tryCommit = [&](const Placement& candidate, const Score& score, const RoutingResult& cand_routing) {
+        if (!acceptFeedthroughPaydown(cand_routing, score.value, result.best_routing, result.best_score.value)) return;
+        if (!validateSolution(problem, candidate, cand_routing).ok) return;
+        result.best_score = score;
+        result.best_placement = candidate;
+        result.best_routing = cand_routing;
+    };
     for (int pass = 0; pass < 3; ++pass) {
         bool grew = false;
         for (std::size_t i = 0; i < inflated.blocks.size(); ++i) {
@@ -95,11 +132,28 @@ void finalizeFeedthrough(const Problem& problem, const PlacementEngine& engine, 
         RoutingResult new_routing;
         Score exact = exactScore(inflated, placement, &new_routing);
         routing = new_routing;
-        if (new_routing.feedthrough_mismatch <= kEps && new_routing.open_routes == 0 &&
-            exact.value < result.best_score.value) {
-            result.best_score = exact;
-            result.best_placement = placement;
-            result.best_routing = new_routing;
+        tryCommit(placement, exact, new_routing);
+        // Reclaim outline/overflow lost to the inflated re-decode: same dims, tighter packing.
+        Placement compacted = compactTowardOrigin(inflated, placement);
+        if (fitsOutlineWithoutOverlap(inflated, compacted)) {
+            RoutingResult compacted_routing;
+            Score compacted_exact = exactScore(inflated, compacted, &compacted_routing);
+            tryCommit(compacted, compacted_exact, compacted_routing);
+        }
+        // A single re-decode of the inflated problem often spills past MAX (a legal
+        // arrangement may still exist -- other engines find one). Jiggle the inflated
+        // topology a bounded number of times; only geometrically legal candidates pay
+        // for exact routing, and all commits go through the same paydown gate.
+        constexpr int kFinalizeRepairAttempts = 32;
+        PlacementState repair = state;
+        for (int attempt = 0; attempt < kFinalizeRepairAttempts; ++attempt) {
+            engine.mutate(inflated, repair, rng);
+            if (!engine.isValidState(inflated, repair)) continue;
+            Placement cand = engine.decode(inflated, repair);
+            if (!fitsOutlineWithoutOverlap(inflated, cand)) continue;
+            RoutingResult cand_routing;
+            Score cand_exact = exactScore(inflated, cand, &cand_routing);
+            tryCommit(cand, cand_exact, cand_routing);
         }
     }
 }
@@ -233,7 +287,10 @@ SearchResult runHybridPlacementSearch(const Problem& problem, const SearchOption
     PlacementState bstar_seed = bstar->seedFromPlacement(problem, sp_result.best_placement, rng);
     SearchResult bstar_result = runPlacementSearch(problem, *bstar, bstar_options, bstar_seed);
 
-    SearchResult result = bstar_result.best_score.value < sp_result.best_score.value ? bstar_result : sp_result;
+    SearchResult result = paydownBetter(bstar_result.best_routing, bstar_result.best_score.value,
+                                        sp_result.best_routing, sp_result.best_score.value)
+                              ? bstar_result
+                              : sp_result;
     result.engine_name = "hybrid";
     result.iterations = sp_result.iterations + bstar_result.iterations;
     result.exact_evaluations = sp_result.exact_evaluations + bstar_result.exact_evaluations;

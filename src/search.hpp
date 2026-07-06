@@ -25,6 +25,13 @@ struct SearchResult {
 };
 
 std::string placementKey(const Placement& placement);
+// finalizeFeedthrough commit rule: pay the FT-mismatch deduction down first (QA A1.2),
+// independent of total score; between equal-mismatch candidates prefer the lower total.
+bool acceptFeedthroughPaydown(const RoutingResult& candidate, double candidate_value,
+                              const RoutingResult& best, double best_value);
+// Result arbitration (hybrid legs) under the same paydown-first ordering:
+// fewer open routes, then lower feedthrough mismatch, then lower total score.
+bool paydownBetter(const RoutingResult& a, double a_value, const RoutingResult& b, double b_value);
 SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& engine, const SearchOptions& options);
 SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& engine, const SearchOptions& options,
                                 const PlacementState& initial_state);
