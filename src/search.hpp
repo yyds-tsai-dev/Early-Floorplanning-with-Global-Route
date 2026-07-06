@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <string>
 
 #include "model.hpp"
@@ -23,6 +24,25 @@ struct SearchResult {
     Placement best_placement;
     RoutingResult best_routing;
 };
+
+// Exact-scoring callback shape used by the elite pass's exact_cache (search.cpp's `exactCached`
+// lambda) and injected into outlineSweep below so the sweep shares the same cache/dedupe path.
+using ExactCachedFn = std::function<Score(const Placement&, RoutingResult*)>;
+
+struct OutlineSweepResult {
+    Score score;
+    Placement placement;
+    RoutingResult routing;
+};
+
+// Elite-pass outline sweep (design p1-design.md §1.4 elite path): for a fixed set of rects
+// (`base`, its own outline_w/h ignored -- always re-shrink-wrapped), tries a deterministic ladder
+// of declared-outline margins between the tight shrink-wrap and MAX, exact-scores each via the
+// caller-supplied `exactCached` (so results share the caller's exact-eval cache), and returns the
+// best variant: open_routes==0 strictly preferred over fewer open routes, then lower score.value
+// (mirrors compactTowardOrigin's fresh-restamp discipline -- see its comment above). Deterministic:
+// fixed margin ladder, no RNG.
+OutlineSweepResult outlineSweep(const Problem& problem, const Placement& base, const ExactCachedFn& exactCached);
 
 std::string placementKey(const Placement& placement);
 // Pushes non-edge blocks toward the origin against problem.outline_w/h (MAX), reclaiming slack

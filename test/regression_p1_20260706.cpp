@@ -558,6 +558,156 @@ void testCompactTowardOriginResetsStampedOutline() {
     std::cout << "testCompactTowardOriginResetsStampedOutline ok\n";
 }
 
+// T7 (design §1.4 elite path): outlineSweep must pick the margin whose ACTUAL (real,
+// shrink-wrapped) declared outline scores lowest, not just the tightest one -- this is the R1
+// area<->overflow coupling the design calls out (design p1-design.md §6 R1): a slightly larger
+// declared outline can cost less overall once a graded overflow/legality penalty is folded in,
+// even though its raw W*H is bigger.
+//
+// Real geometry, mocked scoring: two opposite-top-corner edge blocks (TL, TR) force the true
+// tight frontier down to a specific (W,H) via shrinkWrapOutline's own bisection (not hand-picked),
+// so each margin's *actual* stamped outline_w*outline_h is whatever shrinkWrapOutline really
+// computes for that margin's ceiling -- confirmed empirically to differ measurably margin-to-
+// margin (bisection tolerance is ceiling-relative, so a bigger ceiling converges to a slightly
+// different frontier point). The scoring itself is mocked (not real routing) so the test isolates
+// outlineSweep's OWN selection/preference logic from routing-noise: any variant whose stamped area
+// is below a fixed threshold is charged a large synthetic "overflow" penalty (simulating a channel
+// too narrow to route the mocked bundle), while variants at/above the threshold are not. This is
+// exactly the RED the task brief calls for: if outlineSweep only ever tries margin 0 (or picks
+// purely by area), it returns the penalized tight candidate; only a correct multi-margin sweep
+// that exact-scores every rung and prefers the lower total finds the untaxed larger one.
+void testOutlineSweepPrefersLowerScoreOverTighterArea() {
+    Problem problem;
+    auto addBlock = [&](const std::string& name, double w, double h, BlockType type,
+                         std::vector<std::string> locs) {
+        Block b;
+        b.name = name;
+        b.width = w;
+        b.height = h;
+        b.area = w * h;
+        b.ar_min = 1.0;
+        b.ar_max = 1.0;
+        b.type = type;
+        b.locations = std::move(locs);
+        b.ft_rates = {0.2, 0.4, 0.8, 1.0};
+        problem.block_index[name] = static_cast<int>(problem.blocks.size());
+        problem.blocks.push_back(b);
+    };
+    problem.outline_w = 1000.0;
+    problem.outline_h = 1000.0;
+    addBlock("BLK_TL", 80.0, 40.0, BlockType::Edge, {"TL", "LT"});
+    addBlock("BLK_TR", 80.0, 40.0, BlockType::Edge, {"TR", "RT"});
+    addBlock("CORE", 50.0, 50.0, BlockType::Macro, {});
+    problem.alpha = 0.2;
+
+    Placement base;
+    base.rects.resize(3);
+    base.aspect.assign(3, 1.0);
+    base.rects[0] = Rect{0.0, 960.0, 80.0, 40.0};
+    base.rects[1] = Rect{920.0, 960.0, 80.0, 40.0};
+    base.rects[2] = Rect{0.0, 0.0, 50.0, 50.0};
+
+    // Establish the REAL tight area first (what margin 0.0 will actually stamp), so the mock's
+    // penalty threshold is anchored to real geometry, not a guessed constant.
+    Placement tight_probe = base;
+    OutlineFit tight_fit = shrinkWrapOutline(problem, tight_probe);
+    assert(tight_fit.legal);
+    double tight_area = tight_fit.w * tight_fit.h;
+
+    // Mock exactCached: any candidate whose stamped area is within 0.1% of the tight area (i.e.
+    // margin 0.0's own rung, and only that rung) is "too tight to route" -- large synthetic
+    // overflow penalty. Everything strictly bigger (any later rung that actually grew) is clean.
+    // This directly encodes the R1 trade: tight wins on raw area, loses once overflow is charged.
+    auto mockExactCached = [&](const Placement& placement, RoutingResult* routing_out) {
+        RoutingResult routing;
+        Score score;
+        score.outline_area = placement.outline_w * placement.outline_h;
+        bool too_tight = score.outline_area < tight_area * 1.001;
+        score.penalty = too_tight ? 1.0e7 : 0.0;
+        score.wirelength = 0.0;
+        score.value = score.outline_area + score.penalty;
+        routing.open_routes = 0;
+        if (routing_out) *routing_out = routing;
+        return score;
+    };
+
+    OutlineSweepResult result = outlineSweep(problem, base, mockExactCached);
+
+    assert(result.routing.open_routes == 0);
+    // The winner must NOT be the tight (margin 0.0) rung -- it is penalized in the mock -- and its
+    // total score must be strictly better than the tight rung's own mocked score.
+    Score tight_mock_score = mockExactCached(tight_probe, nullptr);
+    assert(result.score.value < tight_mock_score.value - kEps);
+    assert(result.placement.outline_w * result.placement.outline_h > tight_area * 1.001 - kEps);
+    std::cout << "testOutlineSweepPrefersLowerScoreOverTighterArea ok\n";
+}
+
+// T7 end-to-end (design §1.4 elite path + task brief acceptance criterion): running the full SA
+// search (which now routes every elite/compacted candidate through outlineSweep) on the
+// overflow-prone case1 must still land on a legal, fully-routed, validated solution -- the sweep
+// must never trade away legality for a lower score (open_routes==0 is a strict precondition in the
+// preference rule, not a soft one).
+void testOutlineSweepEndToEndCase1BStarSeed1OpenRoutesZero() {
+    Problem problem = parseProblem("test/2026 ICCAD_case.case1.csv");
+    std::unique_ptr<PlacementEngine> engine = makePlacementEngine("bstar");
+    SearchOptions options;
+    options.iters = 300;
+    options.seed = 1;
+    SearchResult result = runPlacementSearch(problem, *engine, options);
+
+    assert(result.best_routing.open_routes == 0);
+    ValidationResult vr = validateSolution(problem, result.best_placement, result.best_routing);
+    if (!vr.ok) {
+        for (const auto& msg : vr.messages) std::cerr << "validate: " << msg << "\n";
+    }
+    assert(vr.ok);
+
+    // The sweep's guarantee: its own m=0.0 rung reproduces exactly what a single tight-stamp
+    // exactScore would have found, so sweeping in additional rungs can only match or improve on
+    // that baseline -- never regress. Recompute the tight-stamp-only baseline independently (a
+    // fresh shrink-wrap + exactScore on the winning rects, NOT reusing any cached sweep value) and
+    // assert the search's reported best is at least as good.
+    Placement tight_check = result.best_placement;
+    tight_check.outline_w = 0.0;
+    tight_check.outline_h = 0.0;
+    Score tight_only = exactScore(problem, tight_check, nullptr);
+    assert(result.best_score.value <= tight_only.value + kEps);
+    std::cout << "testOutlineSweepEndToEndCase1BStarSeed1OpenRoutesZero ok\n";
+}
+
+// T7 review follow-up (small, permanent regression): case0 decode -> compactTowardOrigin ->
+// restamp (exactly the sequence the elite loop performs before exact-scoring a compacted
+// candidate) -> validateSolution ok, end-to-end with real routing.
+void testCompactedCandidateRestampValidatesEndToEnd() {
+    Problem problem = parseProblem("test/2026 ICCAD_case.case0.csv");
+    std::unique_ptr<PlacementEngine> engine = makePlacementEngine("bstar");
+    std::mt19937 rng(1);
+    PlacementState state = engine->initialState(problem, rng);
+    Placement placement = engine->decode(problem, state);
+
+    Placement compacted = compactTowardOrigin(problem, placement);
+    assert(compacted.outline_w == 0.0 && compacted.outline_h == 0.0);
+
+    OutlineFit fit = shrinkWrapOutline(problem, compacted);
+    assert(fit.legal);
+
+    RoutingResult routing = routeProblem(
+        [&] {
+            Problem scoped = problem;
+            scoped.outline_w = compacted.outline_w;
+            scoped.outline_h = compacted.outline_h;
+            return scoped;
+        }(),
+        compacted);
+
+    ValidationResult vr = validateSolution(problem, compacted, routing);
+    if (!vr.ok) {
+        for (const auto& msg : vr.messages) std::cerr << "validate: " << msg << "\n";
+    }
+    assert(vr.ok);
+    std::cout << "testCompactedCandidateRestampValidatesEndToEnd ok\n";
+}
+
 }  // namespace
 
 int main() {
@@ -576,6 +726,9 @@ int main() {
     testShrinkWrapOutlineBisectionFindsNearMinimalOutlineCase0Raw();
     testExactScoreRoutesInsideStampedDeclaredOutlineCase0();
     testCompactTowardOriginResetsStampedOutline();
+    testOutlineSweepPrefersLowerScoreOverTighterArea();
+    testOutlineSweepEndToEndCase1BStarSeed1OpenRoutesZero();
+    testCompactedCandidateRestampValidatesEndToEnd();
     std::cout << "p1 regressions passed\n";
     return 0;
 }

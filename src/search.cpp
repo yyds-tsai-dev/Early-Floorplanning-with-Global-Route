@@ -108,6 +108,69 @@ bool acceptFeedthroughPaydown(const RoutingResult& candidate, double candidate_v
     return candidate.feedthrough_mismatch <= best.feedthrough_mismatch + kEps && candidate_value < best_value;
 }
 
+namespace {
+
+// Elite-pass outline sweep preference (design p1-design.md §1.4 elite path): open_routes==0 is
+// strictly preferred over any nonzero count (legality first, per the same discipline as
+// acceptFeedthroughPaydown/paydownBetter above); among equally-legal candidates, lower value wins.
+bool outlineSweepBetter(const RoutingResult& a, double a_value, const RoutingResult& b, double b_value) {
+    if ((a.open_routes == 0) != (b.open_routes == 0)) return a.open_routes == 0;
+    return a_value < b_value;
+}
+
+}  // namespace
+
+OutlineSweepResult outlineSweep(const Problem& problem, const Placement& base, const ExactCachedFn& exactCached) {
+    // Deterministic margin ladder (fractions of MAX-tight added to both dims), fixed per the task
+    // brief -- no RNG. m=0.0 is the tight shrink-wrap itself (today's single-eval behavior), so
+    // this sweep is strictly Pareto-safe: it can only match or beat the pre-sweep baseline.
+    static constexpr double kMargins[] = {0.0, 0.02, 0.05, 0.10, 0.20};
+
+    Placement tight = base;
+    tight.outline_w = 0.0;
+    tight.outline_h = 0.0;
+    OutlineFit tight_fit = shrinkWrapOutline(problem, tight);
+    double tight_w = tight_fit.legal ? tight_fit.w : problem.outline_w;
+    double tight_h = tight_fit.legal ? tight_fit.h : problem.outline_h;
+
+    OutlineSweepResult best;
+    bool have_best = false;
+    double last_target_w = -1.0;
+    double last_target_h = -1.0;
+    for (double margin : kMargins) {
+        double target_w = tight_w + margin * (problem.outline_w - tight_w);
+        double target_h = tight_h + margin * (problem.outline_h - tight_h);
+        // Skip a duplicate rung (e.g. tight == MAX already, so every larger margin's target is
+        // identical to m=0.0's) -- avoids a redundant exact-score call; the cache would dedupe it
+        // anyway via placementKey, but skipping keeps the sweep's trial count honest.
+        if (have_best && std::abs(target_w - last_target_w) < kEps && std::abs(target_h - last_target_h) < kEps) {
+            continue;
+        }
+        last_target_w = target_w;
+        last_target_h = target_h;
+
+        Placement variant = base;
+        variant.outline_w = 0.0;
+        variant.outline_h = 0.0;
+        Problem ceiling = problem;
+        ceiling.outline_w = target_w;
+        ceiling.outline_h = target_h;
+        // Same ceiling trick exactScore's corrective grow uses (eval.cpp): shrinkWrapOutline only
+        // ever searches DOWN from the ceiling it is given, so scoping the ceiling to this margin's
+        // target forces the bisection's t=1 endpoint to land exactly there when nothing smaller in
+        // (tight, target] is feasible, re-anchoring edge blocks at that target border.
+        shrinkWrapOutline(ceiling, variant);
+
+        RoutingResult routing;
+        Score score = exactCached(variant, &routing);
+        if (!have_best || outlineSweepBetter(routing, score.value, best.routing, best.score.value)) {
+            best = OutlineSweepResult{score, variant, routing};
+            have_best = true;
+        }
+    }
+    return best;
+}
+
 void finalizeFeedthrough(const Problem& problem, const PlacementEngine& engine, SearchResult& result) {
     if (result.best_routing.feedthrough_mismatch <= kEps) return;
     Problem inflated = problem;
@@ -264,24 +327,29 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
     }
 
     for (const auto& candidate : top_candidates) {
-        RoutingResult routing;
-        Score exact = exactCached(candidate.placement, &routing);
-        if (exact.value < result.best_score.value) {
-            result.best_score = exact;
-            result.best_placement = candidate.placement;
-            result.best_routing = routing;
+        // T7 (design §1.4 elite path): replaces the single tight-stamp exactCached call with a
+        // deterministic outline-margin sweep -- m=0.0 reproduces the exact prior single-eval
+        // behavior, so this can only match or beat it (strictly Pareto-safe). Preference mirrors
+        // outlineSweep's own internal rule (open_routes==0 strictly first, then lower value) so
+        // the elite loop never regresses legality chasing a lower score.
+        OutlineSweepResult swept = outlineSweep(problem, candidate.placement, exactCached);
+        if (outlineSweepBetter(swept.routing, swept.score.value, result.best_routing, result.best_score.value)) {
+            result.best_score = swept.score;
+            result.best_placement = swept.placement;
+            result.best_routing = swept.routing;
         }
 
         Placement compacted = compactTowardOrigin(problem, candidate.placement);
-        // Re-stamp immediately (see the matching comment in finalizeFeedthrough above): keeps
-        // `compacted` internally consistent before it is cached/stored as best_placement, and
-        // gives exactCached's placementKey the real declared outline instead of the reset 0x0.
-        shrinkWrapOutline(problem, compacted);
-        Score compact_exact = exactCached(compacted, &routing);
-        if (compact_exact.value < result.best_score.value) {
-            result.best_score = compact_exact;
-            result.best_placement = compacted;
-            result.best_routing = routing;
+        // compactTowardOrigin resets outline_w/h to 0 (moved core rects invalidate any prior
+        // stamp) -- outlineSweep re-shrink-wraps from scratch per rung regardless, so no
+        // additional restamp is needed here before sweeping (unlike the pre-T7 single-eval path,
+        // which required an explicit restamp so exactCached's placementKey stayed accurate).
+        OutlineSweepResult swept_compacted = outlineSweep(problem, compacted, exactCached);
+        if (outlineSweepBetter(swept_compacted.routing, swept_compacted.score.value, result.best_routing,
+                               result.best_score.value)) {
+            result.best_score = swept_compacted.score;
+            result.best_placement = swept_compacted.placement;
+            result.best_routing = swept_compacted.routing;
         }
     }
 
