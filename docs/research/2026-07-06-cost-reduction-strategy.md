@@ -260,3 +260,16 @@ Commands: `bin/efgr "test/2026 ICCAD_case.caseN.csv" out.cfg --engine ENGINE --i
 ### Status note
 
 T8's two changes (paydown-first commit guard; inflated re-decode growing toward MAX for headroom) were **already implemented** before this task started — the guard landed in commit `16cf24b` (P0 follow-up, 2026-07-06) and the MAX-ceiling growth is an automatic consequence of T4/T4.5's `shrinkWrapOutline` running inside `decode` against the inflated `Problem` copy (whose `outline_w/h` stays at MAX). This task's contribution is verification (confirming both P1 acceptance criteria pass at the specified parameters) plus a new permanent regression (`testFinalizeFeedthroughAcceptanceCase1Hybrid`, `testFinalizeFeedthroughAcceptanceCase3Hybrid` in `test/regression_p1_20260706.cpp`) locking the acceptance gate in place, and this results writeup. No `src/` changes were needed.
+
+### P1 addendum (2026-07-07, post-T8.1): outline growth cannot relieve inter-core congestion
+
+Extending the elite sweep ladder to m ∈ {0.5, 1.0} (MAX-like rungs) was tested and mostly falsified:
+14/15 rows unchanged (only case3/sp improved, 1.088e11 → 8.753e10). Root cause: `anchorAtOutline`
+re-anchors edge blocks only — the core packing SA produced under the new area gradient stays frozen,
+so larger declared outlines add *peripheral* whitespace, not channel capacity *between* congested
+cores. With overflow weighted 1e6, tight-core candidates therefore score worse than the loose-core
+solutions pre-P1 SA used to produce, on overflow-bound cases (1-4). This is the design's §5/§6-R1
+dependency showing up as measured: the P1 area win is real (up to −33% outline_area; case0 hybrid
+−14.5%) but converts into net Cost only where routing fits (case0), and needs **P3 demand-driven
+re-spacing** (widen exactly the deficient inter-core strips) to land on cases 1-4. The wider ladder
+is kept (harmless, cached, case3 benefits). No Pareto-vs-P0 claim is made for the P1 sweep table.

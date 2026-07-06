@@ -124,7 +124,11 @@ OutlineSweepResult outlineSweep(const Problem& problem, const Placement& base, c
     // Deterministic margin ladder (fractions of MAX-tight added to both dims), fixed per the task
     // brief -- no RNG. m=0.0 is the tight shrink-wrap itself (today's single-eval behavior), so
     // this sweep is strictly Pareto-safe: it can only match or beat the pre-sweep baseline.
-    static constexpr double kMargins[] = {0.0, 0.02, 0.05, 0.10, 0.20};
+    // T8.1: extended with 0.50/1.0 rungs so the ladder can recover MAX-like outlines on
+    // overflow-bound cases, where tight outlines carry huge channel_overflow penalties that the
+    // 0.02-0.20 rungs alone cannot climb back out of. The existing duplicate-target skip below
+    // handles tight==MAX (all extra rungs collapse to a no-op there).
+    static constexpr double kMargins[] = {0.0, 0.02, 0.05, 0.10, 0.20, 0.50, 1.0};
 
     Placement tight = base;
     tight.outline_w = 0.0;
