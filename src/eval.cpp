@@ -172,13 +172,12 @@ Score exactScore(const Problem& problem, const Placement& placement, RoutingResu
     // One-step corrective grow (design §1.4): if the declared outline was too tight to route,
     // grow once and re-route. Target size scales toward MAX by the worse of a flat +5% floor or a
     // margin sized to the observed channel_overflow (overflow/25, matching channelMarginProxy's
-    // nets-per-25 capacity unit), clamped to MAX. shrinkWrapOutline only ever searches DOWN from
-    // whatever ceiling it is given (it never enlarges beyond it -- design §1.2.4), so to force a
-    // floor at the grown target we scope a Problem whose ceiling equals that target directly (not
-    // problem's real MAX) and re-legalize edges against it: the bisection's t=1 endpoint is then
-    // exactly the grown target, which becomes the trial actually committed unless the grown
-    // target ITSELF is infeasible (rare -- e.g. an edge/thirds conflict that isn't sized by
-    // overflow), in which case the ceiling call reports illegal and we keep the original result.
+    // nets-per-25 capacity unit), clamped to MAX.
+    // T7.1 bugfix: this used to scope a Problem whose ceiling equals the grown target and call
+    // shrinkWrapOutline -- but shrinkWrapOutline is a minimizer that bisects back DOWN to the tight
+    // legal frontier regardless of the ceiling given, so `regrow` was silently re-stamped at ~the
+    // SAME tight outline every time, never actually growing (this open-route relief path was dead
+    // code). anchorAtOutline anchors directly at the grown target (no bisection) instead.
     if (routing.open_routes > 0) {
         double margin = std::max(0.05, routing.channel_overflow / 25.0 / std::max(w, h));
         double grown_w = std::min(problem.outline_w, w * (1.0 + margin));
@@ -188,7 +187,7 @@ Score exactScore(const Problem& problem, const Placement& placement, RoutingResu
         ceiling.outline_w = grown_w;
         ceiling.outline_h = grown_h;
         Placement regrow = local;
-        OutlineFit grown_fit = shrinkWrapOutline(ceiling, regrow);
+        OutlineFit grown_fit = anchorAtOutline(ceiling, regrow);
 
         if (grown_fit.legal) {
             RoutingResult grown_routing;

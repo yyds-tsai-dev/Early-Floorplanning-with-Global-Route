@@ -768,6 +768,34 @@ bool placementLegalAt(const Problem& problem, const Placement& placement, double
     return true;
 }
 
+// Shared commit primitive for both shrinkWrapOutline (called at its bisected winning (w,h)) and
+// anchorAtOutline (called directly at a caller-chosen (w,h), no bisection): resets edge rects via
+// dimensionFor, re-legalizes them against a Problem scoped to (w,h) via legalizeEdgeBlocks, and
+// gates on placementLegalAt (containment + no overlap + edge-location rules). Pure function of
+// (problem, placement's current rects, w, h) -- no bisection/search of its own. Always writes the
+// re-legalized edge rects + declared outline into `placement` and reports the gate result via
+// OutlineFit.legal, matching shrinkWrapOutline's pre-existing "always stamp, report legal
+// separately" behavior -- callers that must NOT mutate on failure (e.g. anchorAtOutline) check
+// `.legal` and discard/restore `placement` themselves rather than relying on this helper to skip
+// the write.
+OutlineFit commitOutlineAt(const Problem& problem, Placement& placement, double w, double h) {
+    Problem scoped = problem;
+    scoped.outline_w = w;
+    scoped.outline_h = h;
+    Placement trial = placement;
+    for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
+        if (isEdge(problem.blocks[i].type)) trial.rects[i] = dimensionFor(problem.blocks[i], 1.0);
+    }
+    legalizeEdgeBlocks(scoped, trial);
+    bool legal = placementLegalAt(scoped, trial, w, h);
+    for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
+        if (isEdge(problem.blocks[i].type)) placement.rects[i] = trial.rects[i];
+    }
+    placement.outline_w = w;
+    placement.outline_h = h;
+    return OutlineFit{w, h, legal};
+}
+
 // Shared bisection search (T4.5, design amendment 2026-07-06): feasibility over (W,H) is monotone
 // -- if a candidate is feasible, every larger candidate (component-wise) is too, and (MAX_w,MAX_h)
 // is always feasible (it is what decode already legally produced). Given per-axis lower bounds
@@ -903,21 +931,15 @@ OutlineFit shrinkWrapOutline(const Problem& problem, Placement& placement, int m
     // stamp its edge rects + declared outline into `placement`. Never commits from an infeasible
     // midpoint (design §1.2.4): `feasible` already re-verified `(w,h)` above (or it is the MAX
     // fallback, always legal since it reproduces decode's own legalization).
-    Problem scoped = problem;
-    scoped.outline_w = w;
-    scoped.outline_h = h;
+    return commitOutlineAt(problem, placement, w, h);
+}
+
+OutlineFit anchorAtOutline(const Problem& scoped, Placement& placement) {
     Placement trial = placement;
-    for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
-        if (isEdge(problem.blocks[i].type)) trial.rects[i] = dimensionFor(problem.blocks[i], 1.0);
-    }
-    legalizeEdgeBlocks(scoped, trial);
-    bool legal = placementLegalAt(scoped, trial, w, h);
-    for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
-        if (isEdge(problem.blocks[i].type)) placement.rects[i] = trial.rects[i];
-    }
-    placement.outline_w = w;
-    placement.outline_h = h;
-    return OutlineFit{w, h, legal};
+    OutlineFit fit = commitOutlineAt(scoped, trial, scoped.outline_w, scoped.outline_h);
+    if (!fit.legal) return OutlineFit{scoped.outline_w, scoped.outline_h, false};
+    placement = trial;
+    return fit;
 }
 
 }  // namespace efgr

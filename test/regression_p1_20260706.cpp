@@ -708,6 +708,128 @@ void testCompactedCandidateRestampValidatesEndToEnd() {
     std::cout << "testCompactedCandidateRestampValidatesEndToEnd ok\n";
 }
 
+// T7.1 (bugfix): outlineSweep/exactScore's corrective grow both scope shrinkWrapOutline's ceiling
+// to a candidate target and expect it to land AT that target -- but shrinkWrapOutline is a
+// minimizer that bisects back DOWN to the tight legal frontier regardless of the ceiling given, so
+// every non-tight rung silently collapses back to ~tight (dead code). anchorAtOutline is the fix:
+// it anchors edge blocks against EXACTLY the given problem's outline_w/h (no bisection) and reports
+// legal=false if that exact outline cannot legally host the edge blocks.
+//
+// This test drives a real case0 bstar seed-1 decode to its tight stamp (W0,H0), builds a strictly
+// larger "target" 10% of the way from tight to MAX, and asserts anchorAtOutline actually stamps
+// THAT target -- not the tight frontier -- while leaving core rects untouched and every rect
+// (including R/T edge blocks, which must be flush at the TARGET border, not the tight one) legal.
+void testAnchorAtOutlineStampsExactTargetNotTightCase0() {
+    Problem problem = parseProblem("test/2026 ICCAD_case.case0.csv");
+    std::unique_ptr<PlacementEngine> engine = makePlacementEngine("bstar");
+    std::mt19937 rng(1);
+    PlacementState state = engine->initialState(problem, rng);
+    Placement placement = engine->decode(problem, state);
+
+    Placement tight = placement;
+    tight.outline_w = 0.0;
+    tight.outline_h = 0.0;
+    OutlineFit tight_fit = shrinkWrapOutline(problem, tight);
+    assert(tight_fit.legal);
+    double w0 = tight_fit.w;
+    double h0 = tight_fit.h;
+    // Sanity: case0 actually shrinks below MAX, otherwise target==tight and the test would not
+    // distinguish anchorAtOutline from shrinkWrapOutline.
+    assert(w0 < problem.outline_w - kEps || h0 < problem.outline_h - kEps);
+
+    double target_w = w0 + 0.1 * (problem.outline_w - w0);
+    double target_h = h0 + 0.1 * (problem.outline_h - h0);
+
+    Problem scoped = problem;
+    scoped.outline_w = target_w;
+    scoped.outline_h = target_h;
+
+    Placement variant = placement;
+    variant.outline_w = 0.0;
+    variant.outline_h = 0.0;
+    OutlineFit fit = anchorAtOutline(scoped, variant);
+
+    assert(fit.legal);
+    assert(std::abs(fit.w - target_w) < kEps);
+    assert(std::abs(fit.h - target_h) < kEps);
+    assert(std::abs(variant.outline_w - target_w) < kEps);
+    assert(std::abs(variant.outline_h - target_h) < kEps);
+    // Not the tight frontier -- the whole point of the fix.
+    assert(std::abs(variant.outline_w - w0) > kEps || std::abs(variant.outline_h - h0) > kEps);
+
+    for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
+        if (isEdge(problem.blocks[i].type)) continue;
+        assert(rectsByteEqual(placement.rects[i], variant.rects[i]));
+    }
+
+    for (std::size_t i = 0; i < variant.rects.size(); ++i) {
+        const Rect& r = variant.rects[i];
+        assert(r.x >= -kEps && r.y >= -kEps);
+        assert(r.right() <= target_w + kEps);
+        assert(r.top() <= target_h + kEps);
+    }
+
+    bool saw_right_or_top_edge = false;
+    for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
+        if (!isEdge(problem.blocks[i].type)) continue;
+        for (const auto& loc : problem.blocks[i].locations) {
+            char side = loc.empty() ? '\0' : loc[0];
+            if (side == 'R') {
+                assert(std::abs(variant.rects[i].right() - target_w) < kEps);
+                saw_right_or_top_edge = true;
+            } else if (side == 'T') {
+                assert(std::abs(variant.rects[i].top() - target_h) < kEps);
+                saw_right_or_top_edge = true;
+            }
+        }
+    }
+    assert(saw_right_or_top_edge);
+    std::cout << "testAnchorAtOutlineStampsExactTargetNotTightCase0 ok\n";
+}
+
+// T7.1 sweep-effectiveness: outlineSweep must actually probe DISTINCT declared outlines across its
+// margin ladder, not collapse every rung back to ~tight via shrinkWrapOutline's re-bisection. Uses
+// a probe ExactCachedFn that records each variant's stamped outline area and returns a dummy score
+// that always prefers m=0.0 (so the recorded probes reflect the sweep's OWN internal candidate
+// generation, independent of which one it ultimately picks).
+void testOutlineSweepProbesDistinctOutlinesCase0() {
+    Problem problem = parseProblem("test/2026 ICCAD_case.case0.csv");
+    std::unique_ptr<PlacementEngine> engine = makePlacementEngine("bstar");
+    std::mt19937 rng(1);
+    PlacementState state = engine->initialState(problem, rng);
+    Placement placement = engine->decode(problem, state);
+
+    std::vector<double> probed_areas;
+    double first_area = -1.0;
+    ExactCachedFn probe = [&](const Placement& p, RoutingResult* routing_out) {
+        double area = p.outline_w * p.outline_h;
+        probed_areas.push_back(area);
+        if (first_area < 0.0) first_area = area;
+        RoutingResult routing;
+        routing.open_routes = 0;
+        Score score;
+        score.outline_area = area;
+        // Always prefer the FIRST probed rung (m=0.0, the tight rung) regardless of area, so the
+        // sweep's own selection logic cannot be mistaken for what this test is checking (which
+        // rungs get GENERATED/probed, not which one wins).
+        score.value = (std::abs(area - first_area) < kEps) ? 0.0 : 1.0;
+        score.wirelength = 0.0;
+        score.penalty = 0.0;
+        if (routing_out) *routing_out = routing;
+        return score;
+    };
+
+    OutlineSweepResult result = outlineSweep(problem, placement, probe);
+    (void)result;
+
+    std::sort(probed_areas.begin(), probed_areas.end());
+    probed_areas.erase(std::unique(probed_areas.begin(), probed_areas.end(),
+                                    [](double a, double b) { return std::abs(a - b) < 1.0; }),
+                        probed_areas.end());
+    assert(probed_areas.size() >= 2);
+    std::cout << "testOutlineSweepProbesDistinctOutlinesCase0 ok\n";
+}
+
 }  // namespace
 
 int main() {
@@ -729,6 +851,8 @@ int main() {
     testOutlineSweepPrefersLowerScoreOverTighterArea();
     testOutlineSweepEndToEndCase1BStarSeed1OpenRoutesZero();
     testCompactedCandidateRestampValidatesEndToEnd();
+    testAnchorAtOutlineStampsExactTargetNotTightCase0();
+    testOutlineSweepProbesDistinctOutlinesCase0();
     std::cout << "p1 regressions passed\n";
     return 0;
 }

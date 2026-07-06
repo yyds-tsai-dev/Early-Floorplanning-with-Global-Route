@@ -59,4 +59,15 @@ OutlineFit shrinkWrapEstimate(const Problem& problem, const Placement& placement
 // but the iteration cap is now shared with the coupled + two per-axis refinement passes).
 OutlineFit shrinkWrapOutline(const Problem& problem, Placement& placement, int max_grow_steps = 12);
 
+// Anchors edge blocks against EXACTLY `scoped`'s outline_w/h (no search/bisection): re-legalizes
+// edge blocks against that outline via legalizeEdgeBlocks, gates on placementLegalAt, and on
+// success stamps `placement.outline_w/h` with (scoped.outline_w, scoped.outline_h). Core
+// (non-edge) rects are never moved. Shares its commit logic with shrinkWrapOutline (both re-reset
+// edge rects via dimensionFor, legalize, and gate on placementLegalAt) but performs no bisection of
+// its own -- unlike shrinkWrapOutline, which always searches DOWN from whatever ceiling it is
+// given, this callable is for callers (outlineSweep, exactScore's corrective grow) that already
+// picked a specific target and need it anchored AT that exact size, not re-minimized. Returns
+// legal=false (placement left untouched) if that exact outline cannot host a legal edge anchoring.
+OutlineFit anchorAtOutline(const Problem& scoped, Placement& placement);
+
 }  // namespace efgr

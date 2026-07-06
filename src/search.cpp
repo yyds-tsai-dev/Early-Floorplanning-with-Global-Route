@@ -155,11 +155,23 @@ OutlineSweepResult outlineSweep(const Problem& problem, const Placement& base, c
         Problem ceiling = problem;
         ceiling.outline_w = target_w;
         ceiling.outline_h = target_h;
-        // Same ceiling trick exactScore's corrective grow uses (eval.cpp): shrinkWrapOutline only
-        // ever searches DOWN from the ceiling it is given, so scoping the ceiling to this margin's
-        // target forces the bisection's t=1 endpoint to land exactly there when nothing smaller in
-        // (tight, target] is feasible, re-anchoring edge blocks at that target border.
-        shrinkWrapOutline(ceiling, variant);
+        // T7.1 bugfix: shrinkWrapOutline is a minimizer -- it bisects back DOWN to the tight legal
+        // frontier regardless of the ceiling it is given, so every margin>0 rung used to silently
+        // collapse back to ~tight (dead sweep). m=0.0 IS the tight rung, so it alone still uses
+        // shrinkWrapOutline; every larger rung anchors directly at its exact target via
+        // anchorAtOutline (no bisection), re-anchoring edge blocks at that target's border.
+        // Targets >= tight are feasible by upward-closedness (shrinkWrapOutline already proved
+        // tight itself legal), so legal=false should not happen here -- skip the rung defensively
+        // rather than risk stamping/using an illegal variant.
+        bool anchored;
+        if (margin == 0.0) {
+            OutlineFit tight_variant_fit = shrinkWrapOutline(ceiling, variant);
+            anchored = tight_variant_fit.legal;
+        } else {
+            OutlineFit fit = anchorAtOutline(ceiling, variant);
+            anchored = fit.legal;
+        }
+        if (!anchored) continue;
 
         RoutingResult routing;
         Score score = exactCached(variant, &routing);
