@@ -49,10 +49,14 @@ struct OutlineFit {
 // Does NOT mutate placement; returns the estimated (W,H) for cheapScore.
 OutlineFit shrinkWrapEstimate(const Problem& problem, const Placement& placement);
 
-// Exact: re-legalizes edge blocks against the shrunk outline (grow-until-legal loop). Mutates
-// placement (edge rects re-anchored to the shrunk border + outline_w/h stamped). Core (non-edge)
-// rects are never moved. Falls back to problem's outline (MAX) if no smaller (W,H) is legal
-// within max_grow_steps -- always terminates legal (design p1-design.md §1.2.4).
-OutlineFit shrinkWrapOutline(const Problem& problem, Placement& placement, int max_grow_steps = 6);
+// Exact: re-legalizes edge blocks against the shrunk outline via t-interpolation bisection plus
+// per-axis refinement (design p1-design.md §1.2.4 amendment 2026-07-06; replaces the earlier
+// linear x1.05 grow loop, which exhausted before reaching the true feasible frontier on loose
+// cases). Mutates placement (edge rects re-anchored to the shrunk border + outline_w/h stamped).
+// Core (non-edge) rects are never moved. Falls back to problem's outline (MAX) if no smaller
+// (W,H) is legal within max_grow_steps bisection iterations -- always terminates legal.
+// max_grow_steps default raised 6 -> 12 (bisection converges faster per step than linear growth,
+// but the iteration cap is now shared with the coupled + two per-axis refinement passes).
+OutlineFit shrinkWrapOutline(const Problem& problem, Placement& placement, int max_grow_steps = 12);
 
 }  // namespace efgr

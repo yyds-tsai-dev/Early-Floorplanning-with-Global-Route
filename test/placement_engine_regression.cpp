@@ -109,7 +109,14 @@ int testEdgeBlocksStayAnchored() {
         PlacementState state = engine->initialState(p, rng);
         Placement placement = engine->decode(p, state);
         const Rect& edge = placement.rects[0];
-        if (std::abs(edge.top() - p.outline_h) > kEps || edge.x + kEps < (2.0 * p.outline_w / 3.0)) {
+        // decode() now shrink-wraps the declared outline (P1); this problem's huge slack (10x10
+        // edge + 20x20 soft core inside a 120x100 MAX) means the declared outline genuinely
+        // shrinks well below MAX after T4.5's bisection search, so the edge block correctly
+        // re-anchors to the SHRUNK declared border (placement.outline_w/h), not the raw problem
+        // MAX -- same MAX-vs-declared pattern already applied to validate.cpp/io.cpp (T6).
+        double outline_w = placement.outline_w > 0.0 ? placement.outline_w : p.outline_w;
+        double outline_h = placement.outline_h > 0.0 ? placement.outline_h : p.outline_h;
+        if (std::abs(edge.top() - outline_h) > kEps || edge.x + kEps < (2.0 * outline_w / 3.0)) {
             return fail(std::string(engine_name) + " should keep TR edge block on top TR segment");
         }
     }

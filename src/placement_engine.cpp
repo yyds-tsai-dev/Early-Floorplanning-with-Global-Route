@@ -768,37 +768,121 @@ bool placementLegalAt(const Problem& problem, const Placement& placement, double
     return true;
 }
 
+// Shared bisection search (T4.5, design amendment 2026-07-06): feasibility over (W,H) is monotone
+// -- if a candidate is feasible, every larger candidate (component-wise) is too, and (MAX_w,MAX_h)
+// is always feasible (it is what decode already legally produced). Given per-axis lower bounds
+// and a feasibility callback, this finds a near-minimal legal (W,H) in a bounded number of probes:
+//   1. try the lower bounds directly -- done if already feasible (tight).
+//   2. else t-bisect the coupled line from (w_lb,h_lb) to (max_w,max_h): candidate(t) = lerp(t),
+//      t=1 feasible by construction, binary-search the smallest feasible t.
+//   3. per-axis refinement at that point: bisect W down alone (H held fixed), then H down alone
+//      (W held at its refined value) -- same feasibility callback, same tolerance/iteration cap.
+// `max_iterations` bounds both the coupled bisection and each per-axis refinement independently.
+// Pure arithmetic on fixed midpoints -- deterministic, no RNG.
+template <typename Feasible>
+OutlineFit bisectShrinkWrap(double w_lb, double h_lb, double max_w, double max_h, int max_iterations,
+                            Feasible feasible) {
+    w_lb = std::min(w_lb, max_w);
+    h_lb = std::min(h_lb, max_h);
+
+    if (feasible(w_lb, h_lb)) {
+        return OutlineFit{w_lb, h_lb, true};
+    }
+
+    // Step 1: coupled t-bisection along the line from the lower bounds to MAX. t=1 (MAX) is
+    // feasible by construction (decode already legally produced it); t=0 (the lower bounds) was
+    // just shown infeasible above, so t=0 is the low end of the search.
+    double dw = max_w - w_lb;
+    double dh = max_h - h_lb;
+    double tol_dim = std::max(dw, dh) * 0.005;  // 0.5% of the larger span, per the brief.
+    double t_lo = 0.0;
+    double t_hi = 1.0;
+    for (int i = 0; i < max_iterations; ++i) {
+        if ((t_hi - t_lo) * std::max(dw, dh) < tol_dim) break;
+        double t_mid = 0.5 * (t_lo + t_hi);
+        double w_mid = w_lb + t_mid * dw;
+        double h_mid = h_lb + t_mid * dh;
+        if (feasible(w_mid, h_mid)) {
+            t_hi = t_mid;
+        } else {
+            t_lo = t_mid;
+        }
+    }
+    double w = std::min(max_w, w_lb + t_hi * dw);
+    double h = std::min(max_h, h_lb + t_hi * dh);
+    // t_hi's candidate is feasible by loop invariant (t=1 always feasible, t_hi only tightens
+    // from 1 downward); re-verify defensively in case of floating-point edge effects at the cap.
+    if (!feasible(w, h)) {
+        w = max_w;
+        h = max_h;
+    }
+
+    // Step 2: per-axis refinement -- bisect W down alone holding H fixed at the point just found.
+    {
+        double lo = w_lb;
+        double hi = w;
+        double tol_w = (hi - lo) > 0.0 ? std::max(hi * 0.005, kEps) : kEps;
+        for (int i = 0; i < max_iterations && (hi - lo) >= tol_w; ++i) {
+            double mid = 0.5 * (lo + hi);
+            if (feasible(mid, h)) {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        w = hi;
+    }
+
+    // Step 3: per-axis refinement -- bisect H down alone holding the refined W fixed.
+    {
+        double lo = h_lb;
+        double hi = h;
+        double tol_h = (hi - lo) > 0.0 ? std::max(hi * 0.005, kEps) : kEps;
+        for (int i = 0; i < max_iterations && (hi - lo) >= tol_h; ++i) {
+            double mid = 0.5 * (lo + hi);
+            if (feasible(w, mid)) {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        h = hi;
+    }
+
+    if (!feasible(w, h)) {
+        // Should not happen (hi bounds are maintained feasible throughout), but never commit an
+        // infeasible trial -- fall back to MAX, which is always feasible.
+        return OutlineFit{max_w, max_h, feasible(max_w, max_h)};
+    }
+    return OutlineFit{w, h, true};
+}
+
 }  // namespace
 
 OutlineFit shrinkWrapEstimate(const Problem& problem, const Placement& placement) {
-    double w = 0.0;
-    double h = 0.0;
-    lowerBoundNeeds(problem, placement, &w, &h);
-    w = std::min(w, problem.outline_w);
-    h = std::min(h, problem.outline_h);
+    double w_lb = 0.0;
+    double h_lb = 0.0;
+    lowerBoundNeeds(problem, placement, &w_lb, &h_lb);
 
-    constexpr int kMaxGrowSteps = 6;
-    for (int guard = 0; guard < kMaxGrowSteps; ++guard) {
-        if (edgeBlocksFeasibleAt(problem, placement, w, h)) {
-            return OutlineFit{w, h, true};
-        }
-        w = std::min(problem.outline_w, w * 1.05 + kEps);
-        h = std::min(problem.outline_h, h * 1.05 + kEps);
+    auto feasible = [&](double w, double h) { return edgeBlocksFeasibleAt(problem, placement, w, h); };
+    OutlineFit fit = bisectShrinkWrap(w_lb, h_lb, problem.outline_w, problem.outline_h, 12, feasible);
+    if (!fit.legal) {
+        return OutlineFit{problem.outline_w, problem.outline_h, false};
     }
-    if (edgeBlocksFeasibleAt(problem, placement, problem.outline_w, problem.outline_h)) {
-        return OutlineFit{problem.outline_w, problem.outline_h, true};
-    }
-    return OutlineFit{problem.outline_w, problem.outline_h, false};
+    return fit;
 }
 
 OutlineFit shrinkWrapOutline(const Problem& problem, Placement& placement, int max_grow_steps) {
-    double w = 0.0;
-    double h = 0.0;
-    lowerBoundNeeds(problem, placement, &w, &h);
-    w = std::min(w, problem.outline_w);
-    h = std::min(h, problem.outline_h);
+    double w_lb = 0.0;
+    double h_lb = 0.0;
+    lowerBoundNeeds(problem, placement, &w_lb, &h_lb);
 
-    for (int guard = 0; guard < max_grow_steps; ++guard) {
+    // Re-legalizes edge blocks against a scoped Problem at (w,h) and reports whether the result is
+    // fully legal (containment + no overlap + edge-location rules), per design §1.2.3-1.2.4. This
+    // is the exact predicate `bisectShrinkWrap` probes with; it does not mutate `placement` --
+    // callers must re-run it once more at the winning (w,h) to commit the trial (below), matching
+    // T3's "never commit an infeasible midpoint" contract.
+    auto feasible = [&](double w, double h) {
         Problem scoped = problem;
         scoped.outline_w = w;
         scoped.outline_h = h;
@@ -808,34 +892,32 @@ OutlineFit shrinkWrapOutline(const Problem& problem, Placement& placement, int m
             if (isEdge(problem.blocks[i].type)) trial.rects[i] = dimensionFor(problem.blocks[i], 1.0);
         }
         legalizeEdgeBlocks(scoped, trial);
+        return placementLegalAt(scoped, trial, w, h);
+    };
 
-        if (placementLegalAt(scoped, trial, w, h)) {
-            for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
-                if (isEdge(problem.blocks[i].type)) placement.rects[i] = trial.rects[i];
-            }
-            placement.outline_w = w;
-            placement.outline_h = h;
-            return OutlineFit{w, h, true};
-        }
-        w = std::min(problem.outline_w, w * 1.05 + kEps);
-        h = std::min(problem.outline_h, h * 1.05 + kEps);
-    }
+    OutlineFit fit = bisectShrinkWrap(w_lb, h_lb, problem.outline_w, problem.outline_h, max_grow_steps, feasible);
+    double w = fit.legal ? fit.w : problem.outline_w;
+    double h = fit.legal ? fit.h : problem.outline_h;
 
-    // Fallback: re-legalize at MAX -- reproduces today's (pre-P1) layout, which decode already
-    // produced legally, so this is guaranteed to pass placementLegalAt.
+    // Commit: re-run the legalization once more at the winning (w,h) -- the FEASIBLE trial -- and
+    // stamp its edge rects + declared outline into `placement`. Never commits from an infeasible
+    // midpoint (design §1.2.4): `feasible` already re-verified `(w,h)` above (or it is the MAX
+    // fallback, always legal since it reproduces decode's own legalization).
     Problem scoped = problem;
+    scoped.outline_w = w;
+    scoped.outline_h = h;
     Placement trial = placement;
     for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
         if (isEdge(problem.blocks[i].type)) trial.rects[i] = dimensionFor(problem.blocks[i], 1.0);
     }
     legalizeEdgeBlocks(scoped, trial);
-    bool legal = placementLegalAt(scoped, trial, problem.outline_w, problem.outline_h);
+    bool legal = placementLegalAt(scoped, trial, w, h);
     for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
         if (isEdge(problem.blocks[i].type)) placement.rects[i] = trial.rects[i];
     }
-    placement.outline_w = problem.outline_w;
-    placement.outline_h = problem.outline_h;
-    return OutlineFit{problem.outline_w, problem.outline_h, legal};
+    placement.outline_w = w;
+    placement.outline_h = h;
+    return OutlineFit{w, h, legal};
 }
 
 }  // namespace efgr
