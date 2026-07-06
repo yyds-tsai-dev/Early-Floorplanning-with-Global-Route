@@ -54,7 +54,18 @@
 - [ ] Failing test: two hand-built placements (same blocks, one compact core / one spread) ⇒ compact has strictly smaller `cheapScore().outline_area`; both < MAX area when loose.
 - [ ] RED → implement → GREEN + suites (existing regressions may shift SA trajectories — legality asserts must stay green; if any asserts an exact score value, update + note in commit body) + commit `feat: cheap shrink-wrap area gradient in cheapScore`.
 
+### Task 4.5 (amendment 2026-07-06): bisection shrink — replace linear grow (evidence: T4 smoke shrank case0 only 0.16%)
+
+**Why:** T3's grow loop (×1.05^≤6 from the per-axis lower bounds, both axes coupled) exhausts before reaching the true feasible frontier on case0 (feasible W ≈ core_right + inward-moving corner-block width, ≫ lower_bound × 1.34) ⇒ falls back to MAX on most decodes; SA only sees shrink after lucky mutations. Feasibility is monotone in the outline ⇒ bisection finds the near-minimal legal outline deterministically.
+
+**Files:** Modify `src/placement_engine.cpp` only (`shrinkWrapOutline` + `shrinkWrapEstimate` search strategy; feasibility predicates `placementLegalAt`/`edgeBlocksFeasibleAt` unchanged). Test in p1 test file.
+**Algorithm:** t-interpolation bisection: candidate(t) = lerp((W_lb,H_lb) → (MAX_w,MAX_h), t ∈ [0,1]); feasible(t) monotone ⇒ binary search smallest feasible t (≤12 iterations or until relative gap < 0.5%); then two per-axis refinement bisections (shrink W alone holding H, then H holding W, same tolerance). Keep MAX fallback; stamp result; determinism (pure arithmetic midpoints).
+- [ ] Failing test: case0 bstar seed 1 RAW initial decode ⇒ stamped area ≤ 0.9 × MAX area (currently ≈ MAX = RED); T3's whole invariant suite stays green; byte-determinism across two runs.
+- [ ] Implement → GREEN + all suites + commit `perf: bisection shrink-wrap finds near-minimal legal outline`.
+
 ### Task 5: exactScore routes inside declared outline + 1-step corrective grow (design §1.4)
+
+**T4-review carry-over (binding):** `compactTowardOrigin` mutates core rects but keeps a STALE stamped outline — T5 must reset `outline_w/h = 0` on the compacted copy (or re-run `shrinkWrapOutline`) before exact-scoring, otherwise exactScore reads a wrong declared outline.
 
 **Files:** Modify `src/eval.cpp` (`exactScore`: scope outline from stamped fields — recompute via `shrinkWrapOutline` on a local copy if unset; after routing, if `open_routes > 0`, do ONE corrective grow — re-run `shrinkWrapOutline` with the failed axis bumped by `channel_overflow/25` margin (min +5%) — and re-route once; keep the better of the two results by value with `open_routes==0` preferred absolutely).
 - [ ] Failing test: case0 decode+shrink ⇒ `exactScore` outline_area < MAX area, `open_routes == 0` (post corrective grow), and returned score.outline_area == stamped W×H used for routing.
