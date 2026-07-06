@@ -65,6 +65,7 @@ double routeAwareProxyPenalty(const Problem& problem, const Placement& placement
             if (!intersectsOpen(bbox, placement.rects[i])) continue;
             double base = problem.blocks[i].ft_base_area > 0.0 ? problem.blocks[i].ft_base_area : problem.blocks[i].area;
             double required_area = ftRequiredArea(base, ftExtend(bundle.nets, ftTierRate(problem.blocks[i], bundle.nets)));
+            // Proxy intentionally skips round2: cheap search gradient, not the scored quantity (exact path in routing.cpp rounds).
             double actual_area = placement.rects[i].w * placement.rects[i].h;
             penalty += std::max(0.0, required_area - actual_area) * 1000.0;
         }

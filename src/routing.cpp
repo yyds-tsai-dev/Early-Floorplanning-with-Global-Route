@@ -227,6 +227,7 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement) {
     for (std::size_t i = 0; i < result.soft_feedthrough_nets.size(); ++i) {
         double nets = result.soft_feedthrough_nets[i];
         if (nets <= 0.0 || !isSoft(problem.blocks[i].type)) continue;
+        // ft_base_area is 0 only for test-constructed Blocks; the parser always sets it.
         double base = problem.blocks[i].ft_base_area > 0.0 ? problem.blocks[i].ft_base_area : problem.blocks[i].area;
         double required_area = ftRequiredArea(base, ftExtend(nets, ftTierRate(problem.blocks[i], nets)));
         double actual_area = round2(placement.rects[i].w * placement.rects[i].h);

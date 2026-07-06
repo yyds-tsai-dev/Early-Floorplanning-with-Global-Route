@@ -226,6 +226,8 @@ SearchResult runHybridPlacementSearch(const Problem& problem, const SearchOption
 
     SearchResult sp_result = runPlacementSearch(problem, *sp, sp_options);
     std::mt19937 rng(bstar_options.seed);
+    // Re-decode derives soft dims from the ORIGINAL problem areas, so any FT inflation accepted by the sp leg's
+    // finalize is intentionally discarded here; each leg finalizes independently and the better full result wins.
     PlacementState bstar_seed = bstar->seedFromPlacement(problem, sp_result.best_placement, rng);
     SearchResult bstar_result = runPlacementSearch(problem, *bstar, bstar_options, bstar_seed);
 
