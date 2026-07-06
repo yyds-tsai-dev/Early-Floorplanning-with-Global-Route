@@ -95,7 +95,7 @@ Score cheapScore(const Problem& problem, const Placement& placement) {
     }
     score.wirelength = wire_proxy;
     score.penalty = penalty + routeAwareProxyPenalty(problem, placement);
-    score.value = score.outline_area + problem.alpha * wire_proxy + penalty;
+    score.value = score.outline_area + problem.alpha * wire_proxy + score.penalty;
     return score;
 }
 
