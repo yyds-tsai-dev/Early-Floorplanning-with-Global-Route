@@ -1,8 +1,10 @@
 #include "eval.hpp"
 
+#include <algorithm>
 #include <tuple>
 
 #include "ft.hpp"
+#include "placement_engine.hpp"
 
 namespace efgr {
 
@@ -124,11 +126,16 @@ Score cheapScore(const Problem& problem, const Placement& placement) {
     return score;
 }
 
-Score exactScore(const Problem& problem, const Placement& placement, RoutingResult* routing_out) {
-    auto [used_w, used_h] = usedOutline(problem, placement);
+namespace {
+
+// Builds the scoped Problem + score/routing for `placement` at declared outline (w,h) -- the
+// common tail shared by exactScore's stamped path, its unset-recompute path, and the one-step
+// corrective grow (design p1-design.md §1.4).
+Score routeAndScoreAt(const Problem& problem, const Placement& placement, double w, double h,
+                      RoutingResult* routing_out) {
     Problem scoped = problem;
-    scoped.outline_w = used_w;
-    scoped.outline_h = used_h;
+    scoped.outline_w = w;
+    scoped.outline_h = h;
     RoutingResult routing = routeProblem(scoped, placement);
     Score score = cheapScore(scoped, placement);
     score.wirelength = routing.total_wirelength;
@@ -136,6 +143,71 @@ Score exactScore(const Problem& problem, const Placement& placement, RoutingResu
     score.penalty += routing.channel_overflow * 1e6;
     score.penalty += routing.feedthrough_mismatch * 1e6;
     score.value = score.outline_area + problem.alpha * score.wirelength + score.penalty;
+    if (routing_out) *routing_out = routing;
+    return score;
+}
+
+}  // namespace
+
+Score exactScore(const Problem& problem, const Placement& placement, RoutingResult* routing_out) {
+    // Scope routing to the placement's STAMPED declared outline (design §1.4) -- not a bbox
+    // recomputed from usedOutline, which ignores the shrink-wrap entirely. When unset (0,0; e.g.
+    // a hand-built placement, or one whose stamp went stale -- see compactTowardOrigin's reset),
+    // recompute via the exact shrinkWrapOutline on a LOCAL copy: exactScore takes `placement` by
+    // const&, and shrinkWrapOutline mutates (re-anchors edge rects to the shrunk border), so it
+    // must never touch the caller's placement. Route/score the local copy's rects, since edge
+    // re-anchoring changes which rects touch which channels.
+    Placement local = placement;
+    double w = local.outline_w;
+    double h = local.outline_h;
+    if (w <= 0.0 || h <= 0.0) {
+        OutlineFit fit = shrinkWrapOutline(problem, local);
+        w = fit.w;
+        h = fit.h;
+    }
+
+    RoutingResult routing;
+    Score score = routeAndScoreAt(problem, local, w, h, &routing);
+
+    // One-step corrective grow (design §1.4): if the declared outline was too tight to route,
+    // grow once and re-route. Target size scales toward MAX by the worse of a flat +5% floor or a
+    // margin sized to the observed channel_overflow (overflow/25, matching channelMarginProxy's
+    // nets-per-25 capacity unit), clamped to MAX. shrinkWrapOutline only ever searches DOWN from
+    // whatever ceiling it is given (it never enlarges beyond it -- design §1.2.4), so to force a
+    // floor at the grown target we scope a Problem whose ceiling equals that target directly (not
+    // problem's real MAX) and re-legalize edges against it: the bisection's t=1 endpoint is then
+    // exactly the grown target, which becomes the trial actually committed unless the grown
+    // target ITSELF is infeasible (rare -- e.g. an edge/thirds conflict that isn't sized by
+    // overflow), in which case the ceiling call reports illegal and we keep the original result.
+    if (routing.open_routes > 0) {
+        double margin = std::max(0.05, routing.channel_overflow / 25.0 / std::max(w, h));
+        double grown_w = std::min(problem.outline_w, w * (1.0 + margin));
+        double grown_h = std::min(problem.outline_h, h * (1.0 + margin));
+
+        Problem ceiling = problem;
+        ceiling.outline_w = grown_w;
+        ceiling.outline_h = grown_h;
+        Placement regrow = local;
+        OutlineFit grown_fit = shrinkWrapOutline(ceiling, regrow);
+
+        if (grown_fit.legal) {
+            RoutingResult grown_routing;
+            Score grown_score = routeAndScoreAt(problem, regrow, grown_fit.w, grown_fit.h, &grown_routing);
+
+            bool prefer_grown;
+            if (routing.open_routes != grown_routing.open_routes) {
+                prefer_grown = grown_routing.open_routes == 0;
+            } else {
+                prefer_grown = grown_score.value < score.value;
+            }
+            if (prefer_grown) {
+                local = regrow;
+                score = grown_score;
+                routing = grown_routing;
+            }
+        }
+    }
+
     if (routing_out) *routing_out = routing;
     return score;
 }

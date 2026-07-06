@@ -15,6 +15,7 @@
 #include "../src/routing.hpp"
 #include "../src/search.hpp"
 #include "../src/validate.hpp"
+// compactTowardOrigin (declared in search.hpp) is exercised directly below.
 
 namespace {
 using namespace efgr;
@@ -507,6 +508,56 @@ void testShrinkWrapOutlineBisectionFindsNearMinimalOutlineCase0Raw() {
     std::cout << "testShrinkWrapOutlineBisectionFindsNearMinimalOutlineCase0Raw ok\n";
 }
 
+// T5 (design §1.4): exactScore must scope routing to the placement's STAMPED declared outline,
+// not the usedOutline(bbox) it reads today. case0 bstar decode seed 1 stamps a declared outline
+// strictly below MAX (per testDecodeStampsOutlineCase0BStarSeed1/T4.5, ~0.93x MAX after a handful
+// of mutations -- here we drive a few mutations for the same reason that test does, since the raw
+// unmutated chain hits the documented h-forced-to-MAX pathology). Asserts: (1) exactScore's
+// returned outline_area equals the stamped W*H exactly (routing scoped at the stamp, not
+// recomputed from a bbox that could differ), and (2) that stamped area is meaningfully below MAX
+// (case0 util ~55.6%), i.e. this is not a case where bbox==stamp trivially.
+void testExactScoreRoutesInsideStampedDeclaredOutlineCase0() {
+    Problem problem = parseProblem("test/2026 ICCAD_case.case0.csv");
+    std::unique_ptr<PlacementEngine> engine = makePlacementEngine("bstar");
+    std::mt19937 rng(1);
+    PlacementState state = engine->initialState(problem, rng);
+    for (int i = 0; i < 50; ++i) engine->mutate(problem, state, rng);
+    Placement placement = engine->decode(problem, state);
+
+    assert(placement.outline_w > 0.0 && placement.outline_h > 0.0);
+    double max_area = problem.outline_w * problem.outline_h;
+    double stamped_area = placement.outline_w * placement.outline_h;
+    assert(stamped_area < 0.95 * max_area);
+
+    RoutingResult routing;
+    Score score = exactScore(problem, placement, &routing);
+
+    assert(std::abs(score.outline_area - stamped_area) < 1e-6 * std::max(1.0, stamped_area));
+    std::cout << "testExactScoreRoutesInsideStampedDeclaredOutlineCase0 ok\n";
+}
+
+// T5 carry-over fix (binding, per task-5 brief): compactTowardOrigin moves core rects but must
+// reset the stamped declared outline to 0/0 so exactScore's unset-path recomputes a fresh
+// shrink-wrap -- otherwise the stale stamp (computed for the PRE-compaction rects) would be used
+// to scope routing for POST-compaction rects, which is wrong (and could even be illegal: compacted
+// rects fit inside a smaller box than the stale stamp describes, or in pathological cases larger).
+// search.cpp's compactTowardOrigin is declared in the efgr namespace (not anonymous), so it's
+// linkable from this test binary without a header change.
+void testCompactTowardOriginResetsStampedOutline() {
+    Problem problem = parseProblem("test/2026 ICCAD_case.case0.csv");
+    std::unique_ptr<PlacementEngine> engine = makePlacementEngine("bstar");
+    std::mt19937 rng(1);
+    PlacementState state = engine->initialState(problem, rng);
+    Placement placement = engine->decode(problem, state);
+    assert(placement.outline_w > 0.0 && placement.outline_h > 0.0);
+
+    Placement compacted = compactTowardOrigin(problem, placement);
+
+    assert(compacted.outline_w == 0.0);
+    assert(compacted.outline_h == 0.0);
+    std::cout << "testCompactTowardOriginResetsStampedOutline ok\n";
+}
+
 }  // namespace
 
 int main() {
@@ -523,6 +574,8 @@ int main() {
     testDecodeStampsOutlineCase0BStarSeed1();
     testCheapScoreOutlineAreaGradientCompactVsSpread();
     testShrinkWrapOutlineBisectionFindsNearMinimalOutlineCase0Raw();
+    testExactScoreRoutesInsideStampedDeclaredOutlineCase0();
+    testCompactTowardOriginResetsStampedOutline();
     std::cout << "p1 regressions passed\n";
     return 0;
 }

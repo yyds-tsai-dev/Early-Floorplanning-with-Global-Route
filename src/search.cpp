@@ -17,6 +17,8 @@ bool axisOverlap(double a0, double a1, double b0, double b1) {
     return std::min(a1, b1) - std::max(a0, b0) > kEps;
 }
 
+}  // namespace
+
 Placement compactTowardOrigin(const Problem& problem, Placement placement) {
     std::vector<int> order;
     for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
@@ -53,8 +55,16 @@ Placement compactTowardOrigin(const Problem& problem, Placement placement) {
             r.y = std::min(std::max(0.0, y), std::max(0.0, problem.outline_h - r.h));
         }
     }
+    // T5 carry-over fix (p1-design.md §1.4, binding on this task): compaction moves core rects,
+    // which invalidates any previously stamped shrink-wrap outline (it was computed for the
+    // pre-compaction rects). Reset so exactScore's unset-path recomputes a fresh shrink-wrap
+    // against the post-compaction geometry instead of scoring against a stale stamp.
+    placement.outline_w = 0.0;
+    placement.outline_h = 0.0;
     return placement;
 }
+
+namespace {
 
 bool fitsOutlineWithoutOverlap(const Problem& problem, const Placement& placement) {
     for (std::size_t i = 0; i < placement.rects.size(); ++i) {
@@ -136,6 +146,13 @@ void finalizeFeedthrough(const Problem& problem, const PlacementEngine& engine, 
         // Reclaim outline/overflow lost to the inflated re-decode: same dims, tighter packing.
         Placement compacted = compactTowardOrigin(inflated, placement);
         if (fitsOutlineWithoutOverlap(inflated, compacted)) {
+            // compactTowardOrigin resets outline_w/h to 0 (moved core rects invalidate any prior
+            // stamp). Re-stamp immediately so `compacted`, once committed as best_placement, is
+            // internally consistent with its OWN rects/outline for later validateSolution/writeCfg
+            // calls -- exactScore below would otherwise recompute the shrink-wrap on an internal
+            // copy for scoring only, leaving this stored `compacted` stale (edges not re-anchored,
+            // stamp 0 -> falls back to MAX) even though it was scored/routed at a smaller outline.
+            shrinkWrapOutline(inflated, compacted);
             RoutingResult compacted_routing;
             Score compacted_exact = exactScore(inflated, compacted, &compacted_routing);
             tryCommit(compacted, compacted_exact, compacted_routing);
@@ -256,6 +273,10 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
         }
 
         Placement compacted = compactTowardOrigin(problem, candidate.placement);
+        // Re-stamp immediately (see the matching comment in finalizeFeedthrough above): keeps
+        // `compacted` internally consistent before it is cached/stored as best_placement, and
+        // gives exactCached's placementKey the real declared outline instead of the reset 0x0.
+        shrinkWrapOutline(problem, compacted);
         Score compact_exact = exactCached(compacted, &routing);
         if (compact_exact.value < result.best_score.value) {
             result.best_score = compact_exact;
