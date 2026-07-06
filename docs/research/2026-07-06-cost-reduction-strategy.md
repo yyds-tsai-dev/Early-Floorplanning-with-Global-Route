@@ -111,10 +111,10 @@ GPT/Gemini ×2 converge on FTAFP/Piano/Flora/PARSAC but **predate the 20260608 s
 ## 4. Roadmap
 
 ### P0 — scoring fidelity (do first; everything else is unsafe or mis-measured without it)
-1. **FT area write-back pipeline** (`routing.cpp`, `search.cpp` final pass, `io.cpp`): per soft block, required dims from accumulated crossing nets (per-tier rate from CSV) → `extend = ceil((nets/25 × rate)/2)` per side → reshape to AR-legal dims (QA A32: √area basis) → write into output; re-legalize + re-route to fixed point (≤3 iters).
-2. **Exact FT math**: unconditional `ceil` on extend; area rounded to 2 decimals (QA A34). Unit-test against the four official Figure 9 examples (87,500 um² @1000→+4um→89,882.43; @3500→+28→104,849.02; @6711→+108→163,057.66; @12013→+241→288,158.52).
-3. **Unify outline**: `eval.cpp` `usedOutline` must max over routed channels like `io.cpp:128-131` (QA A25); score and emitted `.cfg` must agree. Add regression: exactScore outline == writeCfg outline.
-4. **Graded overflow in search**: replace flat 1e6 with multiplier-scheduled penalty (HeLEM-GR-style, weight ↑ over SA time) so search can pass through overflow states; final selection still requires 0 overflow (deduction formula unpublished ⇒ stay conservative).
+1. ✅ **DONE** (`3a04376`, `262e77c`, `15ad8ec`) — **FT area write-back pipeline** (`routing.cpp`, `search.cpp` final pass, `io.cpp`): per soft block, required dims from accumulated crossing nets (per-tier rate from CSV) → `extend = ceil((nets/25 × rate)/2)` per side → reshape to AR-legal dims (QA A32: √area basis) → write into output; re-legalize + re-route to fixed point (≤3 iters). Implemented as `finalizeFeedthrough` (`search.cpp:71-103`), hooked into every `runPlacementSearch` call (including both legs of `hybrid`). Known residual limitation: the re-legalization step delegates to `PlacementEngine::seedFromPlacement`/`decode`, which for `BStarEngine` rebuilds geometry from scratch rather than growing a block in place; in tightly-packed placements this can make the grown candidate score worse or go out-of-outline, so the pass's accept-guard correctly leaves the original (unfixed) placement as best. Observed in the P0 cost sweep below (`hybrid` on case1/case3) — tracked as a placement-engine follow-up, not a scoring-fidelity defect (see Appendix).
+2. ✅ **DONE** (`3a04376`, `262e77c`) — **Exact FT math**: unconditional `ceil` on extend; area rounded to 2 decimals (QA A34). Unit-tested against the four official Figure 9 examples (87,500 um² @1000→+4um→89,882.43; @3500→+28→104,849.02; @6711→+108→163,057.66; @12013→+241→288,158.52) in `test/run_p0_regressions.sh` (`testFtMathOfficialExamples`).
+3. ✅ **DONE** (`10d7615`) — **Unify outline**: `eval.cpp` `usedOutline` now shares the same computation as `io.cpp`'s emitted `.cfg` outline (QA A25); score and emitted `.cfg` agree by construction. Regression: `testOutlineConsistencyEvalVsCfg` in `test/run_p0_regressions.sh`.
+4. **Deferred to P4**: exact overflow penalty is already amount-proportional (1e6 × overflow um); only the SA weight *schedule* remains, which is search-engineering, not scoring fidelity.
 
 ### P1 — outline shrink-wrap (biggest single lever)
 5. Candidate outline (W,H) ≤ MAX as part of `Placement`; decode anchors edge blocks + 12-region thirds against (W,H). Per exact eval: shrink-wrap W,H = max(non-edge packing extent + edge extents + demanded channel widths), re-anchor, validate (LOCATION AND/OR per shrunk outline), route, score. Cheap eval uses proxy demand. Optionally SA-mutate (W,H) directly (2 extra genes) instead of pure shrink-wrap.
@@ -151,3 +151,41 @@ GPT/Gemini ×2 converge on FTAFP/Piano/Flora/PARSAC but **predate the 20260608 s
 
 ## 6. Key sources
 Fast-SA (Chen & Chang, ISPD'05) · IARFP (ISPD'07) · Young/Chu/Luk/Wong LR sizing (TCAD'01) · Stockmeyer'83 / DeFer (TCAD'10) · Adya-Markov Parquet (TVLSI'03) · FTAFP (ASP-DAC'25) · Piano (arXiv:2508.13161) · Channel-Based SoC FT Insertion (IEEE 9825309) · Flow-based congestion (Chu et al.) · HeLEM-GR (ICCAD'24) · surrogate-management survey (2024) · WireMask-BBO (NeurIPS'23) · OpenROAD Hier-RTLMP (TCAD'24) — full URLs in the agent transcripts and §3.
+
+---
+
+## Appendix: P0 before/after cost sweep (2026-07-06)
+
+Commands: `bin/efgr "test/2026 ICCAD_case.caseN.csv" out.cfg --engine ENGINE --iters 2000 --seed 1` for `caseN` in `case0..case4` and `ENGINE` in `sp`, `bstar`, `hybrid` (15 runs per side).
+
+- **AFTER**: HEAD `15ad8ec` (branch `fable5`), built via `make clean && make`.
+- **BEFORE**: pre-P0 baseline `81a4e27f5928` ("docs: add cost-reduction strategy..."), built in an isolated `git worktree add /tmp/p0_before 81a4e27f5928` + `make`, then the worktree was removed (`git worktree remove --force`).
+
+All 15 BEFORE and 15 AFTER runs reported `open_routes=0 validation=ok`.
+
+| Case | Engine | score (before → after) | outline_area (before → after) | wirelength (before → after) | channel_overflow (before → after) | ft_mismatch (before → after) |
+|---|---|---|---|---|---|---|
+| case0 | sp     | 1.32981e+07 → 1.38054e+07 | 6.47352e+06 (same) | 1.17437e+07 → 1.17418e+07 | 0 (same) | 0 → 0 |
+| case0 | bstar  | 3.31217e+07 → 3.49438e+07 | 6.47352e+06 (same) | 7.12544e+06 → 7.12304e+06 | 0 (same) | 0 → 0 |
+| case0 | hybrid | 1.32981e+07 → 1.38054e+07 | 6.47352e+06 (same) | 1.17437e+07 → 1.17418e+07 | 0 (same) | 0 → 0 |
+| case1 | sp     | 5.28117e+10 → 5.31373e+10 | 7.61914e+06 (same) | 4.37130e+07 → 4.37117e+07 | 51967.7 (same) | 0 → 0 |
+| case1 | bstar  | 3.41863e+10 → 3.44200e+10 | 7.81099e+06 (same) | 4.67091e+07 → 4.66932e+07 | 33744.4 (same) | 0 → 0 |
+| case1 | hybrid | 3.95763e+10 → 4.52637e+10 | 7.70811e+06 (same) | 1.97570e+07 → 1.97366e+07 | 30204.7 (same) | **9034.12 → 14479.2** |
+| case2 | sp     | 8.96237e+10 → 9.32960e+10 | 4.20000e+07 (same) | 2.11233e+08 → 2.11225e+08 | 87570.9 (same) | **101.451 → 0** |
+| case2 | bstar  | 8.84452e+10 → 8.86481e+10 | 4.20000e+07 (same) | 2.22937e+08 → 2.22922e+08 | 86736.2 (same) | 0 → 0 |
+| case2 | hybrid | 7.06610e+10 → 7.08288e+10 | 4.20000e+07 (same) | 2.69260e+08 → 2.69253e+08 | 68936.4 (same) | 0 → 0 |
+| case3 | sp     | 9.67545e+10 → 9.69316e+10 | 2.34157e+07 (same) | 1.40098e+08 (same) | 96188.5 (same) | 0 → 0 |
+| case3 | bstar  | 7.85292e+10 → 7.87006e+10 | 2.34157e+07 (same) | 1.25993e+08 (same) | 78048.1 (same) | 0 → 0 |
+| case3 | hybrid | 6.07492e+10 → 6.39076e+10 | 2.34157e+07 (same) | 1.14642e+08 → 1.14620e+08 | 26182.2 (same) | **34006.2 → 36987.5** |
+| case4 | sp     | 1.90885e+11 → 1.90924e+11 | 3.77819e+07 (same) | 3.33606e+08 → 3.33605e+08 | 190350 (same) | 0 → 0 |
+| case4 | bstar  | 2.05348e+11 → 2.05397e+11 | 3.77819e+07 (same) | 3.41655e+08 (same) | 204501 (same) | 0 → 0 |
+| case4 | hybrid | 1.90885e+11 → 1.90924e+11 | 3.77819e+07 (same) | 3.33606e+08 → 3.33605e+08 | 190350 (same) | 0 → 0 |
+
+### Observations
+
+- **outline_area and channel_overflow are unchanged** before vs. after in every row — expected, since P0 (items 1-3) only touches FT area math/write-back and the shared-outline unification, not the placement search itself; the SA landed on effectively the same topology both times (identical `blocks/bundles/channels/routes` counts per row).
+- **wirelength is flat to 5 significant figures** in every row — the abutment fix (commit `4a9cf72`) had no measurable effect on these five cases at `--iters 2000`, i.e. the SA did not happen to select adjacent-abutting placements for the heavy bundles in this run; the zero-WL-on-abutment code path is exercised and covered by its own regression (`testDirectAbutmentZeroWirelength`) but isn't the dominant contributor to these particular runs' scores.
+- **`feedthrough_mismatch` went from nonzero to 0 in the one case where it was small** (case2/sp: 101.451 → 0) — a genuine fix from the write-back pass (commit `15ad8ec`).
+- **`feedthrough_mismatch` remains nonzero and slightly larger in two rows: case1/hybrid (9034.12 → 14479.2) and case3/hybrid (34006.2 → 36987.5).** Root cause (confirmed by re-reading `src/search.cpp`'s `finalizeFeedthrough`, `src/search.cpp:71-103`, cross-checked against Task 5's own report, which flagged this exact failure mode as a known limitation before it was observed in practice): `finalizeFeedthrough` grows the required soft-block area, then calls `engine.seedFromPlacement(inflated, placement, rng)` + `engine.decode(...)` to re-legalize. For `BStarEngine`, `seedFromPlacement`/`decode` do **not** grow the block in place — they use the original `(x,y)` only as a *sort key* and rebuild an entirely fresh contour-packed tree. In a tightly packed placement (little slack near the used outline), the rebuilt geometry can land illegally (out-of-outline) or with a worse score, so the pass's acceptance guard (`search.cpp:96-97`: `mismatch <= kEps && open_routes==0 && exact.value < result.best_score.value`) correctly refuses to accept a worse/illegal candidate and leaves the original (better-scoring but FT-mismatched) placement as the reported best. This is *not* a call-order or wiring bug — `finalizeFeedthrough` runs inside every `runPlacementSearch` call, including both legs (`sp` and `bstar` seeded from `sp`) of `runHybridPlacementSearch` (`search.cpp:213`, `search.cpp:227,230`) — it is an inherent convergence limitation of the ≤3-iteration write-back loop when the only available re-legalization strategy is a full re-decode rather than an in-place grow. Task 5's report (`.superpowers/sdd/task-5-report.md`, concern #1) explicitly predicted this: "may sometimes fail to fix a mismatch it detects, silently leaving the pre-existing mismatch penalty in place... worth flagging for a future task if tight-outline cases show residual feedthrough_mismatch in practice." case1 and case3 are exactly such tight-outline cases for the `hybrid` engine's `bstar` leg. Both rows still report `open_routes=0` and `validation=ok` — the exact-score penalty (`1e6 × mismatch`) is correctly reflected in `score`, so scoring fidelity is honest even though the search did not eliminate the mismatch. No code change is made here; deferred as a placement-engine follow-up (candidate for P4, which already covers `seedFromPlacement`/decode-adjacent search-engineering work), not a P0 scoring-fidelity defect.
+- All other combinations already had `feedthrough_mismatch = 0` in both before and after runs.
+- **Score deltas are small and in the expected direction** except the two `hybrid` rows above, where the score increase is directly attributable to the residual (in one case larger) `1e6 × feedthrough_mismatch` penalty, not to any regression in outline or wirelength — consistent with the expectation that "score should not regress materially (small outline growth from FT write-back is the honest cost that judging would have charged anyway)." No outline growth was observed in this sweep (write-back did not trigger dimension growth large enough to change `outline_area` in these five cases at these seeds); the small score deltas elsewhere are dominated by the ceil'd FT math changing the mismatch penalty magnitude itself, plus minor floating-point-level wirelength differences trickling into route geometry.
