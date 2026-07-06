@@ -59,6 +59,8 @@ struct Problem {
 struct Placement {
     std::vector<Rect> rects;
     std::vector<double> aspect;
+    double outline_w = 0.0;
+    double outline_h = 0.0;
 };
 
 struct Channel {

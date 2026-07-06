@@ -65,6 +65,8 @@ std::string placementKey(const Placement& placement) {
             << std::llround(r.w * 1000.0) << ','
             << std::llround(r.h * 1000.0) << ';';
     }
+    out << ':' << std::llround(placement.outline_w * 1000.0) << 'x'
+        << std::llround(placement.outline_h * 1000.0);
     return out.str();
 }
 
