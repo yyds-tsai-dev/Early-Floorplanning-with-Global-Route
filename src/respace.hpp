@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "model.hpp"
+#include "search.hpp"
 
 namespace efgr {
 
@@ -75,5 +76,28 @@ bool relaxToDemand(const Problem& problem, Placement& placement, const std::vect
 // On success, `placement` is overwritten with the legal, widened-where-needed result and this
 // returns true. Pure aside from the documented `placement` mutation; deterministic (no RNG).
 bool respaceToDemand(const Problem& problem, Placement& placement, const RoutingResult& routing);
+
+// Outcome of the route<->respace fixed-point loop: the best-legal placement/routing/score seen
+// across all iterations (including the un-respaced baseline as the fallback), plus whether that
+// best is strictly better than the baseline.
+struct RespaceResult {
+    Placement placement;
+    RoutingResult routing;
+    Score score;
+    bool improved = false;
+};
+
+// Route<->respace fixed point (design p3-design.md §2.6, decision 5): scores `base` via
+// `exactCached` as the baseline (also the fallback if respacing never improves on it), then runs
+// up to 3 iterations of respaceToDemand-on-the-current-routed-placement followed by a fresh
+// exactCached re-score. Each iteration's candidate is compared against the best-so-far using the
+// same open_routes==0-strictly-first-then-lower-value preference `outlineSweepBetter` already
+// applies in search.cpp (replicated locally per task-4 brief -- respaceFixedPoint lives in
+// respace.cpp, not search.cpp, so nothing is moved across files). Stops early when
+// `respaceToDemand` returns false (no demand left, or the candidate is infeasible/illegal),
+// when the just-accepted routing's channel_overflow is already <= kEps, or when respaceToDemand
+// made no coordinate change (monotone-widen: further iterations could not do anything new).
+// Deterministic: no RNG, and `exactCached`/`respaceToDemand` are themselves deterministic.
+RespaceResult respaceFixedPoint(const Problem& problem, const Placement& base, const ExactCachedFn& exactCached);
 
 }  // namespace efgr

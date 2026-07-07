@@ -10,6 +10,31 @@
 namespace efgr {
 namespace {
 
+// Same open_routes-strictly-first-then-lower-value preference as search.cpp's file-local
+// outlineSweepBetter (search.cpp:116-119). Replicated here rather than moved/exposed across
+// files, per the task-4 brief: respaceFixedPoint lives in respace.cpp, and outlineSweepBetter is
+// intentionally file-local to search.cpp.
+bool respaceCandidateBetter(const RoutingResult& a, double a_value, const RoutingResult& b, double b_value) {
+    if ((a.open_routes == 0) != (b.open_routes == 0)) return a.open_routes == 0;
+    return a_value < b_value;
+}
+
+// True iff every rect's coordinates (x,y,w,h) match within kEps -- used to detect "respaceToDemand
+// made no coordinate change" (design §2.6(3) early exit: further iterations cannot do anything new
+// once a pass is a geometric no-op).
+bool rectsUnchanged(const Placement& a, const Placement& b) {
+    if (a.rects.size() != b.rects.size()) return false;
+    for (std::size_t i = 0; i < a.rects.size(); ++i) {
+        const Rect& ra = a.rects[i];
+        const Rect& rb = b.rects[i];
+        if (std::abs(ra.x - rb.x) > kEps || std::abs(ra.y - rb.y) > kEps || std::abs(ra.w - rb.w) > kEps ||
+            std::abs(ra.h - rb.h) > kEps) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool positiveOverlap(double a0, double a1, double b0, double b1) {
     return std::min(a1, b1) - std::max(a0, b0) > kEps;
 }
@@ -376,6 +401,48 @@ bool respaceToDemand(const Problem& problem, Placement& placement, const Routing
 
     placement = candidate;
     return true;
+}
+
+RespaceResult respaceFixedPoint(const Problem& problem, const Placement& base, const ExactCachedFn& exactCached) {
+    RespaceResult best;
+    best.placement = base;
+    best.score = exactCached(base, &best.routing);
+    best.improved = false;
+
+    // Early exit (design §3.5): already overflow-free and legal -- nothing for the loop to do.
+    if (best.routing.channel_overflow <= kEps && best.routing.open_routes == 0) return best;
+
+    Placement current = base;
+    RoutingResult current_routing = best.routing;
+
+    constexpr int kMaxIters = 3;
+    for (int iter = 0; iter < kMaxIters; ++iter) {
+        Placement candidate = current;
+        bool changed = respaceToDemand(problem, candidate, current_routing);
+        if (!changed) break;  // no demand left, or infeasible/illegal -- stop (monotone-widen halt)
+        if (rectsUnchanged(candidate, current)) break;  // geometric no-op -- further iters can't help
+
+        RoutingResult candidate_routing;
+        Score candidate_score = exactCached(candidate, &candidate_routing);
+
+        if (respaceCandidateBetter(candidate_routing, candidate_score.value, best.routing, best.score.value)) {
+            best.placement = candidate;
+            best.routing = candidate_routing;
+            best.score = candidate_score;
+            best.improved = true;
+        }
+
+        // Advance the loop's own "current" regardless of whether this iteration became the new
+        // best -- each pass must relax from the freshly re-routed geometry (monotone-widen keeps
+        // this safe: coordinates only ever grow), so the next iteration's demand reflects the
+        // latest routing, not a stale one from a worse-scoring earlier candidate.
+        current = candidate;
+        current_routing = candidate_routing;
+
+        if (current_routing.channel_overflow <= kEps && current_routing.open_routes == 0) break;
+    }
+
+    return best;
 }
 
 }  // namespace efgr

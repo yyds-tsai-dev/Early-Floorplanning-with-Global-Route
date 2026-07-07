@@ -10,6 +10,7 @@
 #include "../src/placement_engine.hpp"
 #include "../src/respace.hpp"
 #include "../src/routing.hpp"
+#include "../src/search.hpp"
 #include "../src/validate.hpp"
 
 namespace {
@@ -670,6 +671,165 @@ void testRespaceToDemandNoDemandIsNoOp() {
     std::cout << "testRespaceToDemandNoDemandIsNoOp ok\n";
 }
 
+// --- T4: respaceFixedPoint (route<->respace fixed point, ≤3 iters, monotone) ---
+// design decision 5, p3-design.md §2.6.
+
+// (a) case1 bstar seed1: the same known-overflow fixture as T3's test. Wrap a plain
+// (non-caching) exactCached lambda around exactScore (deliberately not the SA's cache -- this
+// test exercises respaceFixedPoint's own contract, not runPlacementSearch's caching).
+//
+// MEASURED (2026-07-07): this fixture's core blocks already reach x==MAX (outline_w == problem's
+// declared MAX exactly; x-slack == 0), while y has ~220 units of slack. channelDemands charges
+// large demands on BOTH axes, but relaxToDemand's MAX-secant clamp scales the (infeasible) x-axis
+// demands down to ~0 while the y-axis-only widening goes through; re-routing after that shift
+// moves net traffic onto the still-saturated, x-locked channels. Empirically (5 cases x {sp,
+// bstar} x seed 1) NOT ONE combination yields a strict raw channel_overflow reduction within 3
+// iterations on this axis-locked layout -- the loop's own best-tracking correctly recognizes this
+// and falls back to the untouched baseline (or, for sp/case1, adopts a candidate with marginally
+// lower total Cost despite a tiny overflow uptick, which is exactly what the design's
+// outlineSweepBetter-style preference is defined to optimize -- Cost, not raw overflow). See
+// p3-task-4-report.md for the full 5x2 measurement table. The strategic fix for axis-locked
+// layouts is P2 (cost-driven routing steering flow off the locked axis), not more spacing here --
+// tracked for the phase-level docs, not this test.
+//
+// So this test asserts the CONTRACT respaceFixedPoint actually promises on an axis-locked
+// fixture: never regress (open_routes==0 first, then value <= baseline value + kEps, matching the
+// preference rule the loop itself uses to pick `best`), legality, and determinism. The genuine
+// overflow-reduction proof lives in the synthetic two-axis-slack fixture below.
+void testRespaceFixedPointCase1BStarSeed1NeverRegresses() {
+    Problem problem = parseProblem("test/2026 ICCAD_case.case1.csv");
+    std::unique_ptr<PlacementEngine> engine = makePlacementEngine("bstar");
+    std::mt19937 rng(1);
+    PlacementState state = engine->initialState(problem, rng);
+    Placement placement = engine->decode(problem, state);
+
+    // Plain (non-caching) exactCached lambda: respaceFixedPoint must work with any conforming
+    // ExactCachedFn, not just the SA's memoizing one.
+    ExactCachedFn exactCached = [&](const Placement& p, RoutingResult* routing_out) {
+        return exactScore(problem, p, routing_out);
+    };
+
+    RoutingResult baseline_routing;
+    Score baseline_score = exactScore(problem, placement, &baseline_routing);
+    // case1 is overflow-prone -- pin the baseline so this remains a meaningful, non-vacuous fixture.
+    assert(baseline_routing.channel_overflow > kEps);
+
+    RespaceResult result = respaceFixedPoint(problem, placement, exactCached);
+
+    // Non-regression per the design contract (same preference rule the loop's own best-tracking
+    // uses): open_routes==0 is never worse than baseline, and value is never worse than baseline
+    // (+kEps slack for float noise) -- the loop must never hand back something strictly worse than
+    // doing nothing.
+    assert(result.routing.open_routes == 0);
+    assert(baseline_routing.open_routes == 0);
+    assert(result.score.value <= baseline_score.value + kEps);
+
+    Problem scoped = problem;
+    scoped.outline_w = result.placement.outline_w;
+    scoped.outline_h = result.placement.outline_h;
+    RoutingResult post_routing = routeProblem(scoped, result.placement);
+    ValidationResult validation = validateSolution(scoped, result.placement, post_routing);
+    if (!validation.ok) {
+        for (const auto& m : validation.messages) std::cout << "  validation: " << m << "\n";
+    }
+    assert(validation.ok);
+
+    // Determinism: two independent calls from the same inputs give byte-identical placements.
+    RespaceResult result2 = respaceFixedPoint(problem, placement, exactCached);
+    assert(result2.placement.rects.size() == result.placement.rects.size());
+    for (std::size_t i = 0; i < result.placement.rects.size(); ++i) {
+        assert(result2.placement.rects[i].x == result.placement.rects[i].x);
+        assert(result2.placement.rects[i].y == result.placement.rects[i].y);
+        assert(result2.placement.rects[i].w == result.placement.rects[i].w);
+        assert(result2.placement.rects[i].h == result.placement.rects[i].h);
+    }
+    assert(result2.placement.outline_w == result.placement.outline_w);
+    assert(result2.placement.outline_h == result.placement.outline_h);
+    std::cout << "testRespaceFixedPointCase1BStarSeed1NeverRegresses ok\n";
+}
+
+// (b) synthetic two-axis-slack fixture -- the real RED->GREEN proof that the machinery CAN reduce
+// overflow when the layout actually has genuine room to grow on the axis the demand needs.
+//
+// Geometry (transposed fixture (b) from the top of this file): Left/Right sit side by side
+// (narrow 10-unit vertical gap between their own top edge and T's bottom edge); Bo spans the full
+// width below both, T spans the full width above both -- so the channel between Left and Right is
+// bounded below=Bo, above=T, with NEITHER Bo nor T sandwiched between Left/Right on the x-axis
+// (they bound the channel via a DIFFERENT axis entirely, so relaxToDemand's V-pass can move T
+// directly -- unlike a same-axis sandwich, e.g. a block sitting IN the very gap a demand charges,
+// which this file's case1 test comment documents as NOT relievable by this design).
+// Left->Right's bundle crosses the gap horizontally (dx), producing horizontal_usage on that
+// channel -- capacity-limited by channel HEIGHT (hcap = 25*height) per the axis-crossing
+// invariant, so relief needs need_h charged to the (below,above) = (Bo,T) pair, exactly what
+// channelDemands derives. nets=3000 against a starting 10-unit gap (hcap=25*115=2875) forces real
+// overflow (measured 125 below) that MAX (outline_h=500, ~380 units of slack beyond the tight
+// ~220 packing) has ample room to relieve.
+void testRespaceFixedPointSyntheticTwoAxisSlackReducesOverflow() {
+    Problem p;
+    p.blocks = {makeBlock("Left", 100, 100), makeBlock("Right", 100, 100), makeBlock("T", 300, 50),
+                makeBlock("Bo", 300, 50)};
+    p.block_index = {{"Left", 0}, {"Right", 1}, {"T", 2}, {"Bo", 3}};
+    p.outline_w = 600;
+    p.outline_h = 500;
+    p.alpha = 1.0;
+    Bundle bun;
+    bun.source = 0;  // Left
+    bun.target = 1;  // Right
+    bun.nets = 3000;
+    p.bundles = {bun};
+
+    Placement pl;
+    pl.rects = {Rect{0, 55, 100, 100}, Rect{200, 55, 100, 100}, Rect{0, 165, 300, 50}, Rect{0, 0, 300, 50}};
+    pl.aspect = {1.0, 1.0, 1.0, 1.0};
+
+    ExactCachedFn exactCached = [&](const Placement& cand, RoutingResult* routing_out) {
+        return exactScore(p, cand, routing_out);
+    };
+
+    RoutingResult baseline_routing;
+    Score baseline_score = exactScore(p, pl, &baseline_routing);
+    assert(baseline_routing.channel_overflow > kEps);
+
+    // Sanity: channelDemands actually derives a feasible need_h on the (below,above) pair from
+    // this fixture, confirming the axis-crossing invariant applies as expected before asserting
+    // the fixed point exploits it.
+    std::vector<StripDemand> demands = channelDemands(p, pl, baseline_routing);
+    bool found_feasible_need_h = false;
+    for (const auto& d : demands) {
+        if (d.need_h > kEps) found_feasible_need_h = true;
+    }
+    assert(found_feasible_need_h);
+
+    RespaceResult result = respaceFixedPoint(p, pl, exactCached);
+
+    assert(result.improved);
+    assert(result.routing.channel_overflow < baseline_routing.channel_overflow - kEps);
+    assert(result.routing.open_routes == 0);
+    assert(result.score.value < baseline_score.value);
+
+    Problem scoped = p;
+    scoped.outline_w = result.placement.outline_w;
+    scoped.outline_h = result.placement.outline_h;
+    RoutingResult post_routing = routeProblem(scoped, result.placement);
+    ValidationResult validation = validateSolution(scoped, result.placement, post_routing);
+    if (!validation.ok) {
+        for (const auto& m : validation.messages) std::cout << "  validation: " << m << "\n";
+    }
+    assert(validation.ok);
+
+    // Determinism.
+    RespaceResult result2 = respaceFixedPoint(p, pl, exactCached);
+    assert(result2.placement.rects.size() == result.placement.rects.size());
+    for (std::size_t i = 0; i < result.placement.rects.size(); ++i) {
+        assert(result2.placement.rects[i].x == result.placement.rects[i].x);
+        assert(result2.placement.rects[i].y == result.placement.rects[i].y);
+        assert(result2.placement.rects[i].w == result.placement.rects[i].w);
+        assert(result2.placement.rects[i].h == result.placement.rects[i].h);
+    }
+    assert(result2.routing.channel_overflow == result.routing.channel_overflow);
+    std::cout << "testRespaceFixedPointSyntheticTwoAxisSlackReducesOverflow ok\n";
+}
+
 }  // namespace
 
 int main() {
@@ -687,6 +847,8 @@ int main() {
     testDemandKeyedPairAppliesEvenWhenAnotherBlockWinsPredecessorSlot();
     testRespaceToDemandCase1BStarSeed1();
     testRespaceToDemandNoDemandIsNoOp();
-    std::cout << "P3 T1+T2+T3 regressions passed\n";
+    testRespaceFixedPointCase1BStarSeed1NeverRegresses();
+    testRespaceFixedPointSyntheticTwoAxisSlackReducesOverflow();
+    std::cout << "P3 T1+T2+T3+T4 regressions passed\n";
     return 0;
 }
