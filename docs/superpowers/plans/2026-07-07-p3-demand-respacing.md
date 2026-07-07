@@ -64,8 +64,8 @@
 
 ### Task 7: P3 sweep + docs
 
-- [ ] Full 15-row sweep (5 cases × sp/bstar/hybrid, iters 2000, seed 1); append `## Appendix: P3 demand-respacing results (2026-07-07)` to the strategy doc with the table + 3-5 comparison lines vs the P1 appendix (expected per design: case1/case3 overflow ≈ 0 and score down ~3 orders; case2/case4 partial; case0 unchanged). Mark §4 P3 done; note any case where respace could not fully relieve (demand-bound) with the residual number.
-- [ ] All suites + `make` + commit `docs: record P3 demand-respacing results`.
+- [x] Full 15-row sweep (5 cases × sp/bstar/hybrid, iters 2000, seed 1); appended `## Appendix: P3 demand-respacing results (2026-07-07)` to the strategy doc with the table + comparison lines vs the P1 appendix. Actual outcome differs from the original expected-per-design note above: 5/15 rows moved (case1 all engines −12% to −57% score/overflow; case2 bstar/hybrid −25% to −30%); the other 10 rows (case2/sp, all of case3, all of case4) are byte-identical to P1 — those layouts are axis-locked (core x-extent pinned at MAX per the T4 report), so spacing alone cannot relieve their overflow. Marked §4 P3 "done with findings" (not overclaimed) and cross-referenced P2 as the strategic next phase for the axis-locked rows.
+- [x] All suites + `make` + commit `docs: record P3 demand-respacing results`.
 
 ## Self-Review
 - Design coverage: decisions 1-6 → T1(demand+invariant) T2(graphs) T3(integration+gate) T4(fixed point) T5/T6(hooks) T7(evidence). Failure modes (infeasible demand, order-flip, illegal-emit) each have a dedicated test.

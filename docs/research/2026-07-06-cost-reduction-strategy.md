@@ -126,7 +126,7 @@ GPT/Gemini ×2 converge on FTAFP/Piano/Flora/PARSAC but **predate the 20260608 s
 9. Adaptive chunking: split at capacity bottlenecks instead of fixed ~1000×≤8 (`routing.cpp:216-217`); QA A6 allows arbitrary split.
 
 ### P3 — demand-driven spacing
-10. Constraint-graph re-spacing with per-strip directional min-gaps = demand/25; longest-path recoordinate; iterate route↔space ≤3. Also usable as a *repair* operator for overflow (widen exactly the deficient strip).
+10. ✅ **DONE with findings** (T1-T7, 2026-07-07) — Constraint-graph re-spacing with per-strip directional min-gaps = demand/25; longest-path recoordinate; iterate route↔space ≤3, hooked into the elite pass and `finalizeFeedthrough` only (never the SA hot loop). See the P3 appendix below for the full sweep. Machinery is in place and Pareto-safe (never regresses, never emits illegal/unrouted output) and the design's synthetic proof case (`channel_overflow` 125→0) holds — but on the five official cases at seed 1, the raw-overflow collapse only materialized where an axis had slack (case1 all engines, case2 bstar/hybrid: overflow/score down 12-57%); the remaining rows (case2/sp, case3, case4) are **axis-locked** (core x-extent pinned at MAX) so spacing alone cannot relieve them — confirmed empirically in the T4 report. **P2 (cost-driven routing) is the strategic next phase** for the axis-locked rows.
 
 ### P4 — search engine
 11. Fast-SA 3-stage schedule + adaptive cooling (`search.cpp`).
@@ -275,3 +275,45 @@ dependency showing up as measured: the P1 area win is real (up to −33% outline
 −14.5%) but converts into net Cost only where routing fits (case0), and needs **P3 demand-driven
 re-spacing** (widen exactly the deficient inter-core strips) to land on cases 1-4. The wider ladder
 is kept (harmless, cached, case3 benefits). No Pareto-vs-P0 claim is made for the P1 sweep table.
+
+## Appendix: P3 demand-respacing results (2026-07-07)
+
+Commands: `bin/efgr "test/2026 ICCAD_case.caseN.csv" out.cfg --engine ENGINE --iters 2000 --seed 1` for `caseN` in `case0..case4` and `ENGINE` in `sp`, `bstar`, `hybrid` (15 runs), built from HEAD after P3 T1-T6 (demand model, constraint-graph relax, single-pass respace, route↔respace fixed point, elite-pass hook, `finalizeFeedthrough` hook) plus the rider fix (memoized `finalizeFeedthrough` respace scorer). All 15 runs report `open_routes=0 validation=ok`.
+
+| Case | Engine | score | outline_area | wirelength | channel_overflow | feedthrough_mismatch | validation |
+|---|---|---|---|---|---|---|---|
+| case0 | sp     | 1.80179e+07 | 5.54531e+06 | 1.09677e+07 | 0 | 0 | ok |
+| case0 | bstar  | 9.20647e+06 | 6.46288e+06 | 7.30996e+06 | 0 | 0 | ok |
+| case0 | hybrid | 1.80179e+07 | 5.54531e+06 | 1.09677e+07 | 0 | 0 | ok |
+| case1 | sp     | 5.93053e+10 | 7.90551e+06 | 7.75753e+07 | 58181 | 0 | ok |
+| case1 | bstar  | 3.47609e+10 | 7.91846e+06 | 3.91901e+07 | 34245.1 | 0 | ok |
+| case1 | hybrid | 3.13355e+10 | 7.77194e+06 | 5.04456e+07 | 30516.5 | 0 | ok |
+| case2 | sp     | 1.13474e+11 | 3.69609e+07 | 2.61459e+08 | 112436 | 0 | ok |
+| case2 | bstar  | 7.90397e+10 | 3.62745e+07 | 1.98232e+08 | 77493.3 | 0 | ok |
+| case2 | hybrid | 7.88814e+10 | 3.97783e+07 | 2.12557e+08 | 77719.4 | 0 | ok |
+| case3 | sp     | 8.75294e+10 | 1.9629e+07 | 1.57443e+08 | 87181.2 | 0 | ok |
+| case3 | bstar  | 9.79311e+10 | 2.32361e+07 | 2.21526e+08 | 97422.5 | 0 | ok |
+| case3 | hybrid | 1.10756e+11 | 1.98094e+07 | 1.77796e+08 | 109987 | 0 | ok |
+| case4 | sp     | 2.15875e+11 | 2.53474e+07 | 2.39256e+08 | 215317 | 0 | ok |
+| case4 | bstar  | 2.32820e+11 | 2.90404e+07 | 3.24208e+08 | 232158 | 0 | ok |
+| case4 | hybrid | 2.24423e+11 | 2.53910e+07 | 2.43792e+08 | 223916 | 0 | ok |
+
+### Comparison against the P1 appendix table (above)
+
+| Case | Engine | score (P1 → P3) | outline_area (P1 → P3) | channel_overflow (P1 → P3) |
+|---|---|---|---|---|
+| case0 | sp/bstar/hybrid | unchanged | unchanged | unchanged (0 → 0) |
+| case1 | sp     | 1.34604e+11 → 5.93053e+10 (**−55.9%**) | 7.81821e+06 → 7.90551e+06 | 134405 → 58181 (**−56.7%**) |
+| case1 | bstar  | 3.93908e+10 → 3.47609e+10 (−11.8%) | 7.55343e+06 → 7.91846e+06 | 38875.1 → 34245.1 (−11.9%) |
+| case1 | hybrid | 6.08190e+10 → 3.13355e+10 (**−48.5%**) | 7.06371e+06 → 7.77194e+06 | 59986.7 → 30516.5 (**−49.1%**) |
+| case2 | sp     | unchanged | unchanged | unchanged (112436 → 112436) |
+| case2 | bstar  | 1.12121e+11 → 7.90397e+10 (−29.5%) | 3.41712e+07 → 3.62745e+07 | 109632 → 77493.3 (−29.3%) |
+| case2 | hybrid | 1.05866e+11 → 7.88814e+10 (−25.5%) | 3.76369e+07 → 3.97783e+07 | 104514 → 77719.4 (−25.6%) |
+| case3 | sp/bstar/hybrid | unchanged | unchanged | unchanged |
+| case4 | sp/bstar/hybrid | unchanged | unchanged | unchanged |
+
+Five of the fifteen rows moved (case1 all three engines, case2 bstar/hybrid); the other ten — including case2/sp and all of case3/case4 — are byte-for-byte identical to the P1 appendix. `feedthrough_mismatch` stays 0 and `open_routes=0`/`validation=ok` hold everywhere, so every adopted change is Pareto-safe per the design's own gate (`outlineSweepBetter`-style: legal-first, then lower value).
+
+### Honest findings
+
+P3's machinery — the axis-crossing demand model (T1), the all-predecessor longest-path relax (T2), the single-pass respace with a full legality gate (T3), the ≤3-iteration route↔respace fixed point (T4), and both hooks (elite pass T5, `finalizeFeedthrough` T6) — is fully in place, warning-clean, and Pareto-safe: it never regresses a row and never emits an illegal or unrouted placement. Where it landed, it landed hard: case1's three engines drop `channel_overflow` and `score` together by 12-57%, and case2's bstar/hybrid legs drop both by ~25-30%. But the overflow *collapse* the design's synthetic proof demonstrated (a hand-built two-axis-slack fixture goes from `channel_overflow=125` to `0`, see the T4 report) did not generalize to the five official cases at seed 1 for the rows that stayed flat (case2/sp, case3 all, case4 all). T4's empirical measurement is the reason: those layouts are **axis-locked** — the core packing's x-extent is already pinned at `problem.outline_w` (MAX), so `relaxToDemand`'s H-pass demand is scaled to ~0 by the MAX secant clamp before it can do anything, leaving only the y-axis (where slack exists) to widen; re-routing after a y-only widen just redistributes traffic across the still-saturated x-locked channels rather than reducing total overflow. Raw `channel_overflow` is not reducible by spacing alone on those rows — there is no free axis left to widen into. This is not a bug in T1-T6; it is the geometry P1's tight-core packing left behind, exactly as the P1 addendum above predicted (P3 "needs demand-driven re-spacing to land on cases 1-4" — it partially did, on the rows where an axis had slack). The strategic next phase for the remaining axis-locked rows is **P2 (cost-driven routing)**: steering flow off the locked axis and into feedthrough via Dijkstra edge weights that price channel widening against FT tier cost, rather than trying to create channel capacity that the current topology's dominant axis has no room left to give.
