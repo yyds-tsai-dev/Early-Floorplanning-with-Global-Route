@@ -263,7 +263,19 @@ void finalizeFeedthrough(const Problem& problem, const PlacementEngine& engine, 
         RoutingResult new_routing;
         Score exact = exactScore(inflated, placement, &new_routing);
         routing = new_routing;
+        // T6 (design p3-design.md §3.4/§5, plan Task 6): respace the inflated re-decode against
+        // its own routed channel demand BEFORE tryCommit -- FT inflation grows a soft block in
+        // place, which can push a neighboring strip into overflow; respacing here widens exactly
+        // that strip on the SAME inflated problem the candidate was decoded against. The commit
+        // gate itself is untouched: tryCommit still scores/validates against the ORIGINAL
+        // `problem` (not `inflated`), so respacing only ever supplies a possibly-better candidate
+        // to the same paydown + validateSolution funnel, never changes what gets accepted.
+        ExactCachedFn inflatedExact = [&](const Placement& cand, RoutingResult* routing_out) {
+            return exactScore(inflated, cand, routing_out);
+        };
+        RespaceResult respaced = respaceFixedPoint(inflated, placement, inflatedExact);
         tryCommit(placement, exact, new_routing);
+        tryCommit(respaced.placement, respaced.score, respaced.routing);
         // Reclaim outline/overflow lost to the inflated re-decode: same dims, tighter packing.
         Placement compacted = compactTowardOrigin(inflated, placement);
         if (fitsOutlineWithoutOverlap(inflated, compacted)) {
@@ -277,6 +289,9 @@ void finalizeFeedthrough(const Problem& problem, const PlacementEngine& engine, 
             RoutingResult compacted_routing;
             Score compacted_exact = exactScore(inflated, compacted, &compacted_routing);
             tryCommit(compacted, compacted_exact, compacted_routing);
+            // Same T6 respace, applied to the compacted variant before ITS tryCommit.
+            RespaceResult compacted_respaced = respaceFixedPoint(inflated, compacted, inflatedExact);
+            tryCommit(compacted_respaced.placement, compacted_respaced.score, compacted_respaced.routing);
         }
         // A single re-decode of the inflated problem often spills past MAX (a legal
         // arrangement may still exist -- other engines find one). Jiggle the inflated

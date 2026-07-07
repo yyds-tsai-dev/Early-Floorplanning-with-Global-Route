@@ -882,6 +882,106 @@ void testEliteRespaceHookEndToEndCase1BStarSeed1() {
     std::cout << "testEliteRespaceHookEndToEndCase1BStarSeed1 ok\n";
 }
 
+// T6 (design p3-design.md §3.4/§5, plan Task 6): a CONGESTED variant of the P0 FT-forced fixture
+// family (`forcedFtProblem`/`rowPlacement`/`testFinalizeFeedthroughDirect`,
+// test/regression_p0_20260706.cpp:47-81,235-270) -- same row (BLK01 macro | BLK02 soft | BLK03
+// macro) with the same top wall (BLK04) forcing BLK01<->BLK03 through feedthrough (nonzero
+// feedthrough_mismatch precondition), PLUS an added macro BLK05 to the right of BLK03 with a real
+// x-gap (BLK03 right edge=500, BLK05 at x=[540,600]) and a SHORT shared y-band (both start at
+// y=0, height 60) so extractChannels carves a genuine channel (CH4, width=40) between them. A
+// heavy BLK03->BLK05 bundle (3200 nets) routes straight through CH4: the guide-point hop has both
+// a dx and dy component (BLK05 is short relative to BLK03), so BOTH horizontal_usage and
+// vertical_usage land on CH4 at 3200 -- vcap = 25*40 = 1000, so vertical_usage alone overflows by
+// 2200 (verified empirically against routing.cpp's usage accrual before writing this fixture).
+// This gives a real, nonzero precondition on BOTH axes finalizeFeedthrough must handle at once:
+// feedthrough_mismatch > 0 (FT under-provisioned) AND channel_overflow > 0 (congested channel).
+Problem congestedFtProblem() {
+    Problem p;
+    auto addBlock = [&](const std::string& name, double area, double w, double h, BlockType type) {
+        Block b;
+        b.name = name;
+        b.area = area;
+        b.width = w;
+        b.height = h;
+        b.type = type;
+        b.ar_min = 0.25;
+        b.ar_max = 4.0;
+        b.ft_rates = {0.2, 0.4, 0.8, 1.0};
+        p.block_index[name] = static_cast<int>(p.blocks.size());
+        p.blocks.push_back(b);
+    };
+    addBlock("BLK01", 30000.0, 100.0, 300.0, BlockType::Macro);
+    addBlock("BLK02", 90000.0, 300.0, 300.0, BlockType::Soft);
+    addBlock("BLK03", 30000.0, 100.0, 300.0, BlockType::Macro);
+    addBlock("BLK04", 620.0 * 40.0, 620.0, 40.0, BlockType::Macro);   // top wall: forces FT
+    addBlock("BLK05", 60.0 * 60.0, 60.0, 60.0, BlockType::Macro);     // congestion target
+    p.outline_w = 620.0;
+    p.outline_h = 700.0;  // headroom for BStarEngine's re-stack on inflated re-decode
+    p.alpha = 1.0;
+    Bundle ft_bundle;
+    ft_bundle.source = 0;
+    ft_bundle.target = 2;
+    ft_bundle.nets = 900;
+    Bundle congestion_bundle;
+    congestion_bundle.source = 2;
+    congestion_bundle.target = 4;
+    congestion_bundle.nets = 3200;
+    p.bundles = {ft_bundle, congestion_bundle};
+    return p;
+}
+
+Placement congestedFtPlacement() {
+    Placement pl;
+    pl.rects = {Rect{0.0, 0.0, 100.0, 300.0}, Rect{100.0, 0.0, 300.0, 300.0}, Rect{400.0, 0.0, 100.0, 300.0},
+                Rect{0.0, 300.0, 620.0, 40.0}, Rect{540.0, 0.0, 60.0, 60.0}};
+    pl.aspect = {1.0, 1.0, 1.0, 1.0, 1.0};
+    return pl;
+}
+
+void testFinalizeFeedthroughRespaceCongestedVariant() {
+    Problem p = congestedFtProblem();
+    Placement pl = congestedFtPlacement();
+
+    SearchResult result;
+    result.best_placement = pl;
+    result.best_score = exactScore(p, pl, &result.best_routing);
+    // Precondition: both FT under-provisioning AND channel congestion are real before finalize.
+    assert(result.best_routing.feedthrough_mismatch > kEps);
+    assert(result.best_routing.channel_overflow > kEps);
+
+    std::unique_ptr<PlacementEngine> engine = makePlacementEngine("bstar");
+    finalizeFeedthrough(p, *engine, result);
+
+    // Acceptance criteria (plan Task 6): FT payoff reaches mismatch 0, routes stay closed, and
+    // the committed candidate validates against the original `problem` -- the same three gates
+    // finalizeFeedthrough already enforced pre-T6 (paydown + open==0 + validateSolution); T6 only
+    // supplies a possibly-better candidate to that unchanged gate, so these must still hold.
+    assert(result.best_routing.feedthrough_mismatch <= kEps);
+    assert(result.best_routing.open_routes == 0);
+    auto validation = validateSolution(p, result.best_placement, result.best_routing);
+    if (!validation.ok) {
+        for (const auto& m : validation.messages) std::cout << "  validation: " << m << "\n";
+    }
+    assert(validation.ok);
+
+    // Determinism: finalizeFeedthrough (and the respaceFixedPoint calls now inside it) use a
+    // fixed RNG seed and no other nondeterminism -- two independent runs from the same
+    // precondition must commit byte-identical results.
+    SearchResult result2;
+    result2.best_placement = pl;
+    result2.best_score = exactScore(p, pl, &result2.best_routing);
+    finalizeFeedthrough(p, *engine, result2);
+    assert(result2.best_placement.rects.size() == result.best_placement.rects.size());
+    for (std::size_t i = 0; i < result.best_placement.rects.size(); ++i) {
+        assert(result2.best_placement.rects[i].x == result.best_placement.rects[i].x);
+        assert(result2.best_placement.rects[i].y == result.best_placement.rects[i].y);
+        assert(result2.best_placement.rects[i].w == result.best_placement.rects[i].w);
+        assert(result2.best_placement.rects[i].h == result.best_placement.rects[i].h);
+    }
+    assert(result2.best_score.value == result.best_score.value);
+    std::cout << "testFinalizeFeedthroughRespaceCongestedVariant ok\n";
+}
+
 }  // namespace
 
 int main() {
@@ -902,6 +1002,7 @@ int main() {
     testRespaceFixedPointCase1BStarSeed1NeverRegresses();
     testRespaceFixedPointSyntheticTwoAxisSlackReducesOverflow();
     testEliteRespaceHookEndToEndCase1BStarSeed1();
-    std::cout << "P3 T1+T2+T3+T4+T5 regressions passed\n";
+    testFinalizeFeedthroughRespaceCongestedVariant();
+    std::cout << "P3 T1+T2+T3+T4+T5+T6 regressions passed\n";
     return 0;
 }
