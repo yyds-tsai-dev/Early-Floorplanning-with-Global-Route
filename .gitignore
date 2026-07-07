@@ -2,6 +2,7 @@
 bin/
 test/p0_regression_bin
 test/p1_regression_bin
+test/p2_regression_bin
 test/p3_regression_bin
 
 # Object files

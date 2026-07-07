@@ -218,11 +218,28 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement) {
         }
     }
 
+    // Area-denominated overflow (design p2-design.md §8.1 / R0; plan Global Constraint 2): both
+    // channel_overflow and feedthrough_mismatch must be in um^2 so eval.cpp's shared 1e6 weight
+    // (eval.cpp:143-144) compares like units -- previously this term was nets-over-capacity while
+    // feedthrough_mismatch was um^2, an apples-to-oranges mismatch that hid the official 2.4x FT
+    // win from both the scorer and (later) the P2 router. Axis-crossing span choice per Global
+    // Constraint 2: a horizontal overflow's missing capacity is a HEIGHT deficit (hcap = 25*h), and
+    // the channel spans that deficit along its WIDTH; a vertical overflow's missing capacity is a
+    // WIDTH deficit (vcap = 25*w), spanning the channel's HEIGHT. This mirrors respace.cpp's
+    // channelDemands axis-crossing invariant (need_w from vertical_usage, need_h from
+    // horizontal_usage) but converts the demand into the AREA the scorer must charge, not just a
+    // linear-unit demand.
     for (const auto& ch : result.channels) {
         double hcap = 25.0 * std::max(1.0, ch.rect.h);
         double vcap = 25.0 * std::max(1.0, ch.rect.w);
-        if (ch.horizontal_usage > hcap) result.channel_overflow += ch.horizontal_usage - hcap;
-        if (ch.vertical_usage > vcap) result.channel_overflow += ch.vertical_usage - vcap;
+        if (ch.horizontal_usage > hcap) {
+            double missing_height = (ch.horizontal_usage - hcap) / 25.0;
+            result.channel_overflow += missing_height * ch.rect.w;
+        }
+        if (ch.vertical_usage > vcap) {
+            double missing_width = (ch.vertical_usage - vcap) / 25.0;
+            result.channel_overflow += missing_width * ch.rect.h;
+        }
     }
     for (std::size_t i = 0; i < result.soft_feedthrough_nets.size(); ++i) {
         double nets = result.soft_feedthrough_nets[i];

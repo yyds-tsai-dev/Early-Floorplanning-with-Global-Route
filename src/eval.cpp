@@ -140,6 +140,8 @@ Score routeAndScoreAt(const Problem& problem, const Placement& placement, double
     Score score = cheapScore(scoped, placement);
     score.wirelength = routing.total_wirelength;
     score.penalty += routing.open_routes * 1e15;
+    // channel_overflow and feedthrough_mismatch are both um^2 (design p2-design.md §8.1 / R0:
+    // routing.cpp area-denominates channel_overflow so this shared 1e6 weight compares like units).
     score.penalty += routing.channel_overflow * 1e6;
     score.penalty += routing.feedthrough_mismatch * 1e6;
     score.value = score.outline_area + problem.alpha * score.wirelength + score.penalty;
