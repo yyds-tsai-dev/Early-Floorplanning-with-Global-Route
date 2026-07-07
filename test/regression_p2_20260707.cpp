@@ -5,6 +5,7 @@
 
 #include "../src/ft.hpp"
 #include "../src/model.hpp"
+#include "../src/route_cost.hpp"
 #include "../src/routing.hpp"
 
 // P2 Task 0 (design p2-design.md §8.1 R0 / plan Global Constraint 2): area-denominate
@@ -137,12 +138,142 @@ void testOverflowAreaComparableToFtMismatchMagnitude() {
     std::cout << "testOverflowAreaComparableToFtMismatchMagnitude ok\n";
 }
 
+// P2 Task 1 (design p2-design.md §Q1 / plan Global Constraint 1/3/4): pure cost-unit routing edge
+// functions in src/route_cost.hpp. Tests below are independent of routing/eval -- they call
+// channelMarginalCost / softFtMarginalCost / wireCost directly against hand-computed expectations.
+
+// Fixture (a): slack channel -- usage+n stays within capacity in both directions, so
+// channelMarginalCost must be exactly 0 regardless of direction.
+void testChannelMarginalCostIsZeroWhenSlack() {
+    Channel ch;
+    ch.name = "CH1";
+    ch.rect = Rect{0.0, 0.0, 80.0, 610.0};
+    // vertical cap = 25*w = 2000; usage 500 + n 100 = 600 <= 2000 -> free.
+    assert(channelMarginalCost(ch, /*horizontal=*/false, 500.0, 100.0) == 0.0);
+    // horizontal cap = 25*h = 15250; usage 1000 + n 100 = 1100 <= 15250 -> free.
+    assert(channelMarginalCost(ch, /*horizontal=*/true, 1000.0, 100.0) == 0.0);
+    std::cout << "testChannelMarginalCostIsZeroWhenSlack ok\n";
+}
+
+// Fixture (b): saturated channel, vertical direction. w=80 h=610 -> vcap = 25*80 = 2000. usage is
+// already exactly at cap (2000); n=100 nets are pure marginal overflow. Per T0's area denomination
+// (missing width spans the channel's HEIGHT for a vertical overflow): missing_width = n/25 = 4,
+// area = 4 * 610 = 2440 um^2; cost = kOverflowAreaWeight * 2440 = 1e6 * 2440 = 2.44e9.
+void testChannelMarginalCostSaturatedVertical() {
+    Channel ch;
+    ch.name = "CH1";
+    ch.rect = Rect{0.0, 0.0, 80.0, 610.0};
+    double usage = 2000.0;  // exactly at vcap
+    double n = 100.0;
+    double cost = channelMarginalCost(ch, /*horizontal=*/false, usage, n);
+    double expected = kOverflowAreaWeight * ((n / 25.0) * ch.rect.h);
+    assert(std::abs(expected - 2.44e9) < 1.0);
+    assert(std::abs(cost - expected) < 1.0);
+    assert(std::abs(cost - 2.44e9) < 1.0);
+    std::cout << "testChannelMarginalCostSaturatedVertical ok\n";
+}
+
+// Fixture (c): saturated channel, horizontal direction (symmetric). w=610 h=80 -> hcap = 25*80 =
+// 2000. usage at cap, n=100 nets all overflow; missing_height spans the channel's WIDTH:
+// missing_height = 100/25 = 4, area = 4 * 610 = 2440 um^2; cost = 1e6 * 2440 = 2.44e9.
+void testChannelMarginalCostSaturatedHorizontal() {
+    Channel ch;
+    ch.name = "CH2";
+    ch.rect = Rect{0.0, 0.0, 610.0, 80.0};
+    double usage = 2000.0;  // exactly at hcap
+    double n = 100.0;
+    double cost = channelMarginalCost(ch, /*horizontal=*/true, usage, n);
+    double expected = kOverflowAreaWeight * ((n / 25.0) * ch.rect.w);
+    assert(std::abs(expected - 2.44e9) < 1.0);
+    assert(std::abs(cost - expected) < 1.0);
+    std::cout << "testChannelMarginalCostSaturatedHorizontal ok\n";
+}
+
+// Fixture (d): straddling the cap -- usage=1900 (below vcap=2000), n=200 pushes to 2100, so only
+// 100 nets are over. Marginal cost must charge only the overage, not the full n.
+void testChannelMarginalCostStraddlesCap() {
+    Channel ch;
+    ch.name = "CH1";
+    ch.rect = Rect{0.0, 0.0, 80.0, 610.0};
+    double usage = 1900.0;
+    double n = 200.0;
+    double cost = channelMarginalCost(ch, /*horizontal=*/false, usage, n);
+    double over = (usage + n) - 2000.0;  // 100 nets over cap
+    assert(std::abs(over - 100.0) < kEps);
+    double expected = kOverflowAreaWeight * ((over / 25.0) * ch.rect.h);
+    assert(std::abs(cost - expected) < 1.0);
+    std::cout << "testChannelMarginalCostStraddlesCap ok\n";
+}
+
+// Fixture (e): FT tier-jump pricing. Block base area 372,949 (official example), placed exactly at
+// the required area for acc=2900 nets (tier 0, <=3000, rate 0.2). Pushing n=200 more nets crosses
+// the 3000-net tier boundary into tier 1 (rate 0.4). softFtMarginalCost must price exactly the
+// required-area delta between acc=2900 and acc+n=3100 (computed via ft.hpp directly, not
+// hardcoded), since placed_area covers acc's requirement exactly (no free slack beyond it).
+void testSoftFtMarginalCostPricesTierJump() {
+    Block b;
+    b.name = "BLK";
+    b.ft_base_area = 372949.0;
+    b.area = 372949.0;
+    b.type = BlockType::Soft;
+    b.ft_rates = {0.2, 0.4, 0.8, 1.0};
+
+    double acc = 2900.0;
+    double n = 200.0;
+    double required_before = ftRequiredArea(b.ft_base_area, ftExtend(acc, ftTierRate(b, acc)));
+    double required_after = ftRequiredArea(b.ft_base_area, ftExtend(acc + n, ftTierRate(b, acc + n)));
+    // Confirm this fixture actually crosses the tier boundary (rate changes 0.2 -> 0.4).
+    assert(std::abs(ftTierRate(b, acc) - 0.2) < kEps);
+    assert(std::abs(ftTierRate(b, acc + n) - 0.4) < kEps);
+    assert(required_after > required_before);
+
+    double placed_area = required_before;  // placed exactly covers acc's requirement, no more
+    double cost = softFtMarginalCost(b, acc, n, placed_area);
+    double expected = kFtMismatchWeight * (required_after - placed_area);
+    assert(std::abs(cost - expected) < 1e-3);
+    assert(cost > 0.0);
+    std::cout << "testSoftFtMarginalCostPricesTierJump ok\n";
+}
+
+// Fixture (f): generous placed_area (covers even the post-crossing requirement) -> free.
+void testSoftFtMarginalCostFreeWhenPlacedAreaGenerous() {
+    Block b;
+    b.name = "BLK";
+    b.ft_base_area = 372949.0;
+    b.area = 372949.0;
+    b.type = BlockType::Soft;
+    b.ft_rates = {0.2, 0.4, 0.8, 1.0};
+
+    double acc = 2900.0;
+    double n = 200.0;
+    double required_after = ftRequiredArea(b.ft_base_area, ftExtend(acc + n, ftTierRate(b, acc + n)));
+    double placed_area = required_after + 10000.0;  // generous slack beyond the post-crossing need
+    double cost = softFtMarginalCost(b, acc, n, placed_area);
+    assert(cost == 0.0);
+    std::cout << "testSoftFtMarginalCostFreeWhenPlacedAreaGenerous ok\n";
+}
+
+// Fixture (g): wireCost trivial sanity.
+void testWireCostTrivial() {
+    assert(std::abs(wireCost(2.0, 10.0, 5.0) - 100.0) < kEps);
+    assert(wireCost(1.0, 0.0, 100.0) == 0.0);
+    assert(wireCost(1.0, 10.0, 0.0) == 0.0);
+    std::cout << "testWireCostTrivial ok\n";
+}
+
 }  // namespace
 
 int main() {
     testVerticalOverflowIsAreaDenominatedByChannelHeight();
     testHorizontalOverflowIsAreaDenominatedByChannelWidth();
     testOverflowAreaComparableToFtMismatchMagnitude();
-    std::cout << "P2 T0 regressions passed\n";
+    testChannelMarginalCostIsZeroWhenSlack();
+    testChannelMarginalCostSaturatedVertical();
+    testChannelMarginalCostSaturatedHorizontal();
+    testChannelMarginalCostStraddlesCap();
+    testSoftFtMarginalCostPricesTierJump();
+    testSoftFtMarginalCostFreeWhenPlacedAreaGenerous();
+    testWireCostTrivial();
+    std::cout << "P2 T0+T1 regressions passed\n";
     return 0;
 }
