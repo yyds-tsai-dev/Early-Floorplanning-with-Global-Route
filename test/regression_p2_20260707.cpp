@@ -261,6 +261,141 @@ void testWireCostTrivial() {
     std::cout << "testWireCostTrivial ok\n";
 }
 
+// P2 Task 2 (design p2-design.md §Q1-Q2 core; plan Global Constraint 7 comparison gate): the
+// cost-driven single-pass Dijkstra in routing.cpp routeChunk. Tests below exercise routeProblem's
+// new `cost_driven` parameter directly (default false == legacy byte-identical; true == new path).
+
+// Builds a 3-block layout: A (source, hard macro) bottom-left, B (target, hard macro) top-left,
+// separated by a 610-tall vertical channel (identical geometry to the T0 fixture (a) above, so its
+// vcap=2000 math is already verified) -- AND a soft block S placed to the right of both A and B,
+// directly abutting each (zero channel between A-S and S-B), offering an all-block bypass of the
+// saturated channel. `ft_base_area` matches the official design-doc worked example (372,949) so
+// this fixture's numbers are traceable to p2-design.md §8.1/§3.3 (3600 nets @ 40% tier -> FT
+// marginal mismatch 36,261.34 um^2, STRICTLY less than the channel's marginal overflow area 39,040
+// um^2 for the same 3600 nets from an empty channel) -- confirmed by hand computation against
+// ft.hpp's own functions in the test body below, not hardcoded on either side.
+struct ChannelVsFtFixture {
+    Problem problem;
+    Placement placement;
+};
+
+ChannelVsFtFixture makeChannelVsFtFixture() {
+    ChannelVsFtFixture f;
+    Problem& p = f.problem;
+    p.outline_w = 80.0 + 700.0;  // A/B column (80 wide) + soft block S (700 wide) to the right
+    p.outline_h = 610.0 + 100.0 + 100.0;  // A (bottom) + channel span 610 + B (top)
+    p.alpha = 1.0;
+
+    Block a = makeChannelBlock("A", 80.0, 100.0);
+    Block b = makeChannelBlock("B", 80.0, 100.0);
+    Block s;
+    s.name = "S";
+    s.width = 700.0;
+    s.height = 810.0;
+    s.area = 700.0 * 810.0;
+    s.ft_base_area = 372949.0;  // official design-doc worked example base area
+    s.type = BlockType::Soft;
+    s.ft_rates = {0.2, 0.4, 0.8, 1.0};
+
+    p.blocks = {a, b, s};
+    p.block_index = {{"A", 0}, {"B", 1}, {"S", 2}};
+
+    Bundle bun;
+    bun.source = 0;
+    bun.target = 1;
+    bun.nets = 3600;
+    p.bundles = {bun};
+
+    Placement& pl = f.placement;
+    pl.rects = {
+        Rect{0.0, 0.0, 80.0, 100.0},     // A
+        Rect{0.0, 710.0, 80.0, 100.0},   // B
+        Rect{80.0, 0.0, 700.0, 810.0},   // S: touches A's right edge and B's right edge directly
+    };
+    pl.aspect = {1.0, 1.0, 1.0};
+    return f;
+}
+
+// Fixture (a) RED->GREEN: cost_driven=false must route A->B through the channel (legacy pass-0
+// channels-only semantics), matching the T0 fixture's overflow exactly (39,040 um^2, since the
+// channel geometry is identical). cost_driven=true must instead divert through S once the channel's
+// marginal cost exceeds S's FT marginal tier delta -- asserted via soft_feedthrough_nets[S]>0 AND
+// channel_overflow strictly lower than the non-cost-driven route of this same fixture.
+void testCostDrivenPrefersFtOverSaturatedChannel() {
+    ChannelVsFtFixture f = makeChannelVsFtFixture();
+
+    RoutingResult legacy = routeProblem(f.problem, f.placement, /*cost_driven=*/false);
+    assert(legacy.open_routes == 0);
+    double expected_legacy_overflow = ((3600.0 - 2000.0) / 25.0) * 610.0;  // 39,040, T0 fixture (a)
+    assert(std::abs(legacy.channel_overflow - expected_legacy_overflow) < 1e-3);
+    assert(legacy.soft_feedthrough_nets[2] == 0.0);  // legacy pass-0 never touches S
+
+    // Hand-verify the FT-vs-channel decision this fixture is built to test, against ft.hpp directly.
+    double rate = ftTierRate(f.problem.blocks[2], 3600.0);
+    assert(std::abs(rate - 0.4) < kEps);  // confirms the 40% tier from the design-doc worked example
+    double required = ftRequiredArea(f.problem.blocks[2].ft_base_area, ftExtend(3600.0, rate));
+    double ft_marginal = required - f.problem.blocks[2].ft_base_area;  // S starts unexpanded (area==ft_base_area)
+    assert(ft_marginal < expected_legacy_overflow);  // 36,261.34 < 39,040 -- FT must win this fixture
+
+    RoutingResult cd = routeProblem(f.problem, f.placement, /*cost_driven=*/true);
+    assert(cd.open_routes == 0);
+    assert(cd.soft_feedthrough_nets[2] > 0.0);
+    assert(cd.channel_overflow < legacy.channel_overflow);
+    std::cout << "testCostDrivenPrefersFtOverSaturatedChannel ok (legacy overflow=" << legacy.channel_overflow
+               << ", cost_driven overflow=" << cd.channel_overflow << ")\n";
+}
+
+// Fixture (b): zero-WL direct-abut fixture (GC5) is unchanged under cost_driven=true -- two blocks
+// placed side by side with no gap route with wirelength 0, no channel intermediate, no FT.
+void testCostDrivenZeroWlDirectAbutUnchanged() {
+    Problem p;
+    p.outline_w = 160.0;
+    p.outline_h = 100.0;
+    p.alpha = 1.0;
+    p.blocks = {makeChannelBlock("A", 80.0, 100.0), makeChannelBlock("B", 80.0, 100.0)};
+    p.block_index = {{"A", 0}, {"B", 1}};
+    Bundle bun;
+    bun.source = 0;
+    bun.target = 1;
+    bun.nets = 500;
+    p.bundles = {bun};
+
+    Placement pl;
+    pl.rects = {Rect{0.0, 0.0, 80.0, 100.0}, Rect{80.0, 0.0, 80.0, 100.0}};  // directly abutting
+    pl.aspect = {1.0, 1.0};
+
+    RoutingResult r = routeProblem(p, pl, /*cost_driven=*/true);
+    assert(r.open_routes == 0);
+    assert(r.routes.size() == 1);
+    assert(r.routes[0].node_path.size() == 2);  // direct 2-node hop, no channel/soft intermediate
+    assert(r.routes[0].wirelength == 0.0);
+    assert(r.channel_overflow == 0.0);
+    assert(r.feedthrough_mismatch == 0.0);
+    std::cout << "testCostDrivenZeroWlDirectAbutUnchanged ok\n";
+}
+
+// Fixture (c): determinism -- cost_driven routing of the same placement decoded/routed twice
+// yields identical routing (total_wirelength, overflow, and per-route node_paths), per GC6
+// purity/determinism (routeProblem must be a pure function of (problem, placement), no hidden
+// state leaking across calls).
+void testCostDrivenDeterministic() {
+    ChannelVsFtFixture f = makeChannelVsFtFixture();
+
+    RoutingResult r1 = routeProblem(f.problem, f.placement, /*cost_driven=*/true);
+    RoutingResult r2 = routeProblem(f.problem, f.placement, /*cost_driven=*/true);
+
+    assert(r1.open_routes == r2.open_routes);
+    assert(std::abs(r1.total_wirelength - r2.total_wirelength) < kEps);
+    assert(std::abs(r1.channel_overflow - r2.channel_overflow) < kEps);
+    assert(std::abs(r1.feedthrough_mismatch - r2.feedthrough_mismatch) < kEps);
+    assert(r1.routes.size() == r2.routes.size());
+    for (std::size_t i = 0; i < r1.routes.size(); ++i) {
+        assert(r1.routes[i].node_path == r2.routes[i].node_path);
+        assert(std::abs(r1.routes[i].wirelength - r2.routes[i].wirelength) < kEps);
+    }
+    std::cout << "testCostDrivenDeterministic ok\n";
+}
+
 }  // namespace
 
 int main() {
@@ -274,6 +409,9 @@ int main() {
     testSoftFtMarginalCostPricesTierJump();
     testSoftFtMarginalCostFreeWhenPlacedAreaGenerous();
     testWireCostTrivial();
-    std::cout << "P2 T0+T1 regressions passed\n";
+    testCostDrivenPrefersFtOverSaturatedChannel();
+    testCostDrivenZeroWlDirectAbutUnchanged();
+    testCostDrivenDeterministic();
+    std::cout << "P2 T0+T1+T2 regressions passed\n";
     return 0;
 }

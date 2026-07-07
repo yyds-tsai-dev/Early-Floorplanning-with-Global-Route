@@ -4,6 +4,7 @@
 #include <set>
 
 #include "ft.hpp"
+#include "route_cost.hpp"
 
 namespace efgr {
 namespace {
@@ -83,7 +84,7 @@ std::vector<Channel> extractChannels(const Problem& problem, const Placement& pl
     return channels;
 }
 
-RoutingResult routeProblem(const Problem& problem, const Placement& placement) {
+RoutingResult routeProblem(const Problem& problem, const Placement& placement, bool cost_driven) {
     RoutingResult result;
     result.channels = extractChannels(problem, placement);
     result.soft_feedthrough_nets.assign(problem.blocks.size(), 0.0);
@@ -126,8 +127,17 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement) {
         route.source = bundle.source;
         route.target = bundle.target;
         route.nets = nets;
-        for (int pass = 0; pass < 2 && route.node_path.empty(); ++pass) {
-            bool allow_soft = pass == 1;
+        // P2 Task 2 (design p2-design.md §Q1-Q2 core; plan Global Constraint 7 comparison gate):
+        // cost_driven=false keeps the legacy two-pass feasibility search byte-identical (pass 0
+        // channels-only, pass 1 adds soft-block feedthrough as a fallback). cost_driven=true runs a
+        // SINGLE unified Dijkstra: soft blocks are always allowed as intermediates (never a
+        // fallback-only resource) and every edge is priced in the scorer's own Cost units via
+        // route_cost.hpp, so the shortest path is the min-marginal-Delta-Cost path (channel overflow
+        // vs FT tier jump compete honestly, GC5 direct-abut stays 0, GC5 never-open is enforced by
+        // routeChunk's existing "if node_path empty -> open" fallthrough below, unchanged).
+        int pass_count = cost_driven ? 1 : 2;
+        for (int pass = 0; pass < pass_count && route.node_path.empty(); ++pass) {
+            bool allow_soft = cost_driven ? true : (pass == 1);
             std::vector<double> dist(total, std::numeric_limits<double>::infinity());
             std::vector<int> prev(total, -1);
             using Item = std::pair<double, int>;
@@ -142,13 +152,56 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement) {
                 for (int v : adj[u]) {
                     if (!allowed(v, bundle.source, bundle.target, allow_soft)) continue;
                     if (!endpointEdgeAllowed(u, v, bundle.source, bundle.target)) continue;
-                    double cost = manhattan(rects[u].cx(), rects[u].cy(), rects[v].cx(), rects[v].cy());
-                    if (v < n_blocks && isSoft(problem.blocks[v].type) && v != bundle.target) cost += nets * 0.05;
-                    if (v >= n_blocks) {
-                        const auto& ch = result.channels[v - n_blocks];
-                        double hcap = std::max(1.0, ch.rect.h * 25.0);
-                        double vcap = std::max(1.0, ch.rect.w * 25.0);
-                        cost += 10000.0 * nets * (ch.horizontal_usage / hcap + ch.vertical_usage / vcap);
+                    double cost;
+                    if (cost_driven) {
+                        // GC5: direct block<->block abut (both endpoints, zero channel, zero guide
+                        // hops) costs exactly wireCost's manhattan term with dist 0 in practice for a
+                        // 2-node path -- but pricing here is per-EDGE during search, so a block-to-
+                        // block hop (no channel/soft-FT component) is priced at wireCost only; the
+                        // eventual zero-WL abut case (§3.1/A31) falls out because the true guiding-
+                        // point WL for a 2-node path is 0 regardless of this proxy (route.wirelength
+                        // is recomputed from guides after the path is fixed, routing.cpp below).
+                        double dist_uv = manhattan(rects[u].cx(), rects[u].cy(), rects[v].cx(), rects[v].cy());
+                        cost = wireCost(problem.alpha, nets, dist_uv);
+                        if (v < n_blocks && isSoft(problem.blocks[v].type) && v != bundle.target) {
+                            // Soft-block feedthrough intermediate: price the marginal FT tier delta
+                            // (design §3.3) using nets already accumulated through this block THIS
+                            // routing call so far (call-local state, GC6 purity/determinism -- no
+                            // static/global) plus this chunk's n, against the block's placed area.
+                            double acc = result.soft_feedthrough_nets[v];
+                            double placed_area = round2(placement.rects[v].w * placement.rects[v].h);
+                            cost += softFtMarginalCost(problem.blocks[v], acc, nets, placed_area);
+                        }
+                        if (v >= n_blocks) {
+                            // Channel hop: direction-classify from rect adjacency (edgeFromTo), NOT
+                            // from guiding points (those are only known after the path is committed,
+                            // routing.cpp guides loop below). edgeFromTo(u,v) in {1,3} means u,v share
+                            // a vertical edge (side-by-side, x differs) -- a HORIZONTAL traversal,
+                            // exactly the dx>kEps case the post-hoc usage accrual (below) tests; {2,4}
+                            // means a shared horizontal edge (stacked, y differs) -- VERTICAL
+                            // traversal, the dy>kEps case. This is an EXACT match to the accrual's own
+                            // classification (not merely a monotone approximation), because both read
+                            // the same rect-touch geometry; an L-shaped hop that changes both x and y
+                            // cannot occur for a single rect-to-rect touch (positiveTouch requires a
+                            // shared edge on exactly one axis), so at most one of the two components
+                            // is ever priced per hop -- documented per task brief's "L-hop prices both
+                            // components" guidance, this graph has no such single-hop L case; a
+                            // multi-hop L-shaped path prices each component on its own hop naturally.
+                            const auto& ch = result.channels[v - n_blocks];
+                            int dir = edgeFromTo(rects[u], rects[v]);
+                            bool horizontal = (dir == 1 || dir == 3);
+                            double usage = horizontal ? ch.horizontal_usage : ch.vertical_usage;
+                            cost += channelMarginalCost(ch, horizontal, usage, nets);
+                        }
+                    } else {
+                        cost = manhattan(rects[u].cx(), rects[u].cy(), rects[v].cx(), rects[v].cy());
+                        if (v < n_blocks && isSoft(problem.blocks[v].type) && v != bundle.target) cost += nets * 0.05;
+                        if (v >= n_blocks) {
+                            const auto& ch = result.channels[v - n_blocks];
+                            double hcap = std::max(1.0, ch.rect.h * 25.0);
+                            double vcap = std::max(1.0, ch.rect.w * 25.0);
+                            cost += 10000.0 * nets * (ch.horizontal_usage / hcap + ch.vertical_usage / vcap);
+                        }
                     }
                     if (dist[u] + cost < dist[v]) {
                         dist[v] = dist[u] + cost;
