@@ -184,6 +184,24 @@ OutlineSweepResult outlineSweep(const Problem& problem, const Placement& base, c
             have_best = true;
         }
     }
+
+    // P1 final-review fix: if every rung above failed its `anchored` check (all `continue`d), the
+    // loop never assigns `best`, and a default-constructed OutlineSweepResult{} would be returned
+    // instead -- an empty placement (no rects) with score.value == 0.0 (its default) and
+    // routing.open_routes == 0 (its default), which outlineSweepBetter can then PREFER over a
+    // legitimate incumbent with open_routes>0, silently committing an empty placement. Guarantee a
+    // real fallback: base's own outline reset + shrinkWrapOutline, which the MAX-fallback contract
+    // (shrinkWrapOutline's doc comment above) guarantees is always legal.
+    if (!have_best) {
+        Placement fallback = base;
+        fallback.outline_w = 0.0;
+        fallback.outline_h = 0.0;
+        shrinkWrapOutline(problem, fallback);
+        RoutingResult routing;
+        Score score = exactCached(fallback, &routing);
+        best = OutlineSweepResult{score, fallback, routing};
+        have_best = true;
+    }
     return best;
 }
 
@@ -218,6 +236,11 @@ void finalizeFeedthrough(const Problem& problem, const PlacementEngine& engine, 
         if (!grew) break;
         PlacementState state = engine.seedFromPlacement(inflated, placement, rng);
         placement = engine.decode(inflated, state);
+        // Defensive symmetry with the compacted path below: decode stamps the declared outline
+        // today, but future engines may not -- guard against committing an unstamped placement.
+        if (placement.outline_w <= 0.0 || placement.outline_h <= 0.0) {
+            shrinkWrapOutline(inflated, placement);
+        }
         RoutingResult new_routing;
         Score exact = exactScore(inflated, placement, &new_routing);
         routing = new_routing;

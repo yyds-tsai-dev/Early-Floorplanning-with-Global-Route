@@ -6,6 +6,8 @@
 #include <memory>
 #include <random>
 #include <sstream>
+#include <unordered_map>
+#include <utility>
 
 #include "../src/eval.hpp"
 #include "../src/ft.hpp"
@@ -830,6 +832,44 @@ void testOutlineSweepProbesDistinctOutlinesCase0() {
     std::cout << "testOutlineSweepProbesDistinctOutlinesCase0 ok\n";
 }
 
+// P1 final-review fix: outlineSweep must never return a default-constructed OutlineSweepResult{}
+// (empty placement, rects.size()==0) -- that class of bug hid behind a default RoutingResult whose
+// open_routes==0 happens to look legal to outlineSweepBetter, so callers could silently commit an
+// empty placement if every rung's `anchored` check failed. This test does not force the
+// pathological all-rungs-fail path itself (that needs a contrived Problem/base combination); instead
+// it locks in the STRUCTURAL guarantee the fix restores on an ordinary case0 decode: the returned
+// placement always has a positive outline and one rect per problem block, which would fail
+// immediately if outlineSweep ever fell through to OutlineSweepResult{}.
+void testOutlineSweepNeverReturnsEmptyPlacement() {
+    Problem problem = parseProblem("test/2026 ICCAD_case.case0.csv");
+    std::unique_ptr<PlacementEngine> engine = makePlacementEngine("bstar");
+    std::mt19937 rng(1);
+    PlacementState state = engine->initialState(problem, rng);
+    Placement placement = engine->decode(problem, state);
+
+    std::unordered_map<std::string, std::pair<Score, RoutingResult>> exact_cache;
+    ExactCachedFn exactCached = [&](const Placement& p, RoutingResult* routing_out) {
+        std::string key = placementKey(p);
+        auto it = exact_cache.find(key);
+        if (it != exact_cache.end()) {
+            if (routing_out) *routing_out = it->second.second;
+            return it->second.first;
+        }
+        RoutingResult routing;
+        Score score = exactScore(problem, p, &routing);
+        exact_cache.emplace(key, std::make_pair(score, routing));
+        if (routing_out) *routing_out = routing;
+        return score;
+    };
+
+    OutlineSweepResult result = outlineSweep(problem, placement, exactCached);
+
+    assert(result.placement.outline_w > 0.0);
+    assert(result.placement.outline_h > 0.0);
+    assert(result.placement.rects.size() == problem.blocks.size());
+    std::cout << "testOutlineSweepNeverReturnsEmptyPlacement ok\n";
+}
+
 // T8 (P1 acceptance criteria, plan design §1.5): finalizeFeedthrough must grow the declared outline
 // toward MAX to absorb FT inflation on the two cases that previously showed a residual mismatch
 // (case1/hybrid, case3/hybrid). Runs the full hybrid search at the acceptance parameters (iters
@@ -890,6 +930,7 @@ int main() {
     testCompactedCandidateRestampValidatesEndToEnd();
     testAnchorAtOutlineStampsExactTargetNotTightCase0();
     testOutlineSweepProbesDistinctOutlinesCase0();
+    testOutlineSweepNeverReturnsEmptyPlacement();
     testFinalizeFeedthroughAcceptanceCase1Hybrid();
     testFinalizeFeedthroughAcceptanceCase3Hybrid();
     std::cout << "p1 regressions passed\n";

@@ -244,12 +244,14 @@ Commands: `bin/efgr "test/2026 ICCAD_case.caseN.csv" out.cfg --engine ENGINE --i
 | case2 | sp     | 1.13474e+11 | 3.69609e+07 | 2.61459e+08 | 112436 | 0 | ok |
 | case2 | bstar  | 1.12121e+11 | 3.41712e+07 | 2.47617e+08 | 109632 | 0 | ok |
 | case2 | hybrid | 1.05866e+11 | 3.76369e+07 | 2.15922e+08 | 104514 | 0 | ok |
-| case3 | sp     | 1.08810e+11 | 1.74095e+07 | 1.52748e+08 | 108465 | 0 | ok |
+| case3 | sp     | 8.75294e+10 | 1.9629e+07 | 1.57443e+08 | 87181.2 | 0 | ok [^refreshed] |
 | case3 | bstar  | 9.79311e+10 | 2.32361e+07 | 2.21526e+08 | 97422.5 | 0 | ok |
 | case3 | hybrid | 1.10756e+11 | 1.98094e+07 | 1.77796e+08 | 109987 | 0 | ok |
 | case4 | sp     | 2.15875e+11 | 2.53474e+07 | 2.39256e+08 | 215317 | 0 | ok |
 | case4 | bstar  | 2.32820e+11 | 2.90404e+07 | 3.24208e+08 | 232158 | 0 | ok |
 | case4 | hybrid | 2.24423e+11 | 2.53910e+07 | 2.43792e+08 | 223916 | 0 | ok |
+
+[^refreshed]: row refreshed post-9c7d267 ladder fix (`bin/efgr "test/2026 ICCAD_case.case3.csv" out.cfg --engine sp --iters 2000 --seed 1`); previously reported score 1.08810e+11, outline_area 1.74095e+07, channel_overflow 108465 (pre-9c7d267 ladder-extension numbers, stale by the time this appendix was published).
 
 ### Comparison against the pre-P1 baseline (table above)
 
