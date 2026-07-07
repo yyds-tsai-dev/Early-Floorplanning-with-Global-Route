@@ -36,7 +36,26 @@ ChannelBounds channelBounds(const Problem& problem, const Placement& placement, 
 // absolute gap each one demands (design p3-design.md §1.2): vertical_usage -> need_w on the
 // (left,right) pair; horizontal_usage -> need_h on the (below,above) pair. Channels with zero
 // usage in both directions produce no entry. Pure; no mutation of problem/placement/routing.
+// NOTE: entries are one-per-channel and NOT pre-merged -- when multiple channels stack on the
+// same (left,right) or (below,above) pair (design p3-design.md §1.2 "Multiple channels per
+// strip"), callers MUST max-merge need_w/need_h across all entries sharing that pair before
+// using them as a single edge weight; the graph works in absolute per-pair gaps, so summing or
+// using an arbitrary single entry would under- or mis-size the gap.
 std::vector<StripDemand> channelDemands(const Problem& problem, const Placement& placement,
                                          const RoutingResult& routing);
+
+// Relaxes CORE (non-edge) block coordinates to satisfy the strip demands via two independent
+// longest-path constraint-graph passes (design p3-design.md §1-2, decision 4): an H-pass over
+// x-coordinates using need_w on (left,right) pairs, then a V-pass over y-coordinates using
+// need_h on (below,above) pairs. Node order per axis is frozen from `placement`'s CURRENT
+// coordinates (immediate-neighbor adjacency, like `compactTowardOrigin`); the relax only ever
+// increases a core block's coordinate (monotone widen), so relative order can never flip.
+// Edge-type blocks are not graph nodes and are left untouched (re-anchored elsewhere). If the
+// unclamped relax would push an axis's extent past `problem.outline_w`/`outline_h` (MAX), the
+// added demand slack is proportionally scaled back (never the base non-overlap terms) so the
+// result never exceeds MAX; this is a partial-relief case, not a failure. Mutates `placement`
+// in place and always returns true (per design failure-mode 1, residual unsatisfied demand is a
+// graded penalty elsewhere, not a hard failure here).
+bool relaxToDemand(const Problem& problem, Placement& placement, const std::vector<StripDemand>& demands);
 
 }  // namespace efgr
