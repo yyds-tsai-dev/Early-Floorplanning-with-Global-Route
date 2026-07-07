@@ -431,6 +431,111 @@ void testMixedDirectionChannelPopulatesBothNeeds() {
     std::cout << "testMixedDirectionChannelPopulatesBothNeeds ok\n";
 }
 
+// --- P3-T2 review fixes (2 Critical): relaxAxis must relax over ALL constraint-graph
+// predecessors, not a single selected one. ---
+
+// TEST C2 (discarded-predecessor overlap; fixture verified legal + empirically reproduces the
+// bug): idx0 "P" Rect{0,0,10,4}; idx1 "A2" Rect{10,0,1,4}; idx2 "A2P" Rect{27,4,2,4}; idx3 "B"
+// Rect{29,0,5,8} (spans both y-bands: [0,4] where A2 sits and [4,8] where A2P sits). One demand,
+// keyed (P,A2)=20, is the only correct edge into A2; A2's true predecessor is P, so A2 legitimately
+// leaps to new_x = P.right()+20 = 30, landing at [30,31]. Under the single-predecessor bug, B's
+// nearest-neighbor search ties between A2 (far=11) and A2P (far=29... via its own far edge) and
+// picks whichever wins the tie-break, discarding the other -- so B can be left at its old x=29,
+// which then overlaps A2's grown [30,31]. The fix (relax over ALL cross-overlapping predecessors)
+// must have B consider both A2 and A2P, landing at x=31 (A2's new_right()), clearing A2 exactly.
+void testTieLosingCandidateCannotOverlapDiscardingBlock() {
+    Problem p;
+    p.blocks = {makeBlock("P", 10, 4), makeBlock("A2", 1, 4), makeBlock("A2P", 2, 4), makeBlock("B", 5, 8)};
+    p.block_index = {{"P", 0}, {"A2", 1}, {"A2P", 2}, {"B", 3}};
+    p.outline_w = 100;
+    p.outline_h = 100;
+    p.alpha = 1.0;
+
+    Placement pl;
+    pl.rects = {Rect{0, 0, 10, 4}, Rect{10, 0, 1, 4}, Rect{27, 4, 2, 4}, Rect{29, 0, 5, 8}};
+    pl.aspect = {1.0, 1.0, 1.0, 1.0};
+
+    // Sanity: the starting placement is legal (no pairwise overlap) before relaxing -- all 6 pairs.
+    for (std::size_t i = 0; i < pl.rects.size(); ++i) {
+        for (std::size_t j = i + 1; j < pl.rects.size(); ++j) {
+            assert(!overlaps(pl.rects[i], pl.rects[j]));
+        }
+    }
+
+    StripDemand d;
+    d.left = 0;   // P
+    d.right = 1;  // A2
+    d.need_w = 20.0;
+    std::vector<StripDemand> demands = {d};
+
+    bool changed = relaxToDemand(p, pl, demands);
+    assert(changed);
+
+    // EXPECTED with the fix: new x = {0, 30, 27, 31}.
+    assert(std::abs(pl.rects[0].x - 0.0) < kEps);
+    assert(std::abs(pl.rects[1].x - 30.0) < kEps);
+    assert(std::abs(pl.rects[2].x - 27.0) < kEps);
+    assert(std::abs(pl.rects[3].x - 31.0) < kEps);
+    // B must clear A2's new position; A2 must clear P's new position.
+    assert(pl.rects[3].x + kEps >= 31.0 - kEps);
+    assert(pl.rects[1].x + kEps >= 30.0 - kEps);
+
+    // No pair may overlap after the relax (the buggy code yields B.x==29 with A2 at [30,31),
+    // which overlaps B -- that's the RED this test catches).
+    for (std::size_t i = 0; i < pl.rects.size(); ++i) {
+        for (std::size_t j = i + 1; j < pl.rects.size(); ++j) {
+            assert(!overlaps(pl.rects[i], pl.rects[j]));
+        }
+    }
+    std::cout << "testTieLosingCandidateCannotOverlapDiscardingBlock ok\n";
+}
+
+// TEST C1 (dropped keyed demand): full-height L idx0 Rect{0,0,10,100}; partial wedge M idx1
+// Rect{10,60,4,20}; R idx2 Rect{14,0,6,100}; outline 200x100. One demand keyed directly (L,R)
+// with need_w=25 -- NOT (M,R) -- because the real constraint is on the L<->R gap, independent of
+// the M wedge sitting between them. Under the single-predecessor bug, R's immediate x-predecessor
+// is M (M's far edge, 14, meets R's near edge), so the lookup merged.find({M,R}) misses (the
+// demand is keyed {L,R}) and the (L,R) demand is silently dropped; R never moves past its old
+// x=14, leaving only a 4-unit gap to L, not the demanded 25. The fix must apply the (L,R)
+// merged-demand-pair edge regardless of who wins the immediate-predecessor slot.
+void testDemandKeyedPairAppliesEvenWhenAnotherBlockWinsPredecessorSlot() {
+    Problem p;
+    p.blocks = {makeBlock("L", 10, 100), makeBlock("M", 4, 20), makeBlock("R", 6, 100)};
+    p.block_index = {{"L", 0}, {"M", 1}, {"R", 2}};
+    p.outline_w = 200;
+    p.outline_h = 100;
+    p.alpha = 1.0;
+
+    Placement pl;
+    pl.rects = {Rect{0, 0, 10, 100}, Rect{10, 60, 4, 20}, Rect{14, 0, 6, 100}};
+    pl.aspect = {1.0, 1.0, 1.0};
+
+    for (std::size_t i = 0; i < pl.rects.size(); ++i) {
+        for (std::size_t j = i + 1; j < pl.rects.size(); ++j) {
+            assert(!overlaps(pl.rects[i], pl.rects[j]));
+        }
+    }
+
+    StripDemand d;
+    d.left = 0;   // L
+    d.right = 2;  // R
+    d.need_w = 25.0;
+    std::vector<StripDemand> demands = {d};
+
+    bool changed = relaxToDemand(p, pl, demands);
+    assert(changed);
+
+    for (std::size_t i = 0; i < pl.rects.size(); ++i) {
+        for (std::size_t j = i + 1; j < pl.rects.size(); ++j) {
+            assert(!overlaps(pl.rects[i], pl.rects[j]));
+        }
+    }
+    // EXPECTED with fix: R.x - (L.x+10) >= 25 - 1e-6 (buggy code drops the (L,R) demand because
+    // pred(R)=M -> RED).
+    assert(pl.rects[2].x - (pl.rects[0].x + 10.0) >= 25.0 - 1e-6);
+    std::cout << "testDemandKeyedPairAppliesEvenWhenAnotherBlockWinsPredecessorSlot ok\n";
+}
+
 }  // namespace
 
 int main() {
@@ -444,6 +549,8 @@ int main() {
     testOrderFreezeUnderVariedDemands();
     testStaggeredDistractorDoesNotWinChannelBound();
     testMixedDirectionChannelPopulatesBothNeeds();
+    testTieLosingCandidateCannotOverlapDiscardingBlock();
+    testDemandKeyedPairAppliesEvenWhenAnotherBlockWinsPredecessorSlot();
     std::cout << "P3 T1+T2 regressions passed\n";
     return 0;
 }

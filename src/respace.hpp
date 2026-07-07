@@ -45,17 +45,25 @@ std::vector<StripDemand> channelDemands(const Problem& problem, const Placement&
                                          const RoutingResult& routing);
 
 // Relaxes CORE (non-edge) block coordinates to satisfy the strip demands via two independent
-// longest-path constraint-graph passes (design p3-design.md §1-2, decision 4): an H-pass over
-// x-coordinates using need_w on (left,right) pairs, then a V-pass over y-coordinates using
-// need_h on (below,above) pairs. Node order per axis is frozen from `placement`'s CURRENT
-// coordinates (immediate-neighbor adjacency, like `compactTowardOrigin`); the relax only ever
-// increases a core block's coordinate (monotone widen), so relative order can never flip.
-// Edge-type blocks are not graph nodes and are left untouched (re-anchored elsewhere). If the
-// unclamped relax would push an axis's extent past `problem.outline_w`/`outline_h` (MAX), the
-// added demand slack is proportionally scaled back (never the base non-overlap terms) so the
-// result never exceeds MAX; this is a partial-relief case, not a failure. Mutates `placement`
-// in place and always returns true (per design failure-mode 1, residual unsatisfied demand is a
-// graded penalty elsewhere, not a hard failure here).
+// longest-path constraint-graph passes (design p3-design.md §1-2, decision 4; p3-task-2 review
+// fix): an H-pass over x-coordinates using need_w on (left,right) pairs, then a V-pass over
+// y-coordinates using need_h on (below,above) pairs -- deliberately in that order, since the
+// V-pass's cross-overlap predicate reads the POST-H-PASS x-geometry, which is the real geometry
+// that governs vertical collision. Node order per axis is frozen from `placement`'s CURRENT
+// coordinates; the relax only ever increases a core block's coordinate (monotone widen), so
+// relative order can never flip. Each block's new coordinate is the max over its OLD coordinate,
+// EVERY earlier-in-frozen-order block it cross-overlaps (not just the nearest one), and EVERY
+// demand pair keyed to it (regardless of cross-overlap with the demand's other endpoint) -- a
+// single selected predecessor is not enough to avoid both silently dropping a demand keyed to a
+// non-nearest pair and letting a tie-losing candidate's stale position get overlapped by a block
+// that legitimately grew past it. Edge-type blocks are not graph nodes and are left untouched
+// (re-anchored elsewhere). If the unclamped relax would push an axis's extent past
+// `problem.outline_w`/`outline_h` (MAX), the added demand slack is proportionally scaled back
+// (never the base non-overlap terms) so the result never exceeds MAX; this is a partial-relief
+// case, not a failure. Mutates `placement` in place and always returns true (per design
+// failure-mode 1): true means "relaxed within MAX," not "every demand fully satisfied" -- a
+// demand can still be left partially unsatisfied by the MAX scale-back, which is a graded penalty
+// evaluated elsewhere, not a hard failure this return value encodes.
 bool relaxToDemand(const Problem& problem, Placement& placement, const std::vector<StripDemand>& demands);
 
 }  // namespace efgr
