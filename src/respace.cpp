@@ -387,6 +387,8 @@ bool respaceToDemand(const Problem& problem, Placement& placement, const Routing
     candidate.outline_w = 0.0;
     candidate.outline_h = 0.0;
     OutlineFit fit = shrinkWrapOutline(problem, candidate);
+    // Edge-location legality is guaranteed by commitOutlineAt's contract (placement_engine.cpp):
+    // fit.legal=true implies edgeRectLegal passed on the stamped rects.
     if (!fit.legal) return false;  // caller's placement untouched
 
     // Legality gate (task brief step 4): shrinkWrapOutline's own commit path already verified

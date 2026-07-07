@@ -270,8 +270,25 @@ void finalizeFeedthrough(const Problem& problem, const PlacementEngine& engine, 
         // gate itself is untouched: tryCommit still scores/validates against the ORIGINAL
         // `problem` (not `inflated`), so respacing only ever supplies a possibly-better candidate
         // to the same paydown + validateSolution funnel, never changes what gets accepted.
+        // Memoized the same way runPlacementSearch's `exactCached` is (placementKey-keyed cache):
+        // respaceFixedPoint's first internal call scores `placement` itself, which is the exact
+        // same candidate `tryCommit(placement, exact, new_routing)` a few lines below already
+        // scored via `exact` above -- without a cache that duplicates a real exactScore/routeProblem
+        // call per pass per variant (this function calls respaceFixedPoint up to twice per pass,
+        // across up to 3 passes).
+        std::unordered_map<std::string, std::pair<Score, RoutingResult>> inflated_exact_cache;
         ExactCachedFn inflatedExact = [&](const Placement& cand, RoutingResult* routing_out) {
-            return exactScore(inflated, cand, routing_out);
+            std::string key = placementKey(cand);
+            auto it = inflated_exact_cache.find(key);
+            if (it != inflated_exact_cache.end()) {
+                if (routing_out) *routing_out = it->second.second;
+                return it->second.first;
+            }
+            RoutingResult routing;
+            Score score = exactScore(inflated, cand, &routing);
+            inflated_exact_cache.emplace(std::move(key), std::make_pair(score, routing));
+            if (routing_out) *routing_out = routing;
+            return score;
         };
         RespaceResult respaced = respaceFixedPoint(inflated, placement, inflatedExact);
         tryCommit(placement, exact, new_routing);
