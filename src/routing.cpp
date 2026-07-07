@@ -184,9 +184,15 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
                             // the same rect-touch geometry; an L-shaped hop that changes both x and y
                             // cannot occur for a single rect-to-rect touch (positiveTouch requires a
                             // shared edge on exactly one axis), so at most one of the two components
-                            // is ever priced per hop -- documented per task brief's "L-hop prices both
-                            // components" guidance, this graph has no such single-hop L case; a
-                            // multi-hop L-shaped path prices each component on its own hop naturally.
+                            // is ever priced per hop at COMMIT time here. Pricing itself, however, uses
+                            // only this single entry-edge axis as an admissible one-sided proxy: a path
+                            // that enters a channel on one axis (priced here) and exits it on the
+                            // orthogonal axis accrues BOTH horizontal_usage and vertical_usage at commit
+                            // (the dual `if`s below, routing.cpp accrual loop), while only the entry
+                            // axis was charged during the Dijkstra search. This is a deliberate,
+                            // deferred gap (design §3.1/R2: the search cost is a monotone proxy, not an
+                            // exact accounting of the committed accrual) -- not a claim that no corner
+                            // case exists. To be measured at T6/T7 once the full router is wired in.
                             const auto& ch = result.channels[v - n_blocks];
                             int dir = edgeFromTo(rects[u], rects[v]);
                             bool horizontal = (dir == 1 || dir == 3);
