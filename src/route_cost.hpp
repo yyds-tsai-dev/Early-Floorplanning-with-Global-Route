@@ -66,4 +66,26 @@ inline double softFtMarginalCost(const Block& b, double acc, double n, double pl
 // (design §3.1: alpha*n*manhattan monotone WL proxy, same units as the area terms above).
 inline double wireCost(double alpha, double n, double dist) { return alpha * n * dist; }
 
+// P2 Task 3 (design p2-design.md §5.1-5.4; plan Global Constraint 8): named constants for the
+// greedy split-at-bottleneck bundle-chunking loop (routing.cpp, cost_driven=true path only -- the
+// cost_driven=false legacy path keeps the exact fixed ceil(nets/1000) split untouched).
+
+// Upper bound on chunks emitted per bundle (design §5.3): double the old fixed cap of 8, since
+// adaptive splitting needs a few more chunks than the old scheme to express bottleneck-fills, while
+// staying bounded (Dijkstra-count budget, §5.3's ~2400-Dijkstra estimate at R=3 negotiation rounds).
+constexpr int kMaxChunks = 16;
+
+// Chunk-size ceiling (design §5.2 step 3, "size min(remaining, kChunkCeil)") used only when the
+// current cheapest path is ALREADY saturated (slack<=0) and there is no cheaper split to express --
+// the design leaves this constant's exact value unpinned; 1000 is chosen here to match the legacy
+// fixed-split granule (routing.cpp's old ceil(nets/1000) chunk size), so a fully-saturated-with-no-
+// alternative bundle degrades to the same per-chunk granularity the old router used.
+constexpr int kChunkCeil = 1000;
+
+// Minimum chunk size (design §5.3: "prevents pathological 1-net chunks"), scaled to the BUNDLE's
+// total net count (not the shrinking `remaining` counter -- a floor proportional to remaining would
+// shrink towards 1 near the end of a bundle, which is exactly the pathological case this guards
+// against). Matches design §5.3's `max(1, nets/64)` verbatim.
+inline double kMinChunkFor(int bundle_nets) { return std::max(1.0, bundle_nets / 64.0); }
+
 }  // namespace efgr

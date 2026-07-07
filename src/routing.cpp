@@ -122,11 +122,26 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
         return true;
     };
 
-    auto routeChunk = [&](const Bundle& bundle, int nets) {
+    // P2 Task 3 (design p2-design.md §5.1-5.4; plan Global Constraint 8): `routeChunk` is split into
+    // a pathfinding phase (`findRoutePath`, priced Dijkstra only, no accrual/mutation of `result`
+    // except the open-route bookkeeping) and a commit phase (`commitRoutePath`, given an already-
+    // found `node_path`, computes guides/wirelength/RouteStep and accrues usage/soft_feedthrough_nets
+    // at a CALLER-CHOSEN `nets` size). This split exists because the greedy bottleneck loop (§5.2)
+    // must find the cheapest path once (priced at a probe size), then commit only a SMALLER chunk of
+    // that SAME path once its bottleneck slack is known -- re-running Dijkstra a second time at the
+    // smaller size is NOT guaranteed to reproduce the same path (a soft-block FT edge's marginal cost
+    // has a tier-boundary kink, ft.hpp's ftTierRate jumps at 3000/6000/9000, so the cross-path cost
+    // ranking is not provably stable as the priced `nets` shrinks -- see the design's monotonicity
+    // caveat, §3.3). The legacy `routeChunk` wrapper below composes find+commit at the SAME `nets` for
+    // both, so cost_driven=false remains byte-identical to pre-T3 behavior (never shrinks after
+    // finding), and cost_driven=true's non-adaptive open-route fallthrough behaves identically too.
+    auto findRoutePath = [&](const Bundle& bundle, int nets) {
         Route route;
         route.source = bundle.source;
         route.target = bundle.target;
-        route.nets = nets;
+        // NOTE: route.nets is intentionally NOT set here -- it is a probe-priced search, and the
+        // caller may commit a smaller chunk of this path than `nets`. commitRoutePath sets route.nets
+        // to the actually-committed size.
         // P2 Task 2 (design p2-design.md §Q1-Q2 core; plan Global Constraint 7 comparison gate):
         // cost_driven=false keeps the legacy two-pass feasibility search byte-identical (pass 0
         // channels-only, pass 1 adds soft-block feedthrough as a fallback). cost_driven=true runs a
@@ -225,8 +240,21 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
         if (route.node_path.empty()) {
             route.open = true;
             result.open_routes++;
-            return route;
         }
+        return route;
+    };
+
+    // Commits a chunk of `nets` nets along an ALREADY-FOUND `node_path` (from `findRoutePath`):
+    // computes guides/wirelength/RouteStep and accrues channel usage / soft_feedthrough_nets at this
+    // `nets` size, which may be smaller than the size `node_path` was originally priced at (§5.2's
+    // "route chunk of n along `path`" -- the probe finds the path, the commit routes only `n <= slack`
+    // of it). Caller guarantees `node_path` is non-empty (an open route never reaches here).
+    auto commitRoutePath = [&](const Bundle& bundle, const std::vector<int>& node_path, int nets) {
+        Route route;
+        route.source = bundle.source;
+        route.target = bundle.target;
+        route.nets = nets;
+        route.node_path = node_path;
 
         std::vector<std::pair<double, double>> guides;
         for (std::size_t i = 0; i + 1 < route.node_path.size(); ++i) {
@@ -264,16 +292,111 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
         return route;
     };
 
+    // Legacy-shaped wrapper: find a path priced at `nets` and immediately commit the WHOLE `nets` of
+    // it along that same path -- this is what routeChunk always did pre-T3 (never shrinks after
+    // finding), so composing find+commit at the SAME size reproduces byte-identical behavior for
+    // cost_driven=false and for cost_driven=true's non-adaptive open-route case.
+    auto routeChunk = [&](const Bundle& bundle, int nets) {
+        Route path = findRoutePath(bundle, nets);
+        if (path.node_path.empty()) return path;  // open=true, open_routes already incremented
+        return commitRoutePath(bundle, path.node_path, nets);
+    };
+
+    // Bottleneck slack along an already-found path, priced at the SAME `nets` that found it (design
+    // §5.2 step 2): the minimum, over channel/soft-FT intermediates on the path, of "how many more
+    // nets fit before this resource's next boundary" (cap for channels, next FT tier threshold for
+    // soft blocks). Returns a value >= 0 (channels/soft blocks already at or past their boundary
+    // contribute 0, correctly signaling "no slack left, saturated"). Direction classification reuses
+    // the EXACT entry-edge axis the pricing loop above uses (edgeFromTo(rects[u],rects[v]) in {1,3} =
+    // horizontal, {2,4} = vertical) -- not the post-hoc guiding-point dx/dy the commit accrual uses,
+    // since slack must be computed from the SAME axis the Dijkstra pricing charged (documented gap
+    // between entry-axis pricing and dual-axis commit accrual, see the channel-hop comment above).
+    auto pathSlack = [&](const std::vector<int>& node_path) {
+        double slack = std::numeric_limits<double>::infinity();
+        for (std::size_t i = 1; i + 1 < node_path.size(); ++i) {
+            int u = node_path[i - 1];
+            int node = node_path[i];
+            if (node < n_blocks && isSoft(problem.blocks[node].type)) {
+                double acc = result.soft_feedthrough_nets[node];
+                double node_slack;
+                if (acc >= 9000.0) {
+                    // Top FT tier has no further boundary -- unbounded slack for splitting purposes
+                    // (design §5.2 step 2 parenthetical), so this resource never becomes the
+                    // bottleneck; leave it out of the min by using +inf.
+                    node_slack = std::numeric_limits<double>::infinity();
+                } else {
+                    double next_threshold = acc < 3000.0 ? 3000.0 : (acc < 6000.0 ? 6000.0 : 9000.0);
+                    node_slack = std::max(0.0, next_threshold - acc);
+                }
+                slack = std::min(slack, node_slack);
+            } else if (node >= n_blocks) {
+                const auto& ch = result.channels[node - n_blocks];
+                int dir = edgeFromTo(rects[u], rects[node]);
+                bool horizontal = (dir == 1 || dir == 3);
+                double usage = horizontal ? ch.horizontal_usage : ch.vertical_usage;
+                double cap = horizontal ? 25.0 * std::max(1.0, ch.rect.h) : 25.0 * std::max(1.0, ch.rect.w);
+                slack = std::min(slack, std::max(0.0, cap - usage));
+            }
+        }
+        return slack;
+    };
+
     for (const auto& bundle : problem.bundles) {
-        int split_count = std::max(1, static_cast<int>(std::ceil(bundle.nets / 1000.0)));
-        split_count = std::min(split_count, 8);
+        if (!cost_driven) {
+            // Legacy fixed split (byte-identical to pre-T3, the hard global constraint): unchanged.
+            int split_count = std::max(1, static_cast<int>(std::ceil(bundle.nets / 1000.0)));
+            split_count = std::min(split_count, 8);
+            int remaining = bundle.nets;
+            for (int part = 0; part < split_count; ++part) {
+                int parts_left = split_count - part;
+                int nets = (remaining + parts_left - 1) / parts_left;
+                remaining -= nets;
+                Route route = routeChunk(bundle, nets);
+                result.routes.push_back(route);
+            }
+            continue;
+        }
+
+        // P2 Task 3 (design p2-design.md §5.2): greedy split-at-bottleneck, cost_driven=true ONLY.
+        // Total-nets-conserved (Sigma chunk nets == bundle.nets) AND chunk-count<=kMaxChunks are BOTH
+        // hard invariants (task brief), so the LAST permitted iteration always takes the entire
+        // remainder regardless of slack/kMinChunk clamping -- without this, a bundle whose bottleneck
+        // keeps clamping to kMinChunk (bundle.nets/64) could need up to 64 chunks to fully consume,
+        // exceeding kMaxChunks=16 and leaving nets unrouted. Forcing full-remainder on the last slot
+        // makes the loop always terminate with remaining==0 within kMaxChunks iterations.
+        double min_chunk = kMinChunkFor(bundle.nets);
         int remaining = bundle.nets;
-        for (int part = 0; part < split_count; ++part) {
-            int parts_left = split_count - part;
-            int nets = (remaining + parts_left - 1) / parts_left;
-            remaining -= nets;
-            Route route = routeChunk(bundle, nets);
+        int chunks_emitted = 0;
+        while (remaining > 0 && chunks_emitted < kMaxChunks) {
+            Route probe = findRoutePath(bundle, remaining);
+            if (probe.node_path.empty()) {
+                // No path exists at all -- nets-independent (topology-only reachability, §5.2's
+                // "route chunk of n along path" has no path to route). Open the WHOLE remainder as
+                // one route, matching the legacy "never re-probe an unreachable bundle" behavior;
+                // open_routes was already incremented by findRoutePath.
+                probe.source = bundle.source;
+                probe.target = bundle.target;
+                probe.nets = remaining;
+                result.routes.push_back(probe);
+                break;
+            }
+            bool last_slot = (chunks_emitted == kMaxChunks - 1);
+            int n;
+            if (last_slot) {
+                n = remaining;
+            } else {
+                double slack = pathSlack(probe.node_path);
+                if (slack > 0.0) {
+                    double clamped = std::max(min_chunk, std::min(slack, static_cast<double>(remaining)));
+                    n = std::max(1, std::min(remaining, static_cast<int>(std::llround(clamped))));
+                } else {
+                    n = std::min(remaining, kChunkCeil);
+                }
+            }
+            Route route = commitRoutePath(bundle, probe.node_path, n);
             result.routes.push_back(route);
+            remaining -= n;
+            ++chunks_emitted;
         }
     }
 

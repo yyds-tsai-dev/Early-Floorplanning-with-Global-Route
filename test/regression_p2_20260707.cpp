@@ -396,6 +396,193 @@ void testCostDrivenDeterministic() {
     std::cout << "testCostDrivenDeterministic ok\n";
 }
 
+// P2 Task 3 (design p2-design.md §5.1-5.4; plan Global Constraint 8 adaptive chunking): replace the
+// fixed ceil(nets/1000) split with the greedy re-price-per-chunk loop in the cost_driven=true path
+// ONLY (cost_driven=false must keep the exact legacy fixed split, verified in a fixture below).
+
+// Fixture geometry: A (source, bottom) and B (target, top) separated by a single vertical channel of
+// SPAN (rect.h) 120 and WIDTH (rect.w) 40 -> vcap = 25*40 = 1000 nets exactly. S (soft block) sits to
+// the right, directly abutting both A and B (a zero-channel bypass, same "S bypass" shape as
+// ChannelVsFtFixture above), with ft_base_area == its placed rect area (245,000 um^2, no starting
+// slack) so the FT marginal mismatch is driven purely by ftRequiredArea growth. Hand-verified via the
+// same channelMarginalCost/softFtMarginalCost math T1 already tests (not re-derived here): for a
+// PROBE of the full remaining bundle (3000 nets) from empty state, the channel's marginal cost
+// (9.6e9) is LESS than S's FT marginal cost (12.02e9) -- so Dijkstra picks the channel path and the
+// greedy loop's bottleneck-slack read (vcap - usage = 1000 - 0 = 1000) correctly identifies the
+// channel as the tightest resource on that path. After committing 1000 nets to the channel (now
+// saturated at usage==vcap), a second probe of the remaining 2000 nets flips: channel marginal cost
+// for 2000 more nets on an already-saturated channel (9.6e9) EXCEEDS S's FT marginal cost for the
+// same 2000 nets (7.98e9) -- so the second chunk's Dijkstra diverts entirely through S. This is
+// exactly the design §5.2 bottleneck-fill-then-divert behavior: chunk 1 fills the channel's slack to
+// capacity, chunk 2 (and any further chunks) reprice against the now-saturated channel and take the
+// now-cheaper alternative.
+struct BottleneckFixture {
+    Problem problem;
+    Placement placement;
+};
+
+BottleneckFixture makeBottleneckFixture() {
+    BottleneckFixture f;
+    Problem& p = f.problem;
+    p.outline_w = 40.0 + 700.0;  // A/B column (40 wide) + soft block S (700 wide) to the right
+    p.outline_h = 100.0 + 120.0 + 100.0;  // A (bottom) + channel span 120 + B (top)
+    p.alpha = 1.0;
+
+    Block a = makeChannelBlock("A", 40.0, 100.0);
+    Block b = makeChannelBlock("B", 40.0, 100.0);
+    Block s;
+    s.name = "S";
+    s.width = 700.0;
+    s.height = 350.0;
+    s.area = 700.0 * 350.0;       // 245,000
+    s.ft_base_area = 245000.0;    // matches placed rect area exactly -- zero starting slack
+    s.type = BlockType::Soft;
+    s.ft_rates = {0.2, 0.4, 0.8, 1.0};
+
+    p.blocks = {a, b, s};
+    p.block_index = {{"A", 0}, {"B", 1}, {"S", 2}};
+
+    Bundle bun;
+    bun.source = 0;
+    bun.target = 1;
+    bun.nets = 3000;
+    p.bundles = {bun};
+
+    Placement& pl = f.placement;
+    pl.rects = {
+        Rect{0.0, 0.0, 40.0, 100.0},     // A
+        Rect{0.0, 220.0, 40.0, 100.0},   // B (channel gap y in [100,220], height 120)
+        Rect{40.0, 0.0, 700.0, 350.0},   // S: touches A's right edge and B's right edge directly
+    };
+    pl.aspect = {1.0, 1.0, 1.0};
+    return f;
+}
+
+// Fixture (a) RED->GREEN: cost_driven=false must reproduce the EXACT legacy fixed split for 3000
+// nets: ceil(3000/1000)=3 chunks of (1000,1000,1000) -- this is the "legacy byte-identity" hard
+// constraint (T2 reviewer-verified); adaptive chunking must NOT touch this path at all.
+void testFixedSplitUnchangedForCostDrivenFalse() {
+    BottleneckFixture f = makeBottleneckFixture();
+    RoutingResult r = routeProblem(f.problem, f.placement, /*cost_driven=*/false);
+    assert(r.open_routes == 0);
+    assert(r.routes.size() == 3);
+    assert(r.routes[0].nets == 1000);
+    assert(r.routes[1].nets == 1000);
+    assert(r.routes[2].nets == 1000);
+    int total = 0;
+    for (const auto& route : r.routes) total += route.nets;
+    assert(total == 3000);
+    std::cout << "testFixedSplitUnchangedForCostDrivenFalse ok\n";
+}
+
+// Fixture (b) the core RED->GREEN assertion: cost_driven=true must split ~(1000, 2000) -- the first
+// chunk fills the channel's slack exactly to capacity (1000 nets), the second chunk diverts entirely
+// through S's feedthrough once the channel is priced as saturated. Chunk count must be well under
+// kMaxChunks=16, and total nets must be conserved. Each chunk is one Route (one PATH line, io.cpp
+// already writes one line per route -- untouched).
+void testAdaptiveChunkingSplitsAtBottleneck() {
+    BottleneckFixture f = makeBottleneckFixture();
+    RoutingResult r = routeProblem(f.problem, f.placement, /*cost_driven=*/true);
+    assert(r.open_routes == 0);
+
+    // Chunk count is the hard discriminator against the legacy fixed split: ceil(3000/1000)=3 fixed
+    // chunks of 1000 each is what the OLD algorithm always produces for this bundle size, regardless
+    // of routing decisions -- a coincidental per-chunk routing choice could still land on (1000,1000,
+    // 1000) with two of the three diverting through S, which would satisfy every OTHER assertion in
+    // this test without actually exercising the greedy bottleneck-split loop. Asserting exactly 2
+    // chunks (this fixture's hand-traced §5.2 expectation: fill slack=1000, divert remainder=2000 in
+    // ONE further chunk since kMinChunk=46.875 < slack=3000-0 and remaining=2000 clamps it) is the
+    // only way this test can distinguish "greedy split-at-bottleneck implemented" from "fixed split
+    // whose per-chunk cost-driven Dijkstra happens to route the same way."
+    assert(r.routes.size() == 2);
+    assert(r.routes.size() <= 16);
+
+    // Total nets conserved across emitted chunks (Sigma chunk nets == bundle nets).
+    int total = 0;
+    for (const auto& route : r.routes) {
+        assert(route.nets > 0);  // no pathological zero/negative chunks
+        total += route.nets;
+    }
+    assert(total == 3000);
+
+    // The bottleneck-fill-then-divert shape: first chunk fills the channel's slack to exactly 1000
+    // nets (vcap=1000, starting from an empty channel), remaining chunk(s) divert through S's FT
+    // (soft_feedthrough_nets[S] must account for the diverted remainder, 2000 nets).
+    assert(r.routes[0].nets == 1000);
+    double diverted = 0.0;
+    for (std::size_t i = 1; i < r.routes.size(); ++i) diverted += r.routes[i].nets;
+    assert(std::abs(diverted - 2000.0) < kEps);
+    assert(std::abs(r.soft_feedthrough_nets[2] - 2000.0) < kEps);
+
+    // The channel must show exactly the 1000-net chunk's usage (no overflow -- it filled to exactly
+    // capacity, not past it), confirming the split point was precisely at the bottleneck, not before
+    // or after it.
+    bool found_channel = false;
+    for (const auto& ch : r.channels) {
+        if (std::abs(ch.rect.w - 40.0) < kEps && std::abs(ch.rect.h - 120.0) < kEps) {
+            found_channel = true;
+            assert(std::abs(ch.vertical_usage - 1000.0) < kEps);
+        }
+    }
+    assert(found_channel);
+    assert(r.channel_overflow == 0.0);  // filled to exactly capacity, never exceeded it
+
+    std::cout << "testAdaptiveChunkingSplitsAtBottleneck ok (chunks=" << r.routes.size()
+               << ", diverted=" << diverted << ")\n";
+}
+
+// Fixture (c): adaptive chunking must never emit more than kMaxChunks routes for a single bundle,
+// even on a saturated-with-no-alternative bundle (no soft block reachable) that would otherwise want
+// to keep re-probing forever. Two hard macros connected only by a small channel with no soft-block
+// bypass; a huge bundle (50,000 nets) must still terminate in <=16 chunks (accepting graded overflow
+// on the excess per design §5.2 step 3, since no cheaper split exists once saturated).
+void testAdaptiveChunkingRespectsMaxChunksWithNoAlternative() {
+    Problem p;
+    p.outline_w = 40.0;
+    p.outline_h = 100.0 + 120.0 + 100.0;
+    p.alpha = 1.0;
+    p.blocks = {makeChannelBlock("A", 40.0, 100.0), makeChannelBlock("B", 40.0, 100.0)};
+    p.block_index = {{"A", 0}, {"B", 1}};
+    Bundle bun;
+    bun.source = 0;
+    bun.target = 1;
+    bun.nets = 50000;
+    p.bundles = {bun};
+
+    Placement pl;
+    pl.rects = {Rect{0.0, 0.0, 40.0, 100.0}, Rect{0.0, 220.0, 40.0, 100.0}};
+    pl.aspect = {1.0, 1.0};
+
+    RoutingResult r = routeProblem(p, pl, /*cost_driven=*/true);
+    assert(r.open_routes == 0);
+    assert(r.routes.size() <= 16);
+    int total = 0;
+    for (const auto& route : r.routes) total += route.nets;
+    assert(total == 50000);
+    std::cout << "testAdaptiveChunkingRespectsMaxChunksWithNoAlternative ok (chunks=" << r.routes.size() << ")\n";
+}
+
+// Fixture (d): determinism of the adaptive-chunking path specifically (GC6 purity/determinism, same
+// invariant T2's testCostDrivenDeterministic asserts for the single-Dijkstra path) -- the greedy loop
+// introduces new call-local state (min_chunk, remaining, chunks_emitted) that must not leak across
+// calls or depend on anything but (problem, placement); routing the same bottleneck fixture twice
+// must yield identical chunk counts, per-chunk nets, node_paths, and aggregate totals.
+void testAdaptiveChunkingDeterministic() {
+    BottleneckFixture f = makeBottleneckFixture();
+
+    RoutingResult r1 = routeProblem(f.problem, f.placement, /*cost_driven=*/true);
+    RoutingResult r2 = routeProblem(f.problem, f.placement, /*cost_driven=*/true);
+
+    assert(r1.routes.size() == r2.routes.size());
+    for (std::size_t i = 0; i < r1.routes.size(); ++i) {
+        assert(r1.routes[i].nets == r2.routes[i].nets);
+        assert(r1.routes[i].node_path == r2.routes[i].node_path);
+    }
+    assert(std::abs(r1.channel_overflow - r2.channel_overflow) < kEps);
+    assert(std::abs(r1.feedthrough_mismatch - r2.feedthrough_mismatch) < kEps);
+    std::cout << "testAdaptiveChunkingDeterministic ok\n";
+}
+
 }  // namespace
 
 int main() {
@@ -412,6 +599,10 @@ int main() {
     testCostDrivenPrefersFtOverSaturatedChannel();
     testCostDrivenZeroWlDirectAbutUnchanged();
     testCostDrivenDeterministic();
-    std::cout << "P2 T0+T1+T2 regressions passed\n";
+    testFixedSplitUnchangedForCostDrivenFalse();
+    testAdaptiveChunkingSplitsAtBottleneck();
+    testAdaptiveChunkingRespectsMaxChunksWithNoAlternative();
+    testAdaptiveChunkingDeterministic();
+    std::cout << "P2 T0+T1+T2+T3 regressions passed\n";
     return 0;
 }
