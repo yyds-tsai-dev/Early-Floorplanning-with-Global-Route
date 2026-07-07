@@ -830,6 +830,58 @@ void testRespaceFixedPointSyntheticTwoAxisSlackReducesOverflow() {
     std::cout << "testRespaceFixedPointSyntheticTwoAxisSlackReducesOverflow ok\n";
 }
 
+// T5 (design p3-design.md §5, plan Task 5): the elite pass's per-candidate respace hook
+// (`maybeAdoptRespace`, file-local to search.cpp, mirroring outlineSweepBetter's own
+// file-local precedent -- see p1-design's outlineSweep tests, which exercise it only through
+// runPlacementSearch/outlineSweep rather than a standalone unit hook). case1/bstar/seed1 is the
+// SAME axis-locked fixture T4's never-regresses test already pins (raw re-decode has no slack on
+// the locked axis, so `respaceFixedPoint` legitimately returns improved=false there -- see
+// respaceFixedPointCase1BStarSeed1NeverRegresses above and p3-task-4-report.md). Asserting a
+// strictly-lower post-hook channel_overflow here would therefore be a FALSE requirement on this
+// fixture; the honest, non-fragile contract this test pins is: (1) the end-to-end search still
+// reaches open_routes==0 and validateSolution().ok with the hook wired in (never-worse, since
+// maybeAdoptRespace only adopts a strictly-better candidate per outlineSweepBetter's own rule),
+// and (2) determinism is preserved (byte-identical output across two identical runs) despite the
+// added respaceFixedPoint calls in the elite loop. Cost-movement evidence (the cases where
+// respacing genuinely lowers overflow) lands in T7's full sweep, not here.
+void testEliteRespaceHookEndToEndCase1BStarSeed1() {
+    Problem problem = parseProblem("test/2026 ICCAD_case.case1.csv");
+    std::unique_ptr<PlacementEngine> engine = makePlacementEngine("bstar");
+    SearchOptions options;
+    options.iters = 500;
+    options.seed = 1;
+    options.exact_interval = 50;
+
+    SearchResult result = runPlacementSearch(problem, *engine, options);
+    assert(result.best_routing.open_routes == 0);
+
+    Problem scoped = problem;
+    scoped.outline_w = result.best_placement.outline_w;
+    scoped.outline_h = result.best_placement.outline_h;
+    RoutingResult post_routing = routeProblem(scoped, result.best_placement);
+    ValidationResult validation = validateSolution(scoped, result.best_placement, post_routing);
+    if (!validation.ok) {
+        for (const auto& m : validation.messages) std::cout << "  validation: " << m << "\n";
+    }
+    assert(validation.ok);
+
+    // Determinism: the elite loop's added respaceFixedPoint calls are pure/deterministic
+    // (no RNG, per respace.hpp's contract), so a second identical run must reproduce the exact
+    // same best placement byte-for-byte.
+    SearchResult result2 = runPlacementSearch(problem, *engine, options);
+    assert(result2.best_placement.rects.size() == result.best_placement.rects.size());
+    for (std::size_t i = 0; i < result.best_placement.rects.size(); ++i) {
+        assert(result2.best_placement.rects[i].x == result.best_placement.rects[i].x);
+        assert(result2.best_placement.rects[i].y == result.best_placement.rects[i].y);
+        assert(result2.best_placement.rects[i].w == result.best_placement.rects[i].w);
+        assert(result2.best_placement.rects[i].h == result.best_placement.rects[i].h);
+    }
+    assert(result2.best_placement.outline_w == result.best_placement.outline_w);
+    assert(result2.best_placement.outline_h == result.best_placement.outline_h);
+    assert(result2.best_score.value == result.best_score.value);
+    std::cout << "testEliteRespaceHookEndToEndCase1BStarSeed1 ok\n";
+}
+
 }  // namespace
 
 int main() {
@@ -849,6 +901,7 @@ int main() {
     testRespaceToDemandNoDemandIsNoOp();
     testRespaceFixedPointCase1BStarSeed1NeverRegresses();
     testRespaceFixedPointSyntheticTwoAxisSlackReducesOverflow();
-    std::cout << "P3 T1+T2+T3+T4 regressions passed\n";
+    testEliteRespaceHookEndToEndCase1BStarSeed1();
+    std::cout << "P3 T1+T2+T3+T4+T5 regressions passed\n";
     return 0;
 }

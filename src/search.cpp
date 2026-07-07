@@ -8,6 +8,7 @@
 
 #include "eval.hpp"
 #include "ft.hpp"
+#include "respace.hpp"
 #include "validate.hpp"
 
 namespace efgr {
@@ -116,6 +117,24 @@ namespace {
 bool outlineSweepBetter(const RoutingResult& a, double a_value, const RoutingResult& b, double b_value) {
     if ((a.open_routes == 0) != (b.open_routes == 0)) return a.open_routes == 0;
     return a_value < b_value;
+}
+
+// T5 (design p3-design.md §5, plan Task 5): respaces the elite pass's then-current best against
+// its own routed channel demand and adopts the result under the SAME preference rule the sweep
+// adoptions above already use (`outlineSweepBetter`: open_routes==0 strictly first, then lower
+// value). Called once per elite candidate, on `result.best_*` AFTER both of that candidate's
+// sweep adoptions (raw + compacted) have already run -- never on the swept candidate itself, so a
+// losing sweep variant never pays for an extra respaceFixedPoint call, and each elite contributes
+// at most one respace exact-eval batch. `respaceFixedPoint` is itself Pareto-safe (never returns
+// worse than its own `base` per its documented contract), so this can only match or improve
+// `result`, never regress it.
+void maybeAdoptRespace(const Problem& problem, const ExactCachedFn& exactCached, SearchResult& result) {
+    RespaceResult respaced = respaceFixedPoint(problem, result.best_placement, exactCached);
+    if (outlineSweepBetter(respaced.routing, respaced.score.value, result.best_routing, result.best_score.value)) {
+        result.best_score = respaced.score;
+        result.best_placement = respaced.placement;
+        result.best_routing = respaced.routing;
+    }
 }
 
 }  // namespace
@@ -390,6 +409,12 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
             result.best_placement = swept_compacted.placement;
             result.best_routing = swept_compacted.routing;
         }
+
+        // T5 (design p3-design.md §5, plan Task 5): respace the then-current best ONCE per
+        // elite candidate, after both sweep adoptions above have already run their course --
+        // never on the swept candidate directly, so a sweep variant that lost either adoption
+        // never separately pays for its own respaceFixedPoint call.
+        maybeAdoptRespace(problem, exactCached, result);
     }
 
     (void)best_state;

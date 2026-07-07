@@ -6,7 +6,7 @@ make
 g++ -std=c++17 -O2 -Wall -Wextra -pedantic \
   -I. \
   test/placement_engine_regression.cpp \
-  src/eval.cpp src/floorplan.cpp src/io.cpp src/placement_engine.cpp src/routing.cpp src/search.cpp src/validate.cpp \
+  src/eval.cpp src/floorplan.cpp src/io.cpp src/placement_engine.cpp src/respace.cpp src/routing.cpp src/search.cpp src/validate.cpp \
   -o /tmp/placement_engine_regression
 /tmp/placement_engine_regression
 
