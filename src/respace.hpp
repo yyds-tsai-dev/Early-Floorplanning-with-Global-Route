@@ -66,4 +66,14 @@ std::vector<StripDemand> channelDemands(const Problem& problem, const Placement&
 // evaluated elsewhere, not a hard failure this return value encodes.
 bool relaxToDemand(const Problem& problem, Placement& placement, const std::vector<StripDemand>& demands);
 
+// Single-pass demand-driven respace (design p3-design.md T3, §2.1 steps 1-5): reads the routed
+// result's per-channel demand, relaxes core-block coordinates to satisfy it (`relaxToDemand`),
+// re-anchors edge blocks + re-stamps the outline via `shrinkWrapOutline`, and gates the whole
+// result on legality (containment, pairwise non-overlap, edge-location rules) before committing.
+// Operates on a LOCAL copy of `placement`; on ANY failure (no demand, or the relaxed+re-anchored
+// result is illegal) the caller's `placement` is left completely untouched and this returns false.
+// On success, `placement` is overwritten with the legal, widened-where-needed result and this
+// returns true. Pure aside from the documented `placement` mutation; deterministic (no RNG).
+bool respaceToDemand(const Problem& problem, Placement& placement, const RoutingResult& routing);
+
 }  // namespace efgr

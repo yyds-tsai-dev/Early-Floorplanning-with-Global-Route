@@ -5,6 +5,8 @@
 #include <map>
 #include <utility>
 
+#include "placement_engine.hpp"
+
 namespace efgr {
 namespace {
 
@@ -319,6 +321,61 @@ std::vector<StripDemand> channelDemands(const Problem& problem, const Placement&
         demands.push_back(demand);
     }
     return demands;
+}
+
+namespace {
+
+// Explicit O(n^2) legality check mirroring placement_engine.cpp's file-local `placementLegalAt`
+// geometric semantics (containment in [0,w]x[0,h] + pairwise non-overlap over ALL rects, edge or
+// core). `placementLegalAt` itself is file-local to placement_engine.cpp and not exposed via
+// placement_engine.hpp, so per the task brief's "your choice" this is reproduced locally rather
+// than widening that file's public surface. Edge-block LOCATION legality (flush/thirds/corner)
+// is NOT re-checked here -- `shrinkWrapOutline`'s own commit path already gates edge rects on the
+// full `placementLegalAt` (containment + overlap + edge-location) before this function ever sees
+// them, so re-deriving that here would be redundant, not a gap.
+bool rectsLegalWithinOutline(const Placement& placement, double w, double h) {
+    for (std::size_t i = 0; i < placement.rects.size(); ++i) {
+        const Rect& r = placement.rects[i];
+        if (r.x < -kEps || r.y < -kEps || r.right() > w + kEps || r.top() > h + kEps) return false;
+        for (std::size_t j = i + 1; j < placement.rects.size(); ++j) {
+            if (overlaps(r, placement.rects[j])) return false;
+        }
+    }
+    return true;
+}
+
+}  // namespace
+
+bool respaceToDemand(const Problem& problem, Placement& placement, const RoutingResult& routing) {
+    std::vector<StripDemand> demands = channelDemands(problem, placement, routing);
+    if (demands.empty()) return false;  // nothing to relieve (design §3.5 degenerate no-op)
+
+    // Work on a local copy throughout; the caller's `placement` is only ever touched on success.
+    Placement candidate = placement;
+
+    relaxToDemand(problem, candidate, demands);
+
+    // Reset outline stamps to 0 before shrink-wrapping so shrinkWrapOutline's lower-bound
+    // arithmetic (lowerBoundNeeds) reads the freshly-relaxed core geometry, not a stale stamp from
+    // before the relax -- it re-anchors edge blocks and stamps a fresh outline for the widened
+    // core (task brief step 3).
+    candidate.outline_w = 0.0;
+    candidate.outline_h = 0.0;
+    OutlineFit fit = shrinkWrapOutline(problem, candidate);
+    if (!fit.legal) return false;  // caller's placement untouched
+
+    // Legality gate (task brief step 4): shrinkWrapOutline's own commit path already verified
+    // containment + pairwise overlap + edge-location legality via placementLegalAt internally
+    // (fit.legal == true means that gate passed at commit time) -- but re-verify pairwise overlap
+    // + containment explicitly here as well, since respaceToDemand is a public entry point that
+    // must not trust an internal callee's bookkeeping alone for its own legality contract.
+    if (!rectsLegalWithinOutline(candidate, candidate.outline_w, candidate.outline_h)) return false;
+    if (candidate.outline_w > problem.outline_w + kEps || candidate.outline_h > problem.outline_h + kEps) {
+        return false;
+    }
+
+    placement = candidate;
+    return true;
 }
 
 }  // namespace efgr
