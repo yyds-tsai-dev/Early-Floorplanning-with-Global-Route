@@ -556,12 +556,21 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
 
         // Bump history AFTER this round, for every resource that ended the round over capacity
         // (design §4.2). Track whether ANY bump was applied this round: if none was, every resource
-        // is within capacity and history is unchanged from before this round, so ALL subsequent
-        // rounds would price identically and therefore route identically (same weights -> same
-        // Dijkstra decisions -> same result) -- their outcome is PROVABLY IDENTICAL to this round's,
-        // so continuing would be wasted work. This keeps clean/overflow-free cases (e.g. case0) at
-        // ~1x routing cost instead of paying kNegotiationRounds x, which matters once T6 flips
-        // cost_driven on for every exact eval (task requirement 6).
+        // is within capacity and history is unchanged from before this round. Two cases (T4 review
+        // correction -- the prior "provably identical" claim only held for the first of these): if
+        // history was ALSO all-zero going into this round, every subsequent round prices identically
+        // and therefore routes identically (same weights -> same Dijkstra decisions -> same result) --
+        // provably identical. If history was NONZERO (a prior round bumped it, then decayed) but this
+        // round still ended bump-free, later rounds are provably NOT BETTER for `best`: `best` already
+        // holds this round's overflow-free, mismatch-free result, and every later round only ever
+        // decays history further (a re-bump requires going over capacity again) -- so a later round
+        // can only reproduce the same zero-overflow routing (a tie, and best-round selection above
+        // already keeps the EARLIER round on ties) or, once the surcharge decays enough to stop
+        // deterring a previously-avoided saturated resource, reintroduce overflow (strictly worse).
+        // Either way it cannot beat `best`, so continuing is wasted work in both cases. This keeps
+        // clean/overflow-free cases (e.g. case0) at ~1x routing cost instead of paying
+        // kNegotiationRounds x, which matters once T6 flips cost_driven on for every exact eval (task
+        // requirement 6).
         bool any_bump = false;
         for (std::size_t c = 0; c < round_result.channels.size(); ++c) {
             const auto& ch = round_result.channels[c];

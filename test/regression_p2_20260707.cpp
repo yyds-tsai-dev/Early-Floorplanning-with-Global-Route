@@ -607,8 +607,9 @@ void testAdaptiveChunkingDeterministic() {
 // narrow channel) and is forced through it too, pushing usage to 1300 > 1000 cap -- confirmed via
 // trace: round 0 channel_overflow = ((1300-1000)/25)*80 = 960.0 um^2, open_routes=0. After round 0,
 // the narrow channel ended over capacity, so history[narrow][vertical] is bumped
-// (kHistoryBump*(1300-1000)/1000 = 0.3). In round 1, A is re-priced with that history surcharge
-// (kOverflowAreaWeight * 0.3 * 900 = 2.7e8), which dwarfs the small extra wireCost distance of the
+// (kHistoryBump*(1300-1000)/1000 = 0.3). Round 1 begins by decaying history (kHistoryDecay=0.5), so
+// the LIVE value used when A is re-priced is 0.3*0.5 = 0.15; the resulting surcharge
+// (kOverflowAreaWeight * 0.15 * 900 = 1.35e8) still dwarfs the small extra wireCost distance of the
 // alternate channel (alpha=0.001 keeps the base term negligible against 1e6-scale area terms) -- A's
 // cheapest path flips entirely to the alternate channel, freeing the narrow channel for B alone
 // (400 < 1000 cap) -- confirmed via trace: round 1 channel_overflow = 0.0, and this round has zero
