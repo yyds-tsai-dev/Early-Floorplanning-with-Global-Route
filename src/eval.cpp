@@ -5,6 +5,7 @@
 
 #include "ft.hpp"
 #include "placement_engine.hpp"
+#include "route_cost.hpp"
 
 namespace efgr {
 
@@ -141,9 +142,15 @@ Score routeAndScoreAt(const Problem& problem, const Placement& placement, double
     score.wirelength = routing.total_wirelength;
     score.penalty += routing.open_routes * 1e15;
     // channel_overflow and feedthrough_mismatch are both um^2 (design p2-design.md §8.1 / R0:
-    // routing.cpp area-denominates channel_overflow so this shared 1e6 weight compares like units).
-    score.penalty += routing.channel_overflow * 1e6;
-    score.penalty += routing.feedthrough_mismatch * 1e6;
+    // routing.cpp area-denominates channel_overflow so this shared weight compares like units).
+    // P2 Task 6 (design §9 T6; plan Global Constraint 11): consume the SAME named constants
+    // route_cost.hpp's router-side edge pricing uses (kOverflowAreaWeight/kFtMismatchWeight),
+    // instead of repeating the 1e6 literal here -- one source of truth for the router-scorer
+    // consistency invariant (design §7/§9-T0: "MUST equal eval.cpp's overflow/FT-mismatch
+    // multiplier exactly"). Values unchanged (1e6 each), so this is a pure refactor, not a
+    // scoring change.
+    score.penalty += routing.channel_overflow * kOverflowAreaWeight;
+    score.penalty += routing.feedthrough_mismatch * kFtMismatchWeight;
     score.value = score.outline_area + problem.alpha * score.wirelength + score.penalty;
     if (routing_out) *routing_out = routing;
     return score;

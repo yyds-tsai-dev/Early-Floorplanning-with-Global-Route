@@ -1012,6 +1012,117 @@ void testComparisonGateDeterministic() {
     std::cout << "testComparisonGateDeterministic ok\n";
 }
 
+// P2 Task 6 Rider A (design p2-design.md §9 T6; T4/T5.1 review action item): round-consistency check
+// for T6's default-on flip. The comparison gate (T5.1) and negotiation loop (T4) select a single
+// "winning" RoutingResult (a negotiated round or the legacy fallback) and copy it wholesale -- but a
+// bug that mixed fields from DIFFERENT rounds/branches (e.g. `soft_feedthrough_nets` from one round's
+// accrual while `feedthrough_mismatch` was computed against another) would not be caught by any
+// existing single-field assertion. This fixture uses a soft block with NO starting FT slack (unlike
+// ChannelVsFtFixture's S, whose generous placed area keeps feedthrough_mismatch at exactly 0 --
+// deliberately different here so the cross-check below is a nontrivial nonzero equality, not 0==0),
+// on a contended A->B flow whose channel saturates before the full bundle fits (vcap=25*80=2000 <
+// bundle.nets=3600), forcing the router to divert the overflow through S.
+struct SoftFtRoundConsistencyFixture {
+    Problem problem;
+    Placement placement;
+};
+
+SoftFtRoundConsistencyFixture makeSoftFtRoundConsistencyFixture() {
+    SoftFtRoundConsistencyFixture f;
+    Problem& p = f.problem;
+    p.outline_w = 80.0 + 200.0;          // A/B column (80 wide) + soft block S (200 wide) to the right
+    p.outline_h = 610.0 + 100.0 + 100.0;  // A (bottom) + channel span 610 + B (top), same geometry as
+                                          // the T0 overflow fixture above (vcap = 25*80 = 2000).
+    p.alpha = 1.0;
+
+    Block a = makeChannelBlock("A", 80.0, 100.0);
+    Block b = makeChannelBlock("B", 80.0, 100.0);
+    Block s;
+    s.name = "S";
+    s.width = 200.0;
+    s.height = 810.0;
+    s.area = 200.0 * 810.0;
+    s.ft_base_area = s.area;  // NO starting slack: any nets diverted through S immediately grow the
+                               // required area past the placed area, so feedthrough_mismatch is
+                               // nonzero whenever soft_feedthrough_nets[S] is nonzero.
+    s.type = BlockType::Soft;
+    s.ft_rates = {0.2, 0.4, 0.8, 1.0};
+
+    p.blocks = {a, b, s};
+    p.block_index = {{"A", 0}, {"B", 1}, {"S", 2}};
+
+    Bundle bun;
+    bun.source = 0;
+    bun.target = 1;
+    bun.nets = 3600;  // 1600 nets exceed the channel's 2000-net capacity -- the router must divert
+                       // the excess (or all of it, depending on marginal pricing) through S.
+    p.bundles = {bun};
+
+    Placement& pl = f.placement;
+    pl.rects = {
+        Rect{0.0, 0.0, 80.0, 100.0},     // A
+        Rect{0.0, 710.0, 80.0, 100.0},   // B
+        Rect{80.0, 0.0, 200.0, 810.0},   // S: touches A's right edge and B's right edge directly
+    };
+    pl.aspect = {1.0, 1.0, 1.0};
+    return f;
+}
+
+void testRoundConsistencyOfSoftFeedthroughFields() {
+    SoftFtRoundConsistencyFixture f = makeSoftFtRoundConsistencyFixture();
+
+    // T6: the default arg now IS cost_driven=true (negotiation + comparison gate) -- this exercises
+    // the exact call shape production callers use (eval.cpp's routeProblem(scoped, placement)).
+    RoutingResult r = routeProblem(f.problem, f.placement);
+    assert(r.open_routes == 0);
+    assert(r.soft_feedthrough_nets[2] > 0.0);  // task requirement 3: soft_feedthrough_nets nonzero
+
+    // Cross-check 1: soft_feedthrough_nets[S] must equal the sum of nets routed through S as an
+    // INTERMEDIATE node across every route in the returned struct's own `routes` list -- this is
+    // literally how commitRoutePath accrues soft_feedthrough_nets (routing.cpp), so if the returned
+    // `routes` came from a different round/branch than the returned `soft_feedthrough_nets` vector,
+    // this sum would diverge.
+    double nets_via_routes = 0.0;
+    for (const auto& route : r.routes) {
+        for (std::size_t i = 1; i + 1 < route.node_path.size(); ++i) {
+            if (route.node_path[i] == 2) nets_via_routes += route.nets;  // S is block index 2
+        }
+    }
+    assert(std::abs(nets_via_routes - r.soft_feedthrough_nets[2]) < 1e-6);
+
+    // Cross-check 2 (the task's named check): recompute feedthrough_mismatch from the returned
+    // soft_feedthrough_nets via ft.hpp -- the EXACT formula computeOverflowAndMismatch (routing.cpp)
+    // uses -- and assert it equals the returned struct's feedthrough_mismatch. A mismatch computed
+    // against a different round's soft_feedthrough_nets (or vice versa) would fail this equality.
+    const Block& s = f.problem.blocks[2];
+    double base = s.ft_base_area > 0.0 ? s.ft_base_area : s.area;
+    double nets = r.soft_feedthrough_nets[2];
+    double required_area = ftRequiredArea(base, ftExtend(nets, ftTierRate(s, nets)));
+    double actual_area = round2(f.placement.rects[2].w * f.placement.rects[2].h);
+    double expected_mismatch = std::max(0.0, required_area - actual_area);
+    assert(expected_mismatch > 0.0);  // confirms this fixture exercises a NONTRIVIAL (nonzero) check,
+                                       // not the 0==0 case ChannelVsFtFixture's slack-absorbed S would
+                                       // give.
+    assert(std::abs(r.feedthrough_mismatch - expected_mismatch) < 1e-6);
+
+    // Determinism (task requirement 3's "determinism across two calls"), same discipline as
+    // testCostDrivenDeterministic/testNegotiatedRoutingDeterministic/testComparisonGateDeterministic
+    // above.
+    RoutingResult r2 = routeProblem(f.problem, f.placement);
+    assert(r2.open_routes == r.open_routes);
+    assert(std::abs(r2.soft_feedthrough_nets[2] - r.soft_feedthrough_nets[2]) < kEps);
+    assert(std::abs(r2.feedthrough_mismatch - r.feedthrough_mismatch) < kEps);
+    assert(r2.routes.size() == r.routes.size());
+    for (std::size_t i = 0; i < r.routes.size(); ++i) {
+        assert(r2.routes[i].node_path == r.routes[i].node_path);
+        assert(r2.routes[i].nets == r.routes[i].nets);
+    }
+
+    std::cout << "testRoundConsistencyOfSoftFeedthroughFields ok (soft_feedthrough_nets[S]="
+              << r.soft_feedthrough_nets[2] << ", feedthrough_mismatch=" << r.feedthrough_mismatch
+              << ")\n";
+}
+
 }  // namespace
 
 int main() {
@@ -1037,6 +1148,7 @@ int main() {
     testFeasibilityFallbackNeverWorseThanLegacyOnGenuineDeadEnd();
     testComparisonGatePrefersLegacyWhenCostDrivenFullyRoutedButWorse();
     testComparisonGateDeterministic();
-    std::cout << "P2 T0+T1+T2+T3+T4+T5+T5.1 regressions passed\n";
+    testRoundConsistencyOfSoftFeedthroughFields();
+    std::cout << "P2 T0+T1+T2+T3+T4+T5+T5.1+T6 regressions passed\n";
     return 0;
 }

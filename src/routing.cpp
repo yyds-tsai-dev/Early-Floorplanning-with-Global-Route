@@ -171,6 +171,12 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
     // `cost_driven` false, so `use_legacy` degenerates to the same thing either way; the negotiation
     // loop's own calls never pass force_legacy, so they keep reading the outer `cost_driven`, which is
     // always true there).
+    //
+    // WARNING (P2 Task 6, Rider A of the T5.1 review): any FUTURE call site that wants true legacy
+    // (channels-first, then soft-FT fallback) pricing from WITHIN a cost_driven=true routeProblem
+    // call MUST pass force_legacy=true explicitly. Omitting it silently reruns cost-driven's own
+    // pricing instead (the exact bug class this parameter was added to fix) -- the default `false`
+    // only preserves behavior for callers where the outer `cost_driven` is already false.
     auto findRoutePath = [&](RoutingResult& rr, const Bundle& bundle, int nets, bool force_legacy = false) {
         bool use_legacy = force_legacy || !cost_driven;
         Route route;
