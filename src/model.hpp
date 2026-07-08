@@ -94,6 +94,12 @@ struct RoutingResult {
     double channel_overflow = 0.0;
     double feedthrough_mismatch = 0.0;
     int open_routes = 0;
+    // P2 Task 5.1 (design p2-design.md §9 T5, controller amendment: comparison gate). Telemetry only
+    // -- true iff routeProblem(..., cost_driven=true) returned the legacy two-pass result because it
+    // won (or tied) the lexicographic (open_routes, cost) comparison gate. Never read by scoring or
+    // caching logic (eval.cpp/search.cpp); exists so T7's sweep can report how often the gate saved us.
+    // Always false when cost_driven=false (legacy path never sets it).
+    bool used_fallback = false;
 };
 
 struct Score {

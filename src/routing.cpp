@@ -158,7 +158,21 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
     // (the round loop is now the ONLY cost_driven=true caller), so the history surcharge below is
     // read unconditionally when cost_driven; round 0 has all-zero history vectors, making the added
     // terms exactly 0 and reproducing plain T3 behavior (task requirement: round 0 == T3-exact).
-    auto findRoutePath = [&](RoutingResult& rr, const Bundle& bundle, int nets) {
+    // `force_legacy` (P2 Task 5.1 fix, controller amendment): findRoutePath dispatches on the OUTER
+    // `cost_driven` parameter captured by reference, which is fixed for the entire routeProblem call --
+    // but `runLegacyPass` (below) must run TRUE legacy pricing even when called from WITHIN a
+    // cost_driven=true invocation (the new unconditional comparison-gate run). Without this override,
+    // `runLegacyPass` inside a cost_driven=true call silently reran cost-driven's OWN single-pass
+    // pricing (same `cost_driven` capture, same edge-cost formula) instead of the real two-pass
+    // channels-then-soft-fallback legacy algorithm -- a pre-existing bug in T5's original fallback that
+    // this parameter fixes: `use_legacy` below is the actual per-call mode, `force_legacy=true`
+    // unconditionally selects legacy pricing regardless of the outer flag; the default (false) preserves
+    // every existing call site's behavior exactly (`cost_driven=false` top-level calls already had
+    // `cost_driven` false, so `use_legacy` degenerates to the same thing either way; the negotiation
+    // loop's own calls never pass force_legacy, so they keep reading the outer `cost_driven`, which is
+    // always true there).
+    auto findRoutePath = [&](RoutingResult& rr, const Bundle& bundle, int nets, bool force_legacy = false) {
+        bool use_legacy = force_legacy || !cost_driven;
         Route route;
         route.source = bundle.source;
         route.target = bundle.target;
@@ -173,9 +187,9 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
         // route_cost.hpp, so the shortest path is the min-marginal-Delta-Cost path (channel overflow
         // vs FT tier jump compete honestly, GC5 direct-abut stays 0, GC5 never-open is enforced by
         // routeChunk's existing "if node_path empty -> open" fallthrough below, unchanged).
-        int pass_count = cost_driven ? 1 : 2;
+        int pass_count = use_legacy ? 2 : 1;
         for (int pass = 0; pass < pass_count && route.node_path.empty(); ++pass) {
-            bool allow_soft = cost_driven ? true : (pass == 1);
+            bool allow_soft = use_legacy ? (pass == 1) : true;
             std::vector<double> dist(total, std::numeric_limits<double>::infinity());
             std::vector<int> prev(total, -1);
             using Item = std::pair<double, int>;
@@ -191,7 +205,7 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
                     if (!allowed(v, bundle.source, bundle.target, allow_soft)) continue;
                     if (!endpointEdgeAllowed(u, v, bundle.source, bundle.target)) continue;
                     double cost;
-                    if (cost_driven) {
+                    if (!use_legacy) {
                         // GC5: direct block<->block abut (both endpoints, zero channel, zero guide
                         // hops) costs exactly wireCost's manhattan term with dist 0 in practice for a
                         // 2-node path -- but pricing here is per-EDGE during search, so a block-to-
@@ -328,10 +342,12 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
 
     // Legacy-shaped wrapper: find a path priced at `nets` and immediately commit the WHOLE `nets` of
     // it along that same path -- this is what routeChunk always did pre-T3 (never shrinks after
-    // finding), so composing find+commit at the SAME size reproduces byte-identical behavior for
-    // cost_driven=false (the only remaining caller of this wrapper after P2 Task 4).
-    auto routeChunk = [&](RoutingResult& rr, const Bundle& bundle, int nets) {
-        Route path = findRoutePath(rr, bundle, nets);
+    // finding), so composing find+commit at the SAME size reproduces byte-identical behavior. `force_legacy`
+    // (P2 Task 5.1 fix) forwards to findRoutePath so `runLegacyPass` (below) gets true legacy pricing
+    // even when called from within a cost_driven=true routeProblem invocation -- see findRoutePath's
+    // `force_legacy` comment. Default false preserves the top-level cost_driven=false caller unchanged.
+    auto routeChunk = [&](RoutingResult& rr, const Bundle& bundle, int nets, bool force_legacy = false) {
+        Route path = findRoutePath(rr, bundle, nets, force_legacy);
         if (path.node_path.empty()) return path;  // open=true, open_routes already incremented
         return commitRoutePath(rr, bundle, path.node_path, nets);
     };
@@ -418,7 +434,11 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
     // pass 1 via `routeChunk`/`findRoutePath` above): fixed ceil(nets/1000) chunking, routed straight
     // into `rr`. Byte-identical in shape to pre-T4. Shared by the cost_driven=false path (below,
     // unchanged) and, as of P2 Task 5 (design p2-design.md §9 T5; plan Global Constraint 10
-    // feasibility fallback), the cost_driven=true never-open-route fallback further down.
+    // feasibility fallback) / P2 Task 5.1 (comparison gate, controller amendment), the cost_driven=true
+    // comparison-gate call further down. `routeChunk(rr, bundle, nets, /*force_legacy=*/true)` (P2
+    // Task 5.1 fix) is REQUIRED here, not optional: without it, this loop would silently use the OUTER
+    // `cost_driven` flag's pricing (true, when called from the gate) instead of true legacy pricing,
+    // defeating the entire comparison -- see findRoutePath's `force_legacy` comment for the full story.
     auto runLegacyPass = [&](RoutingResult& rr) {
         for (const auto& bundle : problem.bundles) {
             int split_count = std::max(1, static_cast<int>(std::ceil(bundle.nets / 1000.0)));
@@ -428,7 +448,7 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
                 int parts_left = split_count - part;
                 int nets = (remaining + parts_left - 1) / parts_left;
                 remaining -= nets;
-                Route route = routeChunk(rr, bundle, nets);
+                Route route = routeChunk(rr, bundle, nets, /*force_legacy=*/true);
                 rr.routes.push_back(route);
             }
         }
@@ -609,23 +629,32 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
         if (!any_bump) break;  // provably-identical early exit, see comment above
     }
 
-    // P2 Task 5 (design p2-design.md §9 T5; plan Global Constraint 10 feasibility fallback): never
-    // emit an open route. `findRoutePath`'s reachability gates (`allowed`/`endpointEdgeAllowed`) are
-    // identical between cost_driven's single unified pass (allow_soft always true) and the legacy
-    // two-pass router's pass 1 (allow_soft true), so a bundle chunk cost_driven cannot route is, by
-    // construction, equally unroutable by legacy -- an open `best` can never be rescued into a fully
-    // routed result by the fallback, only guaranteed no WORSE. If every negotiation round still left
-    // >=1 route open, fall back to the legacy two-pass router wholesale: `result` already carries the
-    // channel geometry extracted at the top of this call and has not been mutated since (the
-    // negotiation loop only ever writes its own per-round `round_result` copies), so it is the correct
-    // receptacle. This makes cost_driven=true Pareto-safe on the one hard-fail axis: it can never
-    // return MORE open routes than cost_driven=false alone would (design §9: "routeProblem picks the
-    // better (or falls back on open routes)... regression is impossible by the comparison gate").
-    if (best.open_routes > 0) {
-        runLegacyPass(result);
-        return result;
+    // P2 Task 5.1 (design p2-design.md §9 T5 preamble; controller amendment -- the binding design text
+    // mandates a FULL comparison gate, not just an open-routes fallback: "routeProblem returns the
+    // cost-driven result when it is fully routed and no worse, else the fallback"). Run the legacy
+    // two-pass router UNCONDITIONALLY here -- exactly ONCE (this is routeProblem's only runLegacyPass
+    // call site under cost_driven=true, so T5's original open-routes fallback and this gate share one
+    // legacy run rather than double-running it; `result` already carries the channel geometry extracted
+    // at the top of this call and has not been mutated since, so it is the correct receptacle) -- and
+    // pick whichever of {best, result} wins the SAME lexicographic key already used for round selection
+    // above: (open_routes, then alpha*WL + kOverflowAreaWeight*overflow + kFtMismatchWeight*mismatch).
+    // `findRoutePath`'s reachability gates are identical between cost_driven's single unified pass
+    // (allow_soft always true) and legacy pass 1 (allow_soft true), so open_routes can never be LOWER
+    // for legacy than for a genuinely-unroutable cost_driven bundle -- but the FULL key (not just the
+    // open_routes component) can still favor legacy when cost_driven is fully routed yet its greedy/
+    // history-priced choices land on a worse total cost, which is exactly the gap this amendment closes
+    // over the original open-routes-only fallback. Tie rule (deterministic, no ambiguity): `<=` prefers
+    // `best` on an EXACT tie -- ties go to the cost-driven result per controller resolution #1, since a
+    // tie means cost-driven is provably no worse and preferring it is the whole point of P2. Runtime:
+    // this doubles routing cost for every cost_driven=true call (~1x extra legacy pass on top of the
+    // negotiation rounds), accepted against the measured 45-300x contest-budget headroom in exchange for
+    // the design's "regression is impossible by the comparison gate" guarantee (§9 ordering rationale).
+    runLegacyPass(result);
+    if (roundCost(best) <= roundCost(result)) {
+        return best;
     }
-    return best;
+    result.used_fallback = true;
+    return result;
 }
 
 }  // namespace efgr
