@@ -583,6 +583,135 @@ void testAdaptiveChunkingDeterministic() {
     std::cout << "testAdaptiveChunkingDeterministic ok\n";
 }
 
+// P2 Task 4 (design p2-design.md §4.1-4.4; plan Global Constraint 9 negotiated rip-up/reroute):
+// two bundles contending one narrow channel where an alternate slack path exists, but ONLY for the
+// heavier bundle -- forcing genuine round-0 overflow that negotiation (history-driven reroute of
+// the bundle that HAS an alternative) then clears.
+//
+// Topology (a "ladder" with a wall separating two channels, hand-derived and CONFIRMED against the
+// real routeProblem via a scratch EFGR_ROUTE_TRACE harness before being transcribed here -- see the
+// T4 report for the raw trace):
+//   SRC_A (bottom rail, x=[60,161), y=[0,10)): touches BOTH the narrow shared channel (x=[100,140),
+//     w=40 -> vcap=1000) AND the wide alternate channel (x=[161,300), w=139 -> vcap=3475, reached via
+//     a deliberate 1-unit sliver overlap) -- its centroid sits much closer to the narrow channel, so
+//     it is the cheaper pick whenever both are slack.
+//   SRC_B (x=[60,100), y=[10,90)): touches ONLY the narrow shared channel (CAP_TOP seals its column
+//     so no shortcut channel forms that would let it reach TGT for free, and TGT itself is shrunk to
+//     x=[100,300) so it never touches SRC_B directly).
+//   WALL (x=[140,160)) separates the two channels so they are not graph-adjacent to each other.
+//   TGT (x=[100,300), y=[90,100)) touches both channels.
+// Bundle A (900 nets, source=SRC_A) is heavier than bundle B (400 nets, source=SRC_B), so it is
+// routed FIRST every round (design §4.1 nets-descending order). Round 0 (all-zero history): A finds
+// the narrow channel cheaper (closer) than the alternate and takes all 900 nets there (900<1000, no
+// overflow for A alone); B then has nowhere else to go (its ONLY reachable resource is the SAME
+// narrow channel) and is forced through it too, pushing usage to 1300 > 1000 cap -- confirmed via
+// trace: round 0 channel_overflow = ((1300-1000)/25)*80 = 960.0 um^2, open_routes=0. After round 0,
+// the narrow channel ended over capacity, so history[narrow][vertical] is bumped
+// (kHistoryBump*(1300-1000)/1000 = 0.3). In round 1, A is re-priced with that history surcharge
+// (kOverflowAreaWeight * 0.3 * 900 = 2.7e8), which dwarfs the small extra wireCost distance of the
+// alternate channel (alpha=0.001 keeps the base term negligible against 1e6-scale area terms) -- A's
+// cheapest path flips entirely to the alternate channel, freeing the narrow channel for B alone
+// (400 < 1000 cap) -- confirmed via trace: round 1 channel_overflow = 0.0, and this round has zero
+// bumps (any_bump=false) so the early-exit (design requirement 6) stops before round 2.
+struct NegotiationFixture {
+    Problem problem;
+    Placement placement;
+};
+
+NegotiationFixture makeNegotiationFixture() {
+    NegotiationFixture f;
+    Problem& p = f.problem;
+    p.outline_w = 300.0;
+    p.outline_h = 100.0;
+    p.alpha = 0.001;  // small but nonzero: distance differences matter without drowning area terms
+
+    Block src_a = makeChannelBlock("SRC_A", 101.0, 10.0);
+    Block src_b = makeChannelBlock("SRC_B", 40.0, 80.0);
+    Block cap_top = makeChannelBlock("CAP_TOP", 40.0, 10.0);
+    Block wall = makeChannelBlock("WALL", 20.0, 80.0);
+    Block tgt = makeChannelBlock("TGT", 200.0, 10.0);
+
+    p.blocks = {src_a, src_b, cap_top, wall, tgt};
+    p.block_index = {{"SRC_A", 0}, {"SRC_B", 1}, {"CAP_TOP", 2}, {"WALL", 3}, {"TGT", 4}};
+
+    Bundle bA;
+    bA.source = 0;  // SRC_A
+    bA.target = 4;  // TGT
+    bA.nets = 900;
+    Bundle bB;
+    bB.source = 1;  // SRC_B
+    bB.target = 4;  // TGT
+    bB.nets = 400;
+    p.bundles = {bA, bB};  // heavier bundle first is also the nets-descending order T4 requires
+
+    Placement& pl = f.placement;
+    pl.rects = {
+        Rect{60.0, 0.0, 101.0, 10.0},    // SRC_A: x=[60,161)
+        Rect{60.0, 10.0, 40.0, 80.0},    // SRC_B: x=[60,100), y=[10,90)
+        Rect{60.0, 90.0, 40.0, 10.0},    // CAP_TOP: x=[60,100), y=[90,100)
+        Rect{140.0, 10.0, 20.0, 80.0},   // WALL: x=[140,160)
+        Rect{100.0, 90.0, 200.0, 10.0},  // TGT: x=[100,300)
+    };
+    pl.aspect.assign(pl.rects.size(), 1.0);
+    return f;
+}
+
+// Fixture (a) the core RED->GREEN assertion: negotiated cost_driven=true routing must reach
+// channel_overflow == 0 (strictly below round 0's provably-nonzero 960.0, see the fixture comment
+// above), by rerouting bundle A off the contended channel once history prices it out in round 1.
+void testNegotiationClearsRoundZeroOverflow() {
+    NegotiationFixture f = makeNegotiationFixture();
+    RoutingResult r = routeProblem(f.problem, f.placement, /*cost_driven=*/true);
+    assert(r.open_routes == 0);
+
+    // The honesty check (documented in the T4 report): with kNegotiationRounds temporarily forced
+    // to 1, this exact assertion fails (best-round == round 0's 960.0 um^2 overflow) -- proving the
+    // test actually exercises multi-round negotiation, not merely round 0's adaptive chunking.
+    assert(r.channel_overflow == 0.0);
+    assert(r.feedthrough_mismatch == 0.0);
+
+    // Confirm the MECHANISM, not just the aggregate number: bundle A must have vacated the narrow
+    // shared channel (vcap=1000, w=40,h=80) for the wide alternate (vcap=3475, w=139,h=90) once
+    // history priced the shared one out, leaving the shared channel at exactly bundle B's 400 nets.
+    bool found_narrow = false, found_alt = false;
+    for (const auto& ch : r.channels) {
+        if (std::abs(ch.rect.w - 40.0) < kEps && std::abs(ch.rect.h - 80.0) < kEps) {
+            found_narrow = true;
+            assert(std::abs(ch.vertical_usage - 400.0) < kEps);
+        }
+        if (std::abs(ch.rect.w - 139.0) < kEps && std::abs(ch.rect.h - 90.0) < kEps) {
+            found_alt = true;
+            assert(std::abs(ch.vertical_usage - 900.0) < kEps);
+        }
+    }
+    assert(found_narrow);
+    assert(found_alt);
+    std::cout << "testNegotiationClearsRoundZeroOverflow ok (overflow=" << r.channel_overflow << ")\n";
+}
+
+// Fixture (b): determinism -- two calls of the negotiated router on the identical (problem,
+// placement) must be bit-identical (design §4.4/§6, GC6 purity: history/usage/order are all
+// call-local, no static/global/RNG). Checks node_paths, per-route wirelength, and the aggregate
+// overflow/mismatch/open_routes fields element-wise, matching the T2/T3 determinism fixtures' shape.
+void testNegotiatedRoutingDeterministic() {
+    NegotiationFixture f = makeNegotiationFixture();
+
+    RoutingResult r1 = routeProblem(f.problem, f.placement, /*cost_driven=*/true);
+    RoutingResult r2 = routeProblem(f.problem, f.placement, /*cost_driven=*/true);
+
+    assert(r1.open_routes == r2.open_routes);
+    assert(std::abs(r1.total_wirelength - r2.total_wirelength) < kEps);
+    assert(std::abs(r1.channel_overflow - r2.channel_overflow) < kEps);
+    assert(std::abs(r1.feedthrough_mismatch - r2.feedthrough_mismatch) < kEps);
+    assert(r1.routes.size() == r2.routes.size());
+    for (std::size_t i = 0; i < r1.routes.size(); ++i) {
+        assert(r1.routes[i].node_path == r2.routes[i].node_path);
+        assert(r1.routes[i].nets == r2.routes[i].nets);
+        assert(std::abs(r1.routes[i].wirelength - r2.routes[i].wirelength) < kEps);
+    }
+    std::cout << "testNegotiatedRoutingDeterministic ok\n";
+}
+
 }  // namespace
 
 int main() {
@@ -603,6 +732,8 @@ int main() {
     testAdaptiveChunkingSplitsAtBottleneck();
     testAdaptiveChunkingRespectsMaxChunksWithNoAlternative();
     testAdaptiveChunkingDeterministic();
-    std::cout << "P2 T0+T1+T2+T3 regressions passed\n";
+    testNegotiationClearsRoundZeroOverflow();
+    testNegotiatedRoutingDeterministic();
+    std::cout << "P2 T0+T1+T2+T3+T4 regressions passed\n";
     return 0;
 }

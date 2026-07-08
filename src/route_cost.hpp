@@ -88,4 +88,25 @@ constexpr int kChunkCeil = 1000;
 // against). Matches design §5.3's `max(1, nets/64)` verbatim.
 inline double kMinChunkFor(int bundle_nets) { return std::max(1.0, bundle_nets / 64.0); }
 
+// P2 Task 4 (design p2-design.md §4.1-§4.4; plan Global Constraint 9): named constants for the
+// negotiated rip-up/reroute outer loop around the cost_driven=true bundle-routing pass in
+// routing.cpp. cost_driven=false is entirely unaffected -- these constants are only read from the
+// negotiation loop.
+
+// Number of full rip-up/reroute rounds (design §4.1). Round 0 has all-zero history (no bumps have
+// happened yet), so it reproduces the T3 adaptive-chunking router exactly; later rounds differ only
+// because history (below) has accumulated non-zero surcharges.
+constexpr int kNegotiationRounds = 3;
+
+// Per-round history decay applied at the START of each round (round >= 1), design §4.2: standard
+// PathFinder hygiene so a resource that is no longer congested relaxes back instead of staying
+// permanently poisoned by an earlier round's spike.
+constexpr double kHistoryDecay = 0.5;
+
+// Per-round history bump applied AFTER each round to every resource that ended the round over
+// capacity (design §4.2). The design leaves this constant's exact magnitude unpinned ("for
+// robustness"); 1.0 is a tuning knob to be measured/re-tuned at T7's sweep, not a value derived from
+// the scorer's own units the way kOverflowAreaWeight/kFtMismatchWeight are.
+constexpr double kHistoryBump = 1.0;
+
 }  // namespace efgr
