@@ -414,9 +414,12 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
         }
     };
 
-    if (!cost_driven) {
-        // Legacy path (byte-identical to pre-T4, the hard global constraint): unchanged in shape,
-        // routes straight into the outer `result` with no rounds/history.
+    // Legacy two-pass feasibility routing (channels-first pass 0, soft-block-feedthrough-fallback
+    // pass 1 via `routeChunk`/`findRoutePath` above): fixed ceil(nets/1000) chunking, routed straight
+    // into `rr`. Byte-identical in shape to pre-T4. Shared by the cost_driven=false path (below,
+    // unchanged) and, as of P2 Task 5 (design p2-design.md §9 T5; plan Global Constraint 10
+    // feasibility fallback), the cost_driven=true never-open-route fallback further down.
+    auto runLegacyPass = [&](RoutingResult& rr) {
         for (const auto& bundle : problem.bundles) {
             int split_count = std::max(1, static_cast<int>(std::ceil(bundle.nets / 1000.0)));
             split_count = std::min(split_count, 8);
@@ -425,11 +428,17 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
                 int parts_left = split_count - part;
                 int nets = (remaining + parts_left - 1) / parts_left;
                 remaining -= nets;
-                Route route = routeChunk(result, bundle, nets);
-                result.routes.push_back(route);
+                Route route = routeChunk(rr, bundle, nets);
+                rr.routes.push_back(route);
             }
         }
-        computeOverflowAndMismatch(result);
+        computeOverflowAndMismatch(rr);
+    };
+
+    if (!cost_driven) {
+        // Legacy path (byte-identical to pre-T4, the hard global constraint): unchanged in shape,
+        // routes straight into the outer `result` with no rounds/history.
+        runLegacyPass(result);
         return result;
     }
 
@@ -600,6 +609,22 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
         if (!any_bump) break;  // provably-identical early exit, see comment above
     }
 
+    // P2 Task 5 (design p2-design.md §9 T5; plan Global Constraint 10 feasibility fallback): never
+    // emit an open route. `findRoutePath`'s reachability gates (`allowed`/`endpointEdgeAllowed`) are
+    // identical between cost_driven's single unified pass (allow_soft always true) and the legacy
+    // two-pass router's pass 1 (allow_soft true), so a bundle chunk cost_driven cannot route is, by
+    // construction, equally unroutable by legacy -- an open `best` can never be rescued into a fully
+    // routed result by the fallback, only guaranteed no WORSE. If every negotiation round still left
+    // >=1 route open, fall back to the legacy two-pass router wholesale: `result` already carries the
+    // channel geometry extracted at the top of this call and has not been mutated since (the
+    // negotiation loop only ever writes its own per-round `round_result` copies), so it is the correct
+    // receptacle. This makes cost_driven=true Pareto-safe on the one hard-fail axis: it can never
+    // return MORE open routes than cost_driven=false alone would (design §9: "routeProblem picks the
+    // better (or falls back on open routes)... regression is impossible by the comparison gate").
+    if (best.open_routes > 0) {
+        runLegacyPass(result);
+        return result;
+    }
     return best;
 }
 

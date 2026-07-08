@@ -713,6 +713,136 @@ void testNegotiatedRoutingDeterministic() {
     std::cout << "testNegotiatedRoutingDeterministic ok\n";
 }
 
+// P2 Task 5 (design p2-design.md §9 T5; plan Global Constraint 10 comparison gate/feasibility
+// fallback): "never emit an open route" guarantee. `findRoutePath`'s reachability gates
+// (`allowed`/`endpointEdgeAllowed`, routing.cpp) are IDENTICAL between the legacy two-pass router's
+// pass 1 (channels + soft blocks, allow_soft=true) and cost_driven's single unified pass
+// (allow_soft=true unconditionally) -- same node set, same port-edge checks, same non-negative edge
+// costs -- so Dijkstra reachability (path exists vs. not) can never differ between the two: a bundle
+// unroutable by cost_driven is, by construction, EQUALLY unroutable by legacy, and vice versa. That
+// makes "legacy succeeds, cost-driven fails" NOT constructible (confirmed against the running code,
+// not just by inspection -- see the T5 report). Per the brief's fallback clause, this is instead a
+// CHARACTERIZATION fixture: a genuine topology dead end (unroutable by BOTH), used to exercise the
+// T5 fallback CODE PATH (best.open_routes>0 after all negotiation rounds) and prove
+// `routeProblem(...,true)` is never worse than `routeProblem(...,false)` -- the returned result, once
+// engaged, is the legacy result WHOLESALE (bit-for-bit), not a partial/Frankenstein merge, and a
+// co-existing ROUTABLE bundle in the same call still routes correctly.
+//
+// Layout (single row, height 40, outline 200x40): A[0,40) -- CH[40,60) -- B[60,100) -- WALL[100,140)
+// -- D_SRC[140,160) -- D_TGT[160,200). A and B are channel-connected only via the [40,60) gap; B,
+// WALL, D_SRC, D_TGT tile the rest of the row with zero gaps, so D_SRC/D_TGT form an isolated pocket
+// reachable only from EACH OTHER, by direct abut on D_TGT's LEFT edge (edge code 1, `edgeFromTo`).
+// D_TGT.port_edges = {2} (TOP only) excludes that edge code entirely, so no traversable edge into
+// D_TGT exists anywhere in the graph -- a genuine, port-blocked dead end (brief's suggested
+// construction: "all finite-cost edges port-blocked").
+struct DeadEndFixture {
+    Problem problem;
+    Placement placement;
+};
+
+DeadEndFixture makeDeadEndFixture() {
+    DeadEndFixture f;
+    Problem& p = f.problem;
+    p.outline_w = 200.0;
+    p.outline_h = 40.0;
+    p.alpha = 1.0;
+
+    Block a = makeChannelBlock("A", 40.0, 40.0);
+    Block b = makeChannelBlock("B", 40.0, 40.0);
+    Block wall = makeChannelBlock("WALL", 40.0, 40.0);
+    Block d_src = makeChannelBlock("D_SRC", 20.0, 40.0);
+    Block d_tgt = makeChannelBlock("D_TGT", 40.0, 40.0);
+    d_tgt.port_edges = {2};  // TOP only -- excludes D_SRC's LEFT-edge (code 1) touch entirely
+
+    p.blocks = {a, b, wall, d_src, d_tgt};
+    p.block_index = {{"A", 0}, {"B", 1}, {"WALL", 2}, {"D_SRC", 3}, {"D_TGT", 4}};
+
+    Bundle ok;
+    ok.source = 0;  // A
+    ok.target = 1;  // B
+    ok.nets = 10;
+    Bundle dead;
+    dead.source = 3;  // D_SRC
+    dead.target = 4;  // D_TGT
+    dead.nets = 10;
+    p.bundles = {ok, dead};
+
+    Placement& pl = f.placement;
+    pl.rects = {
+        Rect{0.0, 0.0, 40.0, 40.0},    // A: x=[0,40)
+        Rect{60.0, 0.0, 40.0, 40.0},   // B: x=[60,100)
+        Rect{100.0, 0.0, 40.0, 40.0},  // WALL: x=[100,140)
+        Rect{140.0, 0.0, 20.0, 40.0},  // D_SRC: x=[140,160)
+        Rect{160.0, 0.0, 40.0, 40.0},  // D_TGT: x=[160,200)
+    };
+    pl.aspect.assign(pl.rects.size(), 1.0);
+    return f;
+}
+
+void testFeasibilityFallbackNeverWorseThanLegacyOnGenuineDeadEnd() {
+    DeadEndFixture f = makeDeadEndFixture();
+
+    RoutingResult legacy = routeProblem(f.problem, f.placement, /*cost_driven=*/false);
+    // Establish genuineness: the dead end is unroutable by the pre-P2 baseline too (both passes
+    // share the same port-edge gate).
+    assert(legacy.open_routes == 1);
+
+    RoutingResult cd = routeProblem(f.problem, f.placement, /*cost_driven=*/true);
+    // T5's never-worse guarantee: cost-driven's negotiation loop hits the SAME dead end every round
+    // (best.open_routes stays 1 for all kNegotiationRounds), so the fallback engages and the returned
+    // result must be no worse than legacy's own open-route count.
+    assert(cd.open_routes == legacy.open_routes);
+
+    // Prove the fallback substituted the legacy result WHOLESALE (not a partial merge): aggregate
+    // fields match legacy's bit-for-bit.
+    assert(cd.routes.size() == legacy.routes.size());
+    assert(std::abs(cd.total_wirelength - legacy.total_wirelength) < kEps);
+    assert(std::abs(cd.channel_overflow - legacy.channel_overflow) < kEps);
+    assert(std::abs(cd.feedthrough_mismatch - legacy.feedthrough_mismatch) < kEps);
+
+    // The co-existing OK bundle (A->B) still routed successfully in both -- the fallback didn't
+    // collateral-damage an otherwise-healthy bundle.
+    int ok_routes_legacy = 0, ok_routes_cd = 0;
+    for (const auto& r : legacy.routes) {
+        if (r.source == 0 && r.target == 1) {
+            assert(!r.open);
+            ++ok_routes_legacy;
+        }
+    }
+    for (const auto& r : cd.routes) {
+        if (r.source == 0 && r.target == 1) {
+            assert(!r.open);
+            ++ok_routes_cd;
+        }
+    }
+    assert(ok_routes_legacy > 0);
+    assert(ok_routes_cd == ok_routes_legacy);
+
+    // Decisive wholesale-substitution check on the DEAD bundle's own open route: legacy's
+    // `findRoutePath` intentionally leaves an open route's `.nets` at its 0 default (routing.cpp's
+    // "route.nets is intentionally NOT set here" comment -- `routeChunk` returns it as-is on an
+    // empty node_path, never reaching `commitRoutePath`). The negotiation loop's OWN exhausted-probe
+    // fallthrough, by contrast, explicitly sets `probe.nets = remaining` before pushing it -- so
+    // WITHOUT the T5 fallback, cost_driven's open route for D_SRC->D_TGT reports nets=10, disagreeing
+    // with legacy's nets=0, proving `cd` is NOT actually legacy's result even though the aggregate
+    // scalars above happen to coincide for this fixture. This is the one field that only matches once
+    // T5 substitutes the legacy RoutingResult wholesale.
+    const Route* legacy_dead = nullptr;
+    const Route* cd_dead = nullptr;
+    for (const auto& r : legacy.routes) {
+        if (r.source == 3 && r.target == 4) legacy_dead = &r;
+    }
+    for (const auto& r : cd.routes) {
+        if (r.source == 3 && r.target == 4) cd_dead = &r;
+    }
+    assert(legacy_dead != nullptr && cd_dead != nullptr);
+    assert(legacy_dead->open && cd_dead->open);
+    assert(cd_dead->nets == legacy_dead->nets);
+
+    std::cout << "testFeasibilityFallbackNeverWorseThanLegacyOnGenuineDeadEnd ok (open_routes="
+              << cd.open_routes << ")\n";
+}
+
 }  // namespace
 
 int main() {
@@ -735,6 +865,7 @@ int main() {
     testAdaptiveChunkingDeterministic();
     testNegotiationClearsRoundZeroOverflow();
     testNegotiatedRoutingDeterministic();
-    std::cout << "P2 T0+T1+T2+T3+T4 regressions passed\n";
+    testFeasibilityFallbackNeverWorseThanLegacyOnGenuineDeadEnd();
+    std::cout << "P2 T0+T1+T2+T3+T4+T5 regressions passed\n";
     return 0;
 }
