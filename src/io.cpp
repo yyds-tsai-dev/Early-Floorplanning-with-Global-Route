@@ -182,6 +182,7 @@ Problem parseProblem(const std::string& path) {
                     auto dst_it = p.block_index.find(dst_name);
                     int nets = static_cast<int>(std::llround(parseDouble(rows[r][c])));
                     if (dst_it != p.block_index.end() && nets > 0) {
+                        if (src_it->second == dst_it->second) continue;  // QA A44: diagonal entries are data errata
                         p.bundles.push_back(Bundle{src_it->second, dst_it->second, nets});
                     }
                 }
