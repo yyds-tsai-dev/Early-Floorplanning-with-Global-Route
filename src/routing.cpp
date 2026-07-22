@@ -9,6 +9,7 @@
 
 #include "ft.hpp"
 #include "route_cost.hpp"
+#include "route_geometry.hpp"
 
 namespace efgr {
 namespace {
@@ -19,26 +20,6 @@ bool positiveTouch(const Rect& a, const Rect& b) {
     bool horizontal = (std::abs(a.top() - b.y) < kEps || std::abs(b.top() - a.y) < kEps) &&
                       std::min(a.right(), b.right()) - std::max(a.x, b.x) > kEps;
     return vertical || horizontal;
-}
-
-int edgeFromTo(const Rect& a, const Rect& b) {
-    if (std::abs(a.x - b.right()) < kEps) return 1;
-    if (std::abs(a.top() - b.y) < kEps) return 2;
-    if (std::abs(a.right() - b.x) < kEps) return 3;
-    return 4;
-}
-
-std::pair<double, double> guidePoint(const Rect& a, const Rect& b) {
-    if (std::abs(a.right() - b.x) < kEps || std::abs(b.right() - a.x) < kEps) {
-        double x = std::abs(a.right() - b.x) < kEps ? a.right() : b.right();
-        double lo = std::max(a.y, b.y);
-        double hi = std::min(a.top(), b.top());
-        return {x, (lo + hi) * 0.5};
-    }
-    double y = std::abs(a.top() - b.y) < kEps ? a.top() : b.top();
-    double lo = std::max(a.x, b.x);
-    double hi = std::min(a.right(), b.right());
-    return {(lo + hi) * 0.5, y};
 }
 
 bool portAllows(const Block& block, int edge) {
@@ -310,27 +291,25 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
         route.nets = nets;
         route.node_path = node_path;
 
-        std::vector<std::pair<double, double>> guides;
-        for (std::size_t i = 0; i + 1 < route.node_path.size(); ++i) {
-            int a = route.node_path[i], b = route.node_path[i + 1];
-            guides.push_back(guidePoint(rects[a], rects[b]));
+        // Beta Task 1 (byte-identical refactor, .superpowers/sdd/beta-task-1-brief.md): WL + per-
+        // channel usage accumulation now lives in route_geometry.hpp's accumulatePathUsage (verbatim
+        // transplant of the former inline loops), so a future .cfg re-scorer can reuse it.
+        // node_channels[i] is non-null exactly when route.node_path[i] >= n_blocks, matching the
+        // original loop's `node >= n_blocks` test.
+        std::vector<Rect> node_rects;
+        std::vector<Channel*> node_channels;
+        node_rects.reserve(route.node_path.size());
+        node_channels.reserve(route.node_path.size());
+        for (int node : route.node_path) {
+            node_rects.push_back(rects[node]);
+            node_channels.push_back(node >= n_blocks ? &rr.channels[node - n_blocks] : nullptr);
         }
-        for (std::size_t i = 0; i + 1 < guides.size(); ++i) {
-            route.wirelength += manhattan(guides[i].first, guides[i].second, guides[i + 1].first, guides[i + 1].second) * nets;
-        }
+        route.wirelength = accumulatePathUsage(node_rects, node_channels, nets);
 
         for (std::size_t i = 1; i + 1 < route.node_path.size(); ++i) {
             int node = route.node_path[i];
             if (node < n_blocks && isSoft(problem.blocks[node].type)) {
                 rr.soft_feedthrough_nets[node] += nets;
-            }
-            if (node >= n_blocks && i - 1 < guides.size() && i < guides.size()) {
-                auto& ch = rr.channels[node - n_blocks];
-                double dx = std::abs(guides[i].first - guides[i - 1].first);
-                double dy = std::abs(guides[i].second - guides[i - 1].second);
-                if (dx > kEps) ch.horizontal_usage += nets;
-                if (dy > kEps) ch.vertical_usage += nets;
-                ch.usage = std::max(ch.horizontal_usage, ch.vertical_usage);
             }
         }
 
