@@ -14,6 +14,7 @@ struct SearchOptions {
     int exact_interval = 50;
     double initial_temperature = 1000000.0;
     double cooling = 0.995;
+    double time_budget_sec = 0.0;  // 0 = disabled; wall-clock stop, checked every 64 iters
 };
 
 struct SearchResult {

@@ -1,5 +1,6 @@
 #include "search.hpp"
 
+#include <chrono>
 #include <cmath>
 #include <random>
 #include <sstream>
@@ -161,8 +162,16 @@ OutlineSweepResult outlineSweep(const Problem& problem, const Placement& base, c
     double last_target_w = -1.0;
     double last_target_h = -1.0;
     for (double margin : kMargins) {
-        double target_w = tight_w + margin * (problem.outline_w - tight_w);
-        double target_h = tight_h + margin * (problem.outline_h - tight_h);
+        // Part D (T5 integer-leak rider): anchorAtOutline preserves the caller's EXACT target
+        // (T7.1 contract), so a fractional margin-rung target would leak into
+        // result.best_placement's outline stamp AND its re-anchored edge x/y. MAX
+        // (problem.outline_w/h) is integer, so ceil-then-clamp keeps every rung's target integral
+        // and <= MAX. m=0.0 targets tight_w/h, already integer from shrinkWrapOutline's rule-5
+        // ceiling, so this is a no-op there -- the strictly-Pareto-safe m=0.0 rung is unchanged.
+        double target_w =
+            std::min(problem.outline_w, std::ceil(tight_w + margin * (problem.outline_w - tight_w) - kEps));
+        double target_h =
+            std::min(problem.outline_h, std::ceil(tight_h + margin * (problem.outline_h - tight_h) - kEps));
         // Skip a duplicate rung (e.g. tight == MAX already, so every larger margin's target is
         // identical to m=0.0's) -- avoids a redundant exact-score call; the cache would dedupe it
         // anyway via placementKey, but skipping keeps the sweep's trial count honest.
@@ -387,7 +396,21 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
 
     double temp = std::max(1.0, options.initial_temperature);
     int exact_interval = std::max(1, options.exact_interval);
-    for (int iter = 1; iter <= options.iters; ++iter) {
+    // Beta Task 5: wall-clock budget. When enabled, time (not the iter default) is the binding
+    // stop -- raise the iteration ceiling so the steady_clock check below is what ends the loop.
+    // Budget off (== 0) leaves the bound and reported iteration count byte-identical to the
+    // pre-budget path (result.iterations stays the value stamped from options.iters above).
+    const int iter_bound = options.time_budget_sec > 0.0 ? std::max(options.iters, 2000000)
+                                                         : std::max(0, options.iters);
+    const auto budget_start = std::chrono::steady_clock::now();
+    int iters_run = 0;
+    for (int iter = 1; iter <= iter_bound; ++iter) {
+        if (options.time_budget_sec > 0.0 && (iter & 63) == 0) {
+            double elapsed =
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - budget_start).count();
+            if (elapsed >= options.time_budget_sec) break;
+        }
+        iters_run = iter;
         PlacementState candidate = current;
         engine.mutate(problem, candidate, rng);
         if (!engine.isValidState(problem, candidate)) continue;
@@ -415,6 +438,9 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
         }
         temp *= options.cooling;
     }
+    // Report the iterations actually executed when time bounded the run; budget off keeps the
+    // options.iters value stamped above, preserving the existing --iters summary line verbatim.
+    if (options.time_budget_sec > 0.0) result.iterations = iters_run;
 
     for (const auto& candidate : top_candidates) {
         // T7 (design §1.4 elite path): replaces the single tight-stamp exactCached call with a
@@ -464,6 +490,10 @@ SearchResult runHybridPlacementSearch(const Problem& problem, const SearchOption
     sp_options.iters = std::max(1, options.iters / 2);
     bstar_options.iters = std::max(1, options.iters - sp_options.iters);
     bstar_options.seed = options.seed + 1;
+    // Beta Task 5: split any wall-clock budget evenly across the two legs (the copies already carry
+    // options.time_budget_sec; halve it here). Budget off (0) halves to 0 -> both legs iter-bounded.
+    sp_options.time_budget_sec = options.time_budget_sec * 0.5;
+    bstar_options.time_budget_sec = options.time_budget_sec * 0.5;
 
     SearchResult sp_result = runPlacementSearch(problem, *sp, sp_options);
     std::mt19937 rng(bstar_options.seed);

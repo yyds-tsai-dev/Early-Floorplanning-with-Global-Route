@@ -1,6 +1,7 @@
 #include "eval.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <tuple>
 
 #include "ft.hpp"
@@ -217,8 +218,12 @@ Score exactScore(const Problem& problem, const Placement& placement, RoutingResu
     // code). anchorAtOutline anchors directly at the grown target (no bisection) instead.
     if (routing.open_routes > 0) {
         double margin = std::max(0.05, routing.channel_overflow / 25.0 / std::max(w, h));
-        double grown_w = std::min(problem.outline_w, w * (1.0 + margin));
-        double grown_h = std::min(problem.outline_h, h * (1.0 + margin));
+        // Part D (T5 integer-leak rider): the grown target feeds anchorAtOutline, which stamps it
+        // exactly -- ceil to integers (MAX is integer) so a winning grown outline stays integral in
+        // the emitted cfg and the score stays self-consistent with the golden rescorer's
+        // integer-outline recompute. Clamp to MAX, matching the fractional form this replaces.
+        double grown_w = std::min(problem.outline_w, std::ceil(w * (1.0 + margin) - kEps));
+        double grown_h = std::min(problem.outline_h, std::ceil(h * (1.0 + margin) - kEps));
 
         Problem ceiling = problem;
         ceiling.outline_w = grown_w;

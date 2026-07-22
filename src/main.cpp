@@ -35,6 +35,13 @@ std::string argString(int argc, char** argv, const std::string& name, const std:
     return fallback;
 }
 
+bool hasFlag(int argc, char** argv, const std::string& name) {
+    for (int i = 1; i < argc; ++i) {
+        if (argv[i] == name) return true;
+    }
+    return false;
+}
+
 std::string defaultOutputPath(const std::string& input_path) {
     const std::size_t slash = input_path.find_last_of("/\\");
     const std::size_t dot = input_path.find_last_of('.');
@@ -50,7 +57,7 @@ int main(int argc, char** argv) {
     if (argc < 2) {
         std::cerr << "usage: " << argv[0]
                   << " input.csv [output.cfg] [--engine sp|bstar|hybrid] [--iters N] [--seed N] [--alpha X]"
-                  << " [--exact-interval N]\n";
+                  << " [--exact-interval N] [--time-budget S]\n";
         return 2;
     }
 
@@ -63,9 +70,28 @@ int main(int argc, char** argv) {
         options.iters = argInt(argc, argv, "--iters", 1000);
         options.seed = argInt(argc, argv, "--seed", 1);
         options.exact_interval = std::max(1, argInt(argc, argv, "--exact-interval", 50));
+        // Beta Task 5: baked sweep-selected beta defaults. A no-flag run uses the chosen wall-clock
+        // budget (time is the binding stop); an explicit --iters WITHOUT --time-budget selects
+        // deterministic iteration-bounded search (budget OFF) so every regression suite stays
+        // byte-reproducible. An explicit --time-budget always wins. kDefaultTimeBudgetSec and the
+        // --engine fallback below are the two sweep-selected knobs.
+        //
+        // scripts/sweep.sh over the 5 official cases: the iters=1000 reference (budget 0) minimizes
+        // checker_cost for BOTH engines. A wall-clock budget raises the iteration count, but the
+        // elite-pass cheap-score selection mis-ranks candidates under integer geometry (Task 4 known
+        // issue), so more iters inflate routed overflow and REGRESS checker_cost (e.g. hybrid case4
+        // 113.98M -> 162.87M at budget 15; bstar Sigma 273.5M -> ~325M). Best measured cell:
+        // engine=hybrid, budget 0 (Sigma checker_cost 252.7M vs bstar 273.5M). So the budget defaults
+        // OFF; --time-budget stays available for when that search interaction is fixed post-beta.
+        constexpr double kDefaultTimeBudgetSec = 0.0;
+        const bool has_iters = hasFlag(argc, argv, "--iters");
+        const bool has_budget = hasFlag(argc, argv, "--time-budget");
+        options.time_budget_sec = (has_iters && !has_budget)
+                                      ? 0.0
+                                      : argDouble(argc, argv, "--time-budget", kDefaultTimeBudgetSec);
         double alpha = argDouble(argc, argv, "--alpha", problem.alpha);
         problem.alpha = alpha;
-        std::string engine_name = argString(argc, argv, "--engine", "bstar");
+        std::string engine_name = argString(argc, argv, "--engine", "hybrid");
 
         SearchResult result;
         if (engine_name == "hybrid") {
