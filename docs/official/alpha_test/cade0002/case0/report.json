@@ -1,0 +1,1159 @@
+{
+  "pass": true,
+  "errors": [],
+  "warnings": [
+    {
+      "severity": "WARNING",
+      "code": "CHANNEL_OVERFLOW",
+      "message": "Channel CH6 overflow: H=969, V=0",
+      "objects": [
+        {
+          "type": "CH",
+          "id": "CH6"
+        }
+      ],
+      "path": {
+        "index": null,
+        "line_no": null,
+        "text": null,
+        "token_i": null,
+        "from": null,
+        "to": null
+      },
+      "geom": {
+        "aabb": [
+          600,
+          728.769,
+          1111.752,
+          730.0
+        ],
+        "detail": {
+          "demand_h": 1000,
+          "demand_v": 0,
+          "capacity_h": 30.775000000000002,
+          "capacity_v": 12793.800000000001,
+          "overflow_h": 969.225,
+          "overflow_v": 0,
+          "overflow_total": 969.225
+        }
+      },
+      "hint": "Horizontal overflow dominant: increase channel height or reroute"
+    }
+  ],
+  "summary": {
+    "total_blocks": 7,
+    "total_channels": 14,
+    "total_paths": 13,
+    "error_count": 0,
+    "warning_count": 1
+  },
+  "outline": {
+    "W": 2917,
+    "H": 2220,
+    "max_W": 2917,
+    "max_H": 2220
+  },
+  "outline_after_ft": {
+    "W": 2917.0,
+    "H": 2220.0,
+    "area": 6475740.0
+  },
+  "alpha": 0.2,
+  "outline_area_after_ft": 6475740.0,
+  "total_wirelength": 5958737.825000001,
+  "cost": 8063786.144858063,
+  "penalty": {
+    "channel_overflow_h_total": 969.225,
+    "channel_overflow_v_total": 0.0,
+    "channel_overflow_total": 969.225,
+    "channel_overflow_h_max": 969.225,
+    "channel_overflow_v_max": 0.0,
+    "channel_overflow_max": 969.225,
+    "channel_total_capacity": 316753.55,
+    "edge_location_violation_count": 0,
+    "edge_location_penalty_total": 0,
+    "edge_location_violations": [],
+    "base_cost": 7667487.565,
+    "overflow_ft_penalty": 396298.5798580632,
+    "edge_penalty_cost": 0.0
+  },
+  "channel": {
+    "capacity_per_um": 25,
+    "demand_h_by_channel": {
+      "CH1": 0.0,
+      "CH2": 0.0,
+      "CH3": 0.0,
+      "CH4": 1000.0,
+      "CH5": 0.0,
+      "CH6": 1000.0,
+      "CH7": 0.0,
+      "CH8": 500.0,
+      "CH9": 0.0,
+      "CH10": 5800.0,
+      "CH11": 4800.0,
+      "CH12": 0.0,
+      "CH13": 0.0,
+      "CH14": 0.0
+    },
+    "demand_v_by_channel": {
+      "CH1": 0.0,
+      "CH2": 0.0,
+      "CH3": 0.0,
+      "CH4": 0.0,
+      "CH5": 0.0,
+      "CH6": 0.0,
+      "CH7": 0.0,
+      "CH8": 2300.0,
+      "CH9": 0.0,
+      "CH10": 1400.0,
+      "CH11": 200.0,
+      "CH12": 0.0,
+      "CH13": 0.0,
+      "CH14": 0.0
+    },
+    "capacity_h_by_channel": {
+      "CH1": 16209.425,
+      "CH2": 34.425,
+      "CH3": 13250.0,
+      "CH4": 18250.0,
+      "CH5": 13250.0,
+      "CH6": 30.775000000000002,
+      "CH7": 13250.0,
+      "CH8": 3938.7999999999997,
+      "CH9": 13250.0,
+      "CH10": 41188.799999999996,
+      "CH11": 15000.0,
+      "CH12": 10550.0,
+      "CH13": 10550.0,
+      "CH14": 40500.0
+    },
+    "capacity_v_by_channel": {
+      "CH1": 10500.0,
+      "CH2": 4295.425,
+      "CH3": 4295.425,
+      "CH4": 204.575,
+      "CH5": 204.575,
+      "CH6": 12793.800000000001,
+      "CH7": 12793.800000000001,
+      "CH8": 6681.2,
+      "CH9": 6681.2,
+      "CH10": 11223.675,
+      "CH11": 10601.325,
+      "CH12": 10601.325,
+      "CH13": 4198.675,
+      "CH14": 12426.325
+    },
+    "overflow_h_by_channel": {
+      "CH1": 0.0,
+      "CH2": 0.0,
+      "CH3": 0.0,
+      "CH4": 0.0,
+      "CH5": 0.0,
+      "CH6": 969.225,
+      "CH7": 0.0,
+      "CH8": 0.0,
+      "CH9": 0.0,
+      "CH10": 0.0,
+      "CH11": 0.0,
+      "CH12": 0.0,
+      "CH13": 0.0,
+      "CH14": 0.0
+    },
+    "overflow_v_by_channel": {
+      "CH1": 0.0,
+      "CH2": 0.0,
+      "CH3": 0.0,
+      "CH4": 0.0,
+      "CH5": 0.0,
+      "CH6": 0.0,
+      "CH7": 0.0,
+      "CH8": 0.0,
+      "CH9": 0.0,
+      "CH10": 0.0,
+      "CH11": 0.0,
+      "CH12": 0.0,
+      "CH13": 0.0,
+      "CH14": 0.0
+    },
+    "overflow_by_channel": {
+      "CH1": 0.0,
+      "CH2": 0.0,
+      "CH3": 0.0,
+      "CH4": 0.0,
+      "CH5": 0.0,
+      "CH6": 969.225,
+      "CH7": 0.0,
+      "CH8": 0.0,
+      "CH9": 0.0,
+      "CH10": 0.0,
+      "CH11": 0.0,
+      "CH12": 0.0,
+      "CH13": 0.0,
+      "CH14": 0.0
+    },
+    "overflow_h_total": 969.225,
+    "overflow_v_total": 0.0,
+    "overflow_total": 969.225,
+    "overflow_h_max": 969.225,
+    "overflow_v_max": 0.0,
+    "overflow_max": 969.225
+  },
+  "ft": {
+    "nets_by_block": {
+      "BLK01": 0.0,
+      "BLK02": 0.0,
+      "BLK03": 0.0,
+      "BLK04": 0.0,
+      "BLK05": 0.0,
+      "BLK06": 0.0,
+      "BLK07": 0.0
+    },
+    "rate_by_block": {
+      "BLK01": 0.2,
+      "BLK02": 0.2,
+      "BLK03": 0.2,
+      "BLK04": 0.2,
+      "BLK05": 0.2,
+      "BLK06": 0.2,
+      "BLK07": 0.2
+    },
+    "deltaH_by_block": {
+      "BLK01": 0.0,
+      "BLK02": 0.0,
+      "BLK03": 0.0,
+      "BLK04": 0.0,
+      "BLK05": 0.0,
+      "BLK06": 0.0,
+      "BLK07": 0.0
+    },
+    "deltaW_by_block": {
+      "BLK01": 0.0,
+      "BLK02": 0.0,
+      "BLK03": 0.0,
+      "BLK04": 0.0,
+      "BLK05": 0.0,
+      "BLK06": 0.0,
+      "BLK07": 0.0
+    },
+    "deltaHgt_by_block": {
+      "BLK01": 0.0,
+      "BLK02": 0.0,
+      "BLK03": 0.0,
+      "BLK04": 0.0,
+      "BLK05": 0.0,
+      "BLK06": 0.0,
+      "BLK07": 0.0
+    },
+    "base_area_by_block": {
+      "BLK01": 354060.0,
+      "BLK02": 409985.0,
+      "BLK03": 920640.0,
+      "BLK04": 399000.0,
+      "BLK05": 431211.0,
+      "BLK06": 709216.0,
+      "BLK07": 372949.0
+    },
+    "ft_area_by_block": {
+      "BLK01": 354060.0,
+      "BLK02": 409985.0,
+      "BLK03": 920640.0,
+      "BLK04": 399000.0,
+      "BLK05": 431211.0,
+      "BLK06": 709216.0,
+      "BLK07": 372949.00000000006
+    },
+    "delta_area_by_block": {
+      "BLK01": 0.0,
+      "BLK02": 0.0,
+      "BLK03": 0.0,
+      "BLK04": 0.0,
+      "BLK05": 0.0,
+      "BLK06": 0.0,
+      "BLK07": 5.820766091346741e-11
+    },
+    "delta_area_percent_by_block": {
+      "BLK01": 0.0,
+      "BLK02": 0.0,
+      "BLK03": 0.0,
+      "BLK04": 0.0,
+      "BLK05": 0.0,
+      "BLK06": 0.0,
+      "BLK07": 1.5607405010729994e-14
+    },
+    "soft_aspect_ratio_by_block": {
+      "BLK02": 1.0,
+      "BLK05": 1.0,
+      "BLK07": 1.0
+    },
+    "soft_dimensions_by_block": {
+      "BLK02": {
+        "w": 640.3007106040099,
+        "h": 640.3007106040099
+      },
+      "BLK05": {
+        "w": 656.6665820642924,
+        "h": 656.6665820642924
+      },
+      "BLK07": {
+        "w": 610.695505141474,
+        "h": 610.695505141474
+      }
+    },
+    "illegal_ft_blocks": []
+  },
+  "conn_check": {
+    "matrix_sum": 7400.0,
+    "path_sum": 7400.0,
+    "mismatch_pairs": [],
+    "diag_nonzero": [],
+    "undirected_check": true,
+    "valid": true
+  },
+  "viz": {
+    "enabled": true,
+    "html": true,
+    "outputs": [
+      "case0/viz/floorplan.html",
+      "case0/viz/channel_overflow.html",
+      "case0/viz/path_0.html",
+      "case0/viz/path_1.html",
+      "case0/viz/path_2.html",
+      "case0/viz/path_3.html",
+      "case0/viz/path_4.html"
+    ],
+    "plotly_available": false,
+    "renderer": "svg"
+  },
+  "routing_details": {
+    "valid": true,
+    "path_details": [
+      {
+        "path_idx": 0,
+        "src": "BLK02",
+        "dst": "BLK03",
+        "nets": 900,
+        "steps": [
+          {
+            "step": 0,
+            "type": "cross_rect",
+            "rect1": "BLK02",
+            "edge1": 2,
+            "rect2": "CH8",
+            "edge2": 4,
+            "adjacent": true,
+            "gap": 0.0,
+            "overlap_length": 267.248,
+            "borderline": false,
+            "reason": "connected"
+          },
+          {
+            "step": 1,
+            "type": "internal_turn",
+            "rect": "CH8",
+            "edge1": 4,
+            "edge2": 2,
+            "legal": true,
+            "reason": "CH"
+          },
+          {
+            "step": 2,
+            "type": "cross_rect",
+            "rect1": "CH8",
+            "edge1": 2,
+            "rect2": "BLK03",
+            "edge2": 4,
+            "adjacent": true,
+            "gap": 0.0,
+            "overlap_length": 267.248,
+            "borderline": false,
+            "reason": "connected"
+          }
+        ],
+        "borderline_steps": []
+      },
+      {
+        "path_idx": 1,
+        "src": "BLK02",
+        "dst": "BLK04",
+        "nets": 800,
+        "steps": [
+          {
+            "step": 0,
+            "type": "cross_rect",
+            "rect1": "BLK02",
+            "edge1": 3,
+            "rect2": "CH11",
+            "edge2": 1,
+            "adjacent": true,
+            "gap": 0.001,
+            "overlap_length": 572.448,
+            "borderline": true,
+            "reason": "connected"
+          },
+          {
+            "step": 1,
+            "type": "internal_turn",
+            "rect": "CH11",
+            "edge1": 1,
+            "edge2": 3,
+            "legal": true,
+            "reason": "CH"
+          },
+          {
+            "step": 2,
+            "type": "cross_rect",
+            "rect1": "CH11",
+            "edge1": 3,
+            "rect2": "BLK04",
+            "edge2": 1,
+            "adjacent": true,
+            "gap": 0.0,
+            "overlap_length": 600,
+            "borderline": false,
+            "reason": "connected"
+          }
+        ],
+        "borderline_steps": [
+          {
+            "step": 0,
+            "type": "cross_rect",
+            "rect1": "BLK02",
+            "edge1": 3,
+            "rect2": "CH11",
+            "edge2": 1,
+            "adjacent": true,
+            "gap": 0.001,
+            "overlap_length": 572.448,
+            "borderline": true,
+            "reason": "connected"
+          }
+        ]
+      },
+      {
+        "path_idx": 2,
+        "src": "BLK02",
+        "dst": "BLK05",
+        "nets": 500,
+        "steps": [
+          {
+            "step": 0,
+            "type": "cross_rect",
+            "rect1": "BLK02",
+            "edge1": 2,
+            "rect2": "CH8",
+            "edge2": 4,
+            "adjacent": true,
+            "gap": 0.0,
+            "overlap_length": 267.248,
+            "borderline": false,
+            "reason": "connected"
+          },
+          {
+            "step": 1,
+            "type": "internal_turn",
+            "rect": "CH8",
+            "edge1": 4,
+            "edge2": 1,
+            "legal": true,
+            "reason": "CH"
+          },
+          {
+            "step": 2,
+            "type": "cross_rect",
+            "rect1": "CH8",
+            "edge1": 1,
+            "rect2": "CH6",
+            "edge2": 3,
+            "adjacent": true,
+            "gap": 0.0,
+            "overlap_length": 1.231,
+            "borderline": false,
+            "reason": "connected"
+          },
+          {
+            "step": 3,
+            "type": "internal_turn",
+            "rect": "CH6",
+            "edge1": 3,
+            "edge2": 1,
+            "legal": true,
+            "reason": "CH"
+          },
+          {
+            "step": 4,
+            "type": "cross_rect",
+            "rect1": "CH6",
+            "edge1": 1,
+            "rect2": "CH4",
+            "edge2": 3,
+            "adjacent": true,
+            "gap": 0.0,
+            "overlap_length": 1.231,
+            "borderline": false,
+            "reason": "connected"
+          },
+          {
+            "step": 5,
+            "type": "internal_turn",
+            "rect": "CH4",
+            "edge1": 3,
+            "edge2": 1,
+            "legal": true,
+            "reason": "CH"
+          },
+          {
+            "step": 6,
+            "type": "cross_rect",
+            "rect1": "CH4",
+            "edge1": 1,
+            "rect2": "BLK05",
+            "edge2": 3,
+            "adjacent": true,
+            "gap": 0.0,
+            "overlap_length": 728.623,
+            "borderline": false,
+            "reason": "connected"
+          }
+        ],
+        "borderline_steps": []
+      },
+      {
+        "path_idx": 3,
+        "src": "BLK02",
+        "dst": "BLK06",
+        "nets": 400,
+        "steps": [
+          {
+            "step": 0,
+            "type": "cross_rect",
+            "rect1": "BLK02",
+            "edge1": 2,
+            "rect2": "CH10",
+            "edge2": 4,
+            "adjacent": true,
+            "gap": 0.0,
+            "overlap_length": 448.947,
+            "borderline": false,
+            "reason": "connected"
+          },
+          {
+            "step": 1,
+            "type": "internal_turn",
+            "rect": "CH10",
+            "edge1": 4,
+            "edge2": 3,
+            "legal": true,
+            "reason": "CH"
+          },
+          {
+            "step": 2,
+            "type": "cross_rect",
+            "rect1": "CH10",
+            "edge1": 3,
+            "rect2": "BLK06",
+            "edge2": 1,
+            "adjacent": true,
+            "gap": 0.0,
+            "overlap_length": 1198,
+            "borderline": true,
+            "reason": "connected"
+          }
+        ],
+        "borderline_steps": [
+          {
+            "step": 2,
+            "type": "cross_rect",
+            "rect1": "CH10",
+            "edge1": 3,
+            "rect2": "BLK06",
+            "edge2": 1,
+            "adjacent": true,
+            "gap": 0.0,
+            "overlap_length": 1198,
+            "borderline": true,
+            "reason": "connected"
+          }
+        ]
+      },
+      {
+        "path_idx": 4,
+        "src": "BLK02",
+        "dst": "BLK07",
+        "nets": 200,
+        "steps": [
+          {
+            "step": 0,
+            "type": "cross_rect",
+            "rect1": "BLK02",
+            "edge1": 1,
+            "rect2": "BLK07",
+            "edge2": 3,
+            "adjacent": true,
+            "gap": 0.0,
+            "overlap_length": 572.448,
+            "borderline": false,
+            "reason": "connected"
+          }
+        ],
+        "borderline_steps": []
+      },
+      {
+        "path_idx": 5,
+        "src": "BLK03",
+        "dst": "BLK01",
+        "nets": 600,
+        "steps": [
+          {
+            "step": 0,
+            "type": "cross_rect",
+            "rect1": "BLK03",
+            "edge1": 1,
+            "rect2": "BLK01",
+            "edge2": 3,
+            "adjacent": true,
+            "gap": 0,
+            "overlap_length": 313,
+            "borderline": false,
+            "reason": "connected"
+          }
+        ],
+        "borderline_steps": []
+      },
+      {
+        "path_idx": 6,
+        "src": "BLK03",
+        "dst": "BLK01",
+        "nets": 600,
+        "steps": [
+          {
+            "step": 0,
+            "type": "cross_rect",
+            "rect1": "BLK03",
+            "edge1": 1,
+            "rect2": "BLK01",
+            "edge2": 3,
+            "adjacent": true,
+            "gap": 0,
+            "overlap_length": 313,
+            "borderline": false,
+            "reason": "connected"
+          }
+        ],
+        "borderline_steps": []
+      },
+      {
+        "path_idx": 7,
+        "src": "BLK03",
+        "dst": "BLK02",
+        "nets": 300,
+        "steps": [
+          {
+            "step": 0,
+            "type": "cross_rect",
+            "rect1": "BLK03",
+            "edge1": 3,
+            "rect2": "CH10",
+            "edge2": 1,
+            "adjacent": true,
+            "gap": 0,
+            "overlap_length": 960,
+            "borderline": false,
+            "reason": "connected"
+          },
+          {
+            "step": 1,
+            "type": "internal_turn",
+            "rect": "CH10",
+            "edge1": 1,
+            "edge2": 4,
+            "legal": true,
+            "reason": "CH"
+          },
+          {
+            "step": 2,
+            "type": "cross_rect",
+            "rect1": "CH10",
+            "edge1": 4,
+            "rect2": "BLK02",
+            "edge2": 2,
+            "adjacent": true,
+            "gap": 0.0,
+            "overlap_length": 448.947,
+            "borderline": false,
+            "reason": "connected"
+          }
+        ],
+        "borderline_steps": []
+      },
+      {
+        "path_idx": 8,
+        "src": "BLK03",
+        "dst": "BLK04",
+        "nets": 750,
+        "steps": [
+          {
+            "step": 0,
+            "type": "cross_rect",
+            "rect1": "BLK03",
+            "edge1": 3,
+            "rect2": "CH10",
+            "edge2": 1,
+            "adjacent": true,
+            "gap": 0,
+            "overlap_length": 960,
+            "borderline": false,
+            "reason": "connected"
+          },
+          {
+            "step": 1,
+            "type": "internal_turn",
+            "rect": "CH10",
+            "edge1": 1,
+            "edge2": 3,
+            "legal": true,
+            "reason": "CH"
+          },
+          {
+            "step": 2,
+            "type": "cross_rect",
+            "rect1": "CH10",
+            "edge1": 3,
+            "rect2": "CH11",
+            "edge2": 1,
+            "adjacent": true,
+            "gap": 0.0,
+            "overlap_length": 27.552,
+            "borderline": true,
+            "reason": "connected"
+          },
+          {
+            "step": 3,
+            "type": "internal_turn",
+            "rect": "CH11",
+            "edge1": 1,
+            "edge2": 3,
+            "legal": true,
+            "reason": "CH"
+          },
+          {
+            "step": 4,
+            "type": "cross_rect",
+            "rect1": "CH11",
+            "edge1": 3,
+            "rect2": "BLK04",
+            "edge2": 1,
+            "adjacent": true,
+            "gap": 0.0,
+            "overlap_length": 600,
+            "borderline": false,
+            "reason": "connected"
+          }
+        ],
+        "borderline_steps": [
+          {
+            "step": 2,
+            "type": "cross_rect",
+            "rect1": "CH10",
+            "edge1": 3,
+            "rect2": "CH11",
+            "edge2": 1,
+            "adjacent": true,
+            "gap": 0.0,
+            "overlap_length": 27.552,
+            "borderline": true,
+            "reason": "connected"
+          }
+        ]
+      },
+      {
+        "path_idx": 9,
+        "src": "BLK03",
+        "dst": "BLK04",
+        "nets": 750,
+        "steps": [
+          {
+            "step": 0,
+            "type": "cross_rect",
+            "rect1": "BLK03",
+            "edge1": 3,
+            "rect2": "CH10",
+            "edge2": 1,
+            "adjacent": true,
+            "gap": 0,
+            "overlap_length": 960,
+            "borderline": false,
+            "reason": "connected"
+          },
+          {
+            "step": 1,
+            "type": "internal_turn",
+            "rect": "CH10",
+            "edge1": 1,
+            "edge2": 3,
+            "legal": true,
+            "reason": "CH"
+          },
+          {
+            "step": 2,
+            "type": "cross_rect",
+            "rect1": "CH10",
+            "edge1": 3,
+            "rect2": "CH11",
+            "edge2": 1,
+            "adjacent": true,
+            "gap": 0.0,
+            "overlap_length": 27.552,
+            "borderline": true,
+            "reason": "connected"
+          },
+          {
+            "step": 3,
+            "type": "internal_turn",
+            "rect": "CH11",
+            "edge1": 1,
+            "edge2": 3,
+            "legal": true,
+            "reason": "CH"
+          },
+          {
+            "step": 4,
+            "type": "cross_rect",
+            "rect1": "CH11",
+            "edge1": 3,
+            "rect2": "BLK04",
+            "edge2": 1,
+            "adjacent": true,
+            "gap": 0.0,
+            "overlap_length": 600,
+            "borderline": false,
+            "reason": "connected"
+          }
+        ],
+        "borderline_steps": [
+          {
+            "step": 2,
+            "type": "cross_rect",
+            "rect1": "CH10",
+            "edge1": 3,
+            "rect2": "CH11",
+            "edge2": 1,
+            "adjacent": true,
+            "gap": 0.0,
+            "overlap_length": 27.552,
+            "borderline": true,
+            "reason": "connected"
+          }
+        ]
+      },
+      {
+        "path_idx": 10,
+        "src": "BLK03",
+        "dst": "BLK06",
+        "nets": 700,
+        "steps": [
+          {
+            "step": 0,
+            "type": "cross_rect",
+            "rect1": "BLK03",
+            "edge1": 3,
+            "rect2": "CH10",
+            "edge2": 1,
+            "adjacent": true,
+            "gap": 0,
+            "overlap_length": 960,
+            "borderline": false,
+            "reason": "connected"
+          },
+          {
+            "step": 1,
+            "type": "internal_turn",
+            "rect": "CH10",
+            "edge1": 1,
+            "edge2": 3,
+            "legal": true,
+            "reason": "CH"
+          },
+          {
+            "step": 2,
+            "type": "cross_rect",
+            "rect1": "CH10",
+            "edge1": 3,
+            "rect2": "BLK06",
+            "edge2": 1,
+            "adjacent": true,
+            "gap": 0.0,
+            "overlap_length": 1198,
+            "borderline": true,
+            "reason": "connected"
+          }
+        ],
+        "borderline_steps": [
+          {
+            "step": 2,
+            "type": "cross_rect",
+            "rect1": "CH10",
+            "edge1": 3,
+            "rect2": "BLK06",
+            "edge2": 1,
+            "adjacent": true,
+            "gap": 0.0,
+            "overlap_length": 1198,
+            "borderline": true,
+            "reason": "connected"
+          }
+        ]
+      },
+      {
+        "path_idx": 11,
+        "src": "BLK06",
+        "dst": "BLK02",
+        "nets": 700,
+        "steps": [
+          {
+            "step": 0,
+            "type": "cross_rect",
+            "rect1": "BLK06",
+            "edge1": 1,
+            "rect2": "CH10",
+            "edge2": 3,
+            "adjacent": true,
+            "gap": 0.0,
+            "overlap_length": 1198,
+            "borderline": true,
+            "reason": "connected"
+          },
+          {
+            "step": 1,
+            "type": "internal_turn",
+            "rect": "CH10",
+            "edge1": 3,
+            "edge2": 4,
+            "legal": true,
+            "reason": "CH"
+          },
+          {
+            "step": 2,
+            "type": "cross_rect",
+            "rect1": "CH10",
+            "edge1": 4,
+            "rect2": "BLK02",
+            "edge2": 2,
+            "adjacent": true,
+            "gap": 0.0,
+            "overlap_length": 448.947,
+            "borderline": false,
+            "reason": "connected"
+          }
+        ],
+        "borderline_steps": [
+          {
+            "step": 0,
+            "type": "cross_rect",
+            "rect1": "BLK06",
+            "edge1": 1,
+            "rect2": "CH10",
+            "edge2": 3,
+            "adjacent": true,
+            "gap": 0.0,
+            "overlap_length": 1198,
+            "borderline": true,
+            "reason": "connected"
+          }
+        ]
+      },
+      {
+        "path_idx": 12,
+        "src": "BLK06",
+        "dst": "BLK04",
+        "nets": 200,
+        "steps": [
+          {
+            "step": 0,
+            "type": "cross_rect",
+            "rect1": "BLK06",
+            "edge1": 4,
+            "rect2": "CH11",
+            "edge2": 2,
+            "adjacent": true,
+            "gap": 0,
+            "overlap_length": 424.053,
+            "borderline": false,
+            "reason": "connected"
+          },
+          {
+            "step": 1,
+            "type": "internal_turn",
+            "rect": "CH11",
+            "edge1": 2,
+            "edge2": 3,
+            "legal": true,
+            "reason": "CH"
+          },
+          {
+            "step": 2,
+            "type": "cross_rect",
+            "rect1": "CH11",
+            "edge1": 3,
+            "rect2": "BLK04",
+            "edge2": 1,
+            "adjacent": true,
+            "gap": 0.0,
+            "overlap_length": 600,
+            "borderline": false,
+            "reason": "connected"
+          }
+        ],
+        "borderline_steps": []
+      }
+    ],
+    "borderline_paths": [
+      {
+        "path_idx": 1,
+        "src": "BLK02",
+        "dst": "BLK04",
+        "nets": 800,
+        "borderline_steps": [
+          {
+            "step": 0,
+            "type": "cross_rect",
+            "rect1": "BLK02",
+            "edge1": 3,
+            "rect2": "CH11",
+            "edge2": 1,
+            "adjacent": true,
+            "gap": 0.001,
+            "overlap_length": 572.448,
+            "borderline": true,
+            "reason": "connected"
+          }
+        ]
+      },
+      {
+        "path_idx": 3,
+        "src": "BLK02",
+        "dst": "BLK06",
+        "nets": 400,
+        "borderline_steps": [
+          {
+            "step": 2,
+            "type": "cross_rect",
+            "rect1": "CH10",
+            "edge1": 3,
+            "rect2": "BLK06",
+            "edge2": 1,
+            "adjacent": true,
+            "gap": 0.0,
+            "overlap_length": 1198,
+            "borderline": true,
+            "reason": "connected"
+          }
+        ]
+      },
+      {
+        "path_idx": 8,
+        "src": "BLK03",
+        "dst": "BLK04",
+        "nets": 750,
+        "borderline_steps": [
+          {
+            "step": 2,
+            "type": "cross_rect",
+            "rect1": "CH10",
+            "edge1": 3,
+            "rect2": "CH11",
+            "edge2": 1,
+            "adjacent": true,
+            "gap": 0.0,
+            "overlap_length": 27.552,
+            "borderline": true,
+            "reason": "connected"
+          }
+        ]
+      },
+      {
+        "path_idx": 9,
+        "src": "BLK03",
+        "dst": "BLK04",
+        "nets": 750,
+        "borderline_steps": [
+          {
+            "step": 2,
+            "type": "cross_rect",
+            "rect1": "CH10",
+            "edge1": 3,
+            "rect2": "CH11",
+            "edge2": 1,
+            "adjacent": true,
+            "gap": 0.0,
+            "overlap_length": 27.552,
+            "borderline": true,
+            "reason": "connected"
+          }
+        ]
+      },
+      {
+        "path_idx": 10,
+        "src": "BLK03",
+        "dst": "BLK06",
+        "nets": 700,
+        "borderline_steps": [
+          {
+            "step": 2,
+            "type": "cross_rect",
+            "rect1": "CH10",
+            "edge1": 3,
+            "rect2": "BLK06",
+            "edge2": 1,
+            "adjacent": true,
+            "gap": 0.0,
+            "overlap_length": 1198,
+            "borderline": true,
+            "reason": "connected"
+          }
+        ]
+      },
+      {
+        "path_idx": 11,
+        "src": "BLK06",
+        "dst": "BLK02",
+        "nets": 700,
+        "borderline_steps": [
+          {
+            "step": 0,
+            "type": "cross_rect",
+            "rect1": "BLK06",
+            "edge1": 1,
+            "rect2": "CH10",
+            "edge2": 3,
+            "adjacent": true,
+            "gap": 0.0,
+            "overlap_length": 1198,
+            "borderline": true,
+            "reason": "connected"
+          }
+        ]
+      }
+    ]
+  },
+  "cost_breakdown": {
+    "outline_area": 6475740.0,
+    "alpha_times_wl": 1191747.5650000002,
+    "alpha": 0.2,
+    "total_wirelength": 5958737.825000001,
+    "channel_overflow_total": 969.225,
+    "channel_total_capacity": 316753.55,
+    "channel_overflow_rate": 0.003059870994342447,
+    "ft_area_excess": 0.0,
+    "beta_lin": 20.0,
+    "beta_tail": 1.5,
+    "beta_ft": 3.0,
+    "threshold": 0.05,
+    "overflow_penalty": 396298.5798580632,
+    "ft_penalty": 0.0,
+    "overflow_ft_penalty": 396298.5798580632,
+    "edge_penalty": 0.0,
+    "gamma": 1.0,
+    "edge_penalty_component": 0.0,
+    "cost": 8063786.144858063
+  }
+}

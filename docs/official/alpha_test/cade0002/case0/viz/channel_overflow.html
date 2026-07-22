@@ -1,0 +1,32 @@
+<!DOCTYPE html><html lang="zh-TW"><head><meta charset="UTF-8">
+<title>Channel Overflow</title>
+<style>
+ body{margin:0;font-family:'Segoe UI',Arial,sans-serif;background:#f4f4f9;color:#222}
+ .wrap{max-width:1100px;margin:0 auto;padding:18px}
+ h2{font-size:1.2em;margin:6px 0}
+ svg{background:#fff;border:1px solid #ddd;border-radius:8px;width:100%;height:auto}
+ .legend{margin-top:10px;font-size:.85em;color:#444}
+ .legend span{display:inline-block;margin-right:14px}
+ .sw{display:inline-block;width:12px;height:12px;border:1px solid #999;vertical-align:middle;margin-right:4px}
+</style></head><body><div class="wrap">
+<h2>Channel Overflow</h2>
+<svg viewBox="0 0 1000 800" xmlns="http://www.w3.org/2000/svg">
+<rect x="40.00" y="49.91" width="920.00" height="700.17" fill="none" fill-opacity="1.0" stroke="#000" stroke-width="2"></rect>
+<rect x="40.00" y="315.79" width="132.46" height="204.49" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH1  overflow=0 (H=0,V=0)  demand H=0/16209 V=0/10500</title></rect>
+<rect x="172.46" y="519.85" width="54.19" height="0.43" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH2  overflow=0 (H=0,V=0)  demand H=0/34 V=0/4295</title></rect>
+<rect x="172.46" y="49.91" width="54.19" height="167.16" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH3  overflow=0 (H=0,V=0)  demand H=0/13250 V=0/4295</title></rect>
+<rect x="226.65" y="519.85" width="2.58" height="230.24" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH4  overflow=0 (H=0,V=0)  demand H=1000/18250 V=0/205</title></rect>
+<rect x="226.65" y="49.91" width="2.58" height="167.16" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH5  overflow=0 (H=0,V=0)  demand H=0/13250 V=0/205</title></rect>
+<rect x="229.24" y="519.85" width="161.40" height="0.39" fill="rgb(255,0,60)" fill-opacity="0.7" stroke="#c00" stroke-width="2.5"><title>CH6  overflow=969 (H=969,V=0)  demand H=1000/31 V=0/12794</title></rect>
+<text x="309.94" y="520.04" font-size="9" fill="#222" text-anchor="middle" font-weight="bold" font-family="Segoe UI,Arial,sans-serif">969</text>
+<rect x="229.24" y="49.91" width="161.40" height="167.16" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH7  overflow=0 (H=0,V=0)  demand H=0/13250 V=0/12794</title></rect>
+<rect x="390.64" y="519.85" width="84.29" height="49.69" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH8  overflow=0 (H=0,V=0)  demand H=500/3939 V=2300/6681</title></rect>
+<rect x="390.64" y="49.91" width="84.29" height="167.16" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH9  overflow=0 (H=0,V=0)  demand H=0/13250 V=0/6681</title></rect>
+<rect x="474.93" y="49.91" width="141.59" height="519.63" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH10  overflow=0 (H=0,V=0)  demand H=5800/41189 V=1400/11224</title></rect>
+<rect x="616.52" y="560.85" width="133.74" height="189.24" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH11  overflow=0 (H=0,V=0)  demand H=4800/15000 V=200/10601</title></rect>
+<rect x="616.52" y="49.91" width="133.74" height="133.10" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH12  overflow=0 (H=0,V=0)  demand H=0/10550 V=0/10601</title></rect>
+<rect x="750.26" y="49.91" width="52.97" height="133.10" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH13  overflow=0 (H=0,V=0)  demand H=0/10550 V=0/4199</title></rect>
+<rect x="803.23" y="49.91" width="156.77" height="510.94" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH14  overflow=0 (H=0,V=0)  demand H=0/40500 V=0/12426</title></rect>
+</svg>
+<div class="legend"><span>顏色：綠 (無 overflow) → 紅 (max=969)</span><span style="color:#c00">━ H-dominant</span><span style="color:#00c">━ V-dominant</span><span style="color:#808">━ 兩方向</span></div>
+</div></body></html>

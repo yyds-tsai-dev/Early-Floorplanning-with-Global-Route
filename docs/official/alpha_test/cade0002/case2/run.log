@@ -1,0 +1,5 @@
+[harness] cwd=/proj/sandyho11638/ICCAD_2026_0717/iccad_project/data/alpha_test_submission_E/cade0002/alpha_test_submission
+
+[harness] strategy 0: cmd=['/proj/sandyho11638/ICCAD_2026_0717/iccad_project/data/alpha_test_submission_E/cade0002/alpha_test_submission/EarlyFloorplanning_with_GlobalRoute', '2026 ICCAD_case.case2.csv']
+engine=bstar iters=1000 exact_evals=607 blocks=16 bundles=74 channels=41 routes=113 score=1.04764e+11 outline_area=4.2e+07 wirelength=2.46473e+08 channel_overflow=103428 feedthrough_mismatch=0 open_routes=0 validation=ok
+[harness] output captured via strategy 0

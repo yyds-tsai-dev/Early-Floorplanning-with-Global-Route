@@ -166,7 +166,7 @@ Score routeAndScoreAt(const Problem& problem, const Placement& placement, double
     score.outline_area = w * h;
     score.wirelength = routing.total_wirelength;
     score.penalty += routing.open_routes * 1e15;
-    // C1 milestone (byte-verified official checker replica, tools/official_cost.py): the scorer now
+    // C1 milestone (byte-verified against the official checker's report.json cost_breakdown): the scorer now
     // charges the OFFICIAL checker's GLOBAL overflow-rate penalty, deliberately DECOUPLED from the
     // router's own per-channel area-denominated marginal pricing (route_cost.hpp's
     // kOverflowAreaWeight/channelMarginalCost, which still guides the router toward low-overflow

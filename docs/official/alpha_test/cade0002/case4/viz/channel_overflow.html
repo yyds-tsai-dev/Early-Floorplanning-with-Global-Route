@@ -1,0 +1,100 @@
+<!DOCTYPE html><html lang="zh-TW"><head><meta charset="UTF-8">
+<title>Channel Overflow</title>
+<style>
+ body{margin:0;font-family:'Segoe UI',Arial,sans-serif;background:#f4f4f9;color:#222}
+ .wrap{max-width:1100px;margin:0 auto;padding:18px}
+ h2{font-size:1.2em;margin:6px 0}
+ svg{background:#fff;border:1px solid #ddd;border-radius:8px;width:100%;height:auto}
+ .legend{margin-top:10px;font-size:.85em;color:#444}
+ .legend span{display:inline-block;margin-right:14px}
+ .sw{display:inline-block;width:12px;height:12px;border:1px solid #999;vertical-align:middle;margin-right:4px}
+</style></head><body><div class="wrap">
+<h2>Channel Overflow</h2>
+<svg viewBox="0 0 1000 800" xmlns="http://www.w3.org/2000/svg">
+<rect x="213.65" y="40.00" width="572.70" height="720.00" fill="none" fill-opacity="1.0" stroke="#000" stroke-width="2"></rect>
+<rect x="213.65" y="110.10" width="16.61" height="347.05" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH1  overflow=0 (H=0,V=0)  demand H=0/83050 V=0/3975</title></rect>
+<rect x="230.26" y="110.10" width="44.82" height="398.76" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH2  overflow=0 (H=0,V=0)  demand H=17750/95425 V=0/10725</title></rect>
+<rect x="275.08" y="110.10" width="0.21" height="649.90" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH3  overflow=0 (H=0,V=0)  demand H=37748/155525 V=0/50</title></rect>
+<rect x="275.29" y="685.83" width="52.02" height="0.88" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH4  overflow=0 (H=0,V=0)  demand H=0/211 V=0/12448</title></rect>
+<rect x="275.29" y="640.91" width="52.02" height="0.82" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH5  overflow=0 (H=0,V=0)  demand H=0/196 V=0/12448</title></rect>
+<rect x="275.29" y="547.93" width="52.02" height="0.78" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH6  overflow=0 (H=0,V=0)  demand H=0/187 V=0/12448</title></rect>
+<rect x="275.29" y="110.10" width="52.02" height="307.97" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH7  overflow=0 (H=0,V=0)  demand H=28248/73700 V=0/12448</title></rect>
+<rect x="327.30" y="685.83" width="5.16" height="0.88" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH8  overflow=0 (H=0,V=0)  demand H=0/211 V=0/1234</title></rect>
+<rect x="327.30" y="547.93" width="5.16" height="93.80" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH9  overflow=0 (H=0,V=0)  demand H=14356/22446 V=0/1234</title></rect>
+<rect x="327.30" y="110.10" width="5.16" height="307.97" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH10  overflow=0 (H=0,V=0)  demand H=28248/73700 V=0/1234</title></rect>
+<rect x="332.46" y="547.93" width="4.57" height="138.78" fill="rgb(209,35,60)" fill-opacity="0.7" stroke="#00c" stroke-width="2.5"><title>CH11  overflow=5569 (H=0,V=5569)  demand H=10688/33211 V=6662/1093</title></rect>
+<text x="334.74" y="617.32" font-size="9" fill="#222" text-anchor="middle" font-weight="bold" font-family="Segoe UI,Arial,sans-serif">5569</text>
+<rect x="332.46" y="110.10" width="4.57" height="307.97" fill="rgb(87,131,60)" fill-opacity="0.7" stroke="#00c" stroke-width="2.5"><title>CH12  overflow=2331 (H=0,V=2331)  demand H=31672/73700 V=3424/1093</title></rect>
+<text x="334.74" y="264.09" font-size="9" fill="#222" text-anchor="middle" font-weight="bold" font-family="Segoe UI,Arial,sans-serif">2331</text>
+<rect x="337.03" y="547.93" width="2.49" height="138.78" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH13  overflow=0 (H=0,V=0)  demand H=4026/33211 V=0/595</title></rect>
+<rect x="337.03" y="86.49" width="2.49" height="331.58" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH14  overflow=0 (H=0,V=0)  demand H=35096/79350 V=0/595</title></rect>
+<rect x="339.51" y="547.93" width="0.54" height="212.07" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH15  overflow=0 (H=0,V=0)  demand H=18724/50750 V=0/130</title></rect>
+<rect x="339.51" y="86.49" width="0.54" height="331.58" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH16  overflow=0 (H=0,V=0)  demand H=35096/79350 V=0/130</title></rect>
+<rect x="340.06" y="547.93" width="74.17" height="45.65" fill="rgb(255,0,60)" fill-opacity="0.7" stroke="#c00" stroke-width="2.5"><title>CH17  overflow=6767 (H=6767,V=0)  demand H=17692/10925 V=0/17750</title></rect>
+<text x="377.14" y="570.75" font-size="9" fill="#222" text-anchor="middle" font-weight="bold" font-family="Segoe UI,Arial,sans-serif">6767</text>
+<rect x="340.06" y="86.49" width="74.17" height="331.58" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH18  overflow=0 (H=0,V=0)  demand H=35096/79350 V=0/17750</title></rect>
+<rect x="414.23" y="86.49" width="43.77" height="507.09" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH19  overflow=0 (H=0,V=0)  demand H=56281/121350 V=3875/10475</title></rect>
+<rect x="458.00" y="86.49" width="0.10" height="673.51" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH20  overflow=0 (H=0,V=0)  demand H=61594/161175 V=0/25</title></rect>
+<rect x="458.11" y="633.59" width="18.91" height="0.04" fill="rgb(28,177,60)" fill-opacity="0.7" stroke="#c00" stroke-width="2.5"><title>CH21  overflow=750 (H=750,V=0)  demand H=760/10 V=760/4525</title></rect>
+<text x="467.56" y="633.61" font-size="9" fill="#222" text-anchor="middle" font-weight="bold" font-family="Segoe UI,Arial,sans-serif">750</text>
+<rect x="458.11" y="86.49" width="18.91" height="460.77" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH22  overflow=0 (H=0,V=0)  demand H=46038/110264 V=1986/4525</title></rect>
+<rect x="477.02" y="633.59" width="56.62" height="0.04" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH23  overflow=0 (H=0,V=0)  demand H=0/10 V=0/13550</title></rect>
+<rect x="477.02" y="96.10" width="56.62" height="451.15" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH24  overflow=0 (H=0,V=0)  demand H=46222/107964 V=1802/13550</title></rect>
+<rect x="533.64" y="633.59" width="15.93" height="0.04" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH25  overflow=0 (H=0,V=0)  demand H=0/10 V=0/3812</title></rect>
+<rect x="533.64" y="40.00" width="15.93" height="507.25" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH26  overflow=0 (H=0,V=0)  demand H=46096/121389 V=1676/3812</title></rect>
+<rect x="549.57" y="571.75" width="27.16" height="61.89" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH27  overflow=0 (H=0,V=0)  demand H=0/14810 V=0/6500</title></rect>
+<rect x="549.57" y="40.00" width="27.16" height="487.99" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH28  overflow=0 (H=0,V=0)  demand H=18630/116778 V=0/6500</title></rect>
+<rect x="576.73" y="571.75" width="0.48" height="72.40" fill="rgb(42,166,60)" fill-opacity="0.7" stroke="#00c" stroke-width="2.5"><title>CH29  overflow=1117 (H=0,V=1117)  demand H=5331/17325 V=1231/114</title></rect>
+<text x="576.96" y="607.95" font-size="9" fill="#222" text-anchor="middle" font-weight="bold" font-family="Segoe UI,Arial,sans-serif">1117</text>
+<rect x="576.73" y="40.00" width="0.48" height="487.99" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH30  overflow=0 (H=0,V=0)  demand H=18630/116778 V=0/114</title></rect>
+<rect x="577.20" y="644.04" width="12.26" height="0.10" fill="rgb(246,6,60)" fill-opacity="0.7" stroke="#c00" stroke-width="2.5"><title>CH31  overflow=6537 (H=6537,V=0)  demand H=6562/25 V=0/2934</title></rect>
+<text x="583.33" y="644.09" font-size="9" fill="#222" text-anchor="middle" font-weight="bold" font-family="Segoe UI,Arial,sans-serif">6537</text>
+<rect x="577.20" y="40.00" width="12.26" height="487.99" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH32  overflow=0 (H=0,V=0)  demand H=18630/116778 V=0/2934</title></rect>
+<rect x="589.46" y="644.04" width="93.30" height="0.10" fill="rgb(246,6,60)" fill-opacity="0.7" stroke="#c00" stroke-width="2.5"><title>CH33  overflow=6537 (H=6537,V=0)  demand H=6562/25 V=0/22327</title></rect>
+<text x="636.11" y="644.09" font-size="9" fill="#222" text-anchor="middle" font-weight="bold" font-family="Segoe UI,Arial,sans-serif">6537</text>
+<rect x="589.46" y="40.00" width="93.30" height="531.75" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH34  overflow=0 (H=0,V=0)  demand H=40604/127250 V=5452/22327</title></rect>
+<rect x="682.76" y="644.04" width="1.00" height="115.96" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH35  overflow=0 (H=0,V=0)  demand H=21072/27750 V=0/239</title></rect>
+<rect x="682.76" y="439.18" width="1.00" height="132.57" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH36  overflow=0 (H=0,V=0)  demand H=25070/31725 V=0/239</title></rect>
+<rect x="682.76" y="40.00" width="1.00" height="332.21" fill="rgb(72,142,60)" fill-opacity="0.7" stroke="#00c" stroke-width="2.5"><title>CH37  overflow=1931 (H=0,V=1931)  demand H=19332/79500 V=2170/239</title></rect>
+<text x="683.26" y="206.11" font-size="9" fill="#222" text-anchor="middle" font-weight="bold" font-family="Segoe UI,Arial,sans-serif">1931</text>
+<rect x="683.76" y="644.04" width="1.73" height="37.92" fill="rgb(174,63,60)" fill-opacity="0.7" stroke="#c00" stroke-width="2.5"><title>CH38  overflow=4633 (H=4633,V=0)  demand H=13708/9075 V=0/414</title></rect>
+<text x="684.63" y="663.00" font-size="9" fill="#222" text-anchor="middle" font-weight="bold" font-family="Segoe UI,Arial,sans-serif">4633</text>
+<rect x="683.76" y="439.18" width="1.73" height="132.57" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH39  overflow=0 (H=0,V=0)  demand H=25070/31725 V=0/414</title></rect>
+<rect x="683.76" y="40.00" width="1.73" height="332.21" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH40  overflow=0 (H=0,V=0)  demand H=17162/79500 V=0/414</title></rect>
+<rect x="685.49" y="439.18" width="0.36" height="242.79" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH41  overflow=0 (H=0,V=0)  demand H=45496/58100 V=0/86</title></rect>
+<rect x="685.49" y="40.00" width="0.36" height="198.10" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH42  overflow=0 (H=0,V=0)  demand H=3352/47407 V=0/86</title></rect>
+<rect x="685.85" y="681.65" width="36.56" height="0.31" fill="rgb(57,154,60)" fill-opacity="0.7" stroke="#c00" stroke-width="2.5"><title>CH43  overflow=1527 (H=1527,V=0)  demand H=1602/75 V=0/8750</title></rect>
+<text x="704.13" y="681.80" font-size="9" fill="#222" text-anchor="middle" font-weight="bold" font-family="Segoe UI,Arial,sans-serif">1527</text>
+<rect x="685.85" y="607.48" width="36.56" height="0.80" fill="rgb(4,196,60)" fill-opacity="0.7" stroke="#c00" stroke-width="2.5"><title>CH44  overflow=108 (H=108,V=0)  demand H=300/192 V=0/8750</title></rect>
+<text x="704.13" y="607.88" font-size="9" fill="#222" text-anchor="middle" font-weight="bold" font-family="Segoe UI,Arial,sans-serif">108</text>
+<rect x="685.85" y="439.18" width="36.56" height="102.28" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH45  overflow=0 (H=0,V=0)  demand H=7910/24475 V=3730/8750</title></rect>
+<rect x="685.85" y="40.00" width="36.56" height="198.10" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH46  overflow=0 (H=0,V=0)  demand H=3352/47407 V=0/8750</title></rect>
+<rect x="722.41" y="681.65" width="13.06" height="0.31" fill="rgb(57,154,60)" fill-opacity="0.7" stroke="#c00" stroke-width="2.5"><title>CH47  overflow=1527 (H=1527,V=0)  demand H=1602/75 V=0/3126</title></rect>
+<text x="728.95" y="681.80" font-size="9" fill="#222" text-anchor="middle" font-weight="bold" font-family="Segoe UI,Arial,sans-serif">1527</text>
+<rect x="722.41" y="607.48" width="13.06" height="0.80" fill="rgb(4,196,60)" fill-opacity="0.7" stroke="#c00" stroke-width="2.5"><title>CH48  overflow=108 (H=108,V=0)  demand H=300/192 V=0/3126</title></rect>
+<text x="728.95" y="607.88" font-size="9" fill="#222" text-anchor="middle" font-weight="bold" font-family="Segoe UI,Arial,sans-serif">108</text>
+<rect x="722.41" y="499.56" width="13.06" height="41.89" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH49  overflow=0 (H=0,V=0)  demand H=600/10025 V=0/3126</title></rect>
+<rect x="722.41" y="40.00" width="13.06" height="198.10" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH50  overflow=0 (H=0,V=0)  demand H=3352/47407 V=0/3126</title></rect>
+<rect x="735.48" y="607.48" width="4.46" height="74.49" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH51  overflow=0 (H=0,V=0)  demand H=1902/17825 V=0/1068</title></rect>
+<rect x="735.48" y="499.56" width="4.46" height="41.89" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH52  overflow=0 (H=0,V=0)  demand H=600/10025 V=0/1068</title></rect>
+<rect x="735.48" y="40.00" width="4.46" height="198.10" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH53  overflow=0 (H=0,V=0)  demand H=3352/47407 V=0/1068</title></rect>
+<rect x="739.94" y="607.48" width="3.58" height="74.49" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH54  overflow=0 (H=0,V=0)  demand H=1902/17825 V=0/857</title></rect>
+<rect x="739.94" y="499.56" width="3.58" height="41.89" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH55  overflow=0 (H=0,V=0)  demand H=1401/10025 V=801/857</title></rect>
+<rect x="739.94" y="334.03" width="3.58" height="38.18" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH56  overflow=0 (H=0,V=0)  demand H=0/9137 V=0/857</title></rect>
+<rect x="739.94" y="40.00" width="3.58" height="198.10" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH57  overflow=0 (H=0,V=0)  demand H=3352/47407 V=0/857</title></rect>
+<rect x="743.52" y="499.56" width="6.63" height="182.40" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH58  overflow=0 (H=0,V=0)  demand H=2502/43650 V=0/1586</title></rect>
+<rect x="743.52" y="334.03" width="6.63" height="38.18" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH59  overflow=0 (H=0,V=0)  demand H=0/9137 V=0/1586</title></rect>
+<rect x="743.52" y="40.00" width="6.63" height="198.10" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH60  overflow=0 (H=0,V=0)  demand H=3352/47407 V=0/1586</title></rect>
+<rect x="750.15" y="499.56" width="0.05" height="182.40" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH61  overflow=0 (H=0,V=0)  demand H=900/43650 V=0/11</title></rect>
+<rect x="750.15" y="334.03" width="0.05" height="105.15" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH62  overflow=0 (H=0,V=0)  demand H=0/25162 V=0/11</title></rect>
+<rect x="750.15" y="40.00" width="0.05" height="198.10" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH63  overflow=0 (H=0,V=0)  demand H=3352/47407 V=0/11</title></rect>
+<rect x="750.19" y="499.56" width="6.49" height="182.40" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH64  overflow=0 (H=0,V=0)  demand H=900/43650 V=0/1552</title></rect>
+<rect x="750.19" y="40.00" width="6.49" height="399.18" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH65  overflow=0 (H=0,V=0)  demand H=9812/95525 V=0/1552</title></rect>
+<rect x="756.68" y="499.56" width="3.45" height="182.40" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH66  overflow=0 (H=0,V=0)  demand H=900/43650 V=0/825</title></rect>
+<rect x="756.68" y="222.51" width="3.45" height="216.67" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH67  overflow=0 (H=0,V=0)  demand H=0/51850 V=0/825</title></rect>
+<rect x="760.13" y="499.56" width="13.79" height="260.44" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH68  overflow=0 (H=0,V=0)  demand H=900/62325 V=0/3300</title></rect>
+<rect x="760.13" y="222.51" width="13.79" height="216.67" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH69  overflow=0 (H=0,V=0)  demand H=0/51850 V=0/3300</title></rect>
+<rect x="773.92" y="222.51" width="12.43" height="216.67" fill="rgb(0,200,60)" fill-opacity="0.7" stroke="#999" stroke-width="0.8"><title>CH70  overflow=0 (H=0,V=0)  demand H=0/51850 V=0/2975</title></rect>
+</svg>
+<div class="legend"><span>顏色：綠 (無 overflow) → 紅 (max=6767)</span><span style="color:#c00">━ H-dominant</span><span style="color:#00c">━ V-dominant</span><span style="color:#808">━ 兩方向</span></div>
+</div></body></html>
