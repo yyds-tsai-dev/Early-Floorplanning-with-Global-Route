@@ -27,9 +27,9 @@ Block makeBlock(const std::string& name, double w, double h) {
 }
 
 // Fixture (a): A below, B above, L/R flank the A-B gap in x so the channel between A and B is
-// bounded left=L, right=R, below=A, above=B. The A->B bundle's guide-point path crosses the
-// channel vertically (dy>0, dx==0 at the guide points -- verified empirically against
-// routing.cpp's guidePoint/usage accrual before writing this fixture), producing pure
+// bounded left=L, right=R, below=A, above=B. The A->B bundle's guiding-point path crosses the
+// channel vertically (dy>0, dx==0 at the guiding points -- verified empirically against
+// route_geometry.hpp's guidingPoint/usage accrual before writing this fixture), producing pure
 // vertical_usage. Per the axis-crossing invariant (p3-design.md §1.2-1.3) this must land as
 // need_w on the (left,right)=(L,R) pair, with need_h == 0.
 void testVerticalUsageChargesNeedWOnLeftRight() {

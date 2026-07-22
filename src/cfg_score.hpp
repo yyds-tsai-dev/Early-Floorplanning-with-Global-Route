@@ -18,19 +18,22 @@ namespace efgr {
 //   * cost                  -- exact on cases 0/2/3/4; case1 within 0.31% (penalty tail, see .cpp)
 //
 // IMPORTANT (verified against the official report.json + viz + E_20260608.pdf; see
-// .superpowers/sdd/beta-task-2-report.md): the checker's accounting is NOT the guide-segment model
-// in route_geometry.hpp (`accumulatePathUsage` / `guidePoint`). Two concrete differences, both
-// reproduced here and NOT via the shared helpers:
+// .superpowers/sdd/beta-task-2-report.md): this file is a CALIBRATION ORACLE, deliberately kept
+// independent of the solver's own headers -- it duplicates both the accounting constants
+// (kBetaLin/kBetaTail/kThreshold/kCapPerUm above) and the guiding-point model (guidingPoint below)
+// locally rather than including route_geometry.hpp, so it remains independent ground truth even if
+// the solver's own accounting were to regress. The two things it locks down:
 //   1. Channel demand is PER-EDGE: each entry/exit edge a route uses on a channel charges `nets` to
 //      that edge's direction (edge 1/3 = left/right -> horizontal, 2/4 = top/bottom -> vertical), so
-//      a straight pass-through double-charges. `accumulatePathUsage`'s dx/dy guide-segment rule
-//      under-counts pass-throughs and mis-attributes L-turns.
+//      a straight pass-through double-charges.
 //   2. Wirelength uses a CENTER-anchored guiding point (midpoint of the two nodes' facing-edge
 //      midpoints, snapped to the shared border chosen by minimum gap -- rounding-robust for the
 //      .cfg's 3-decimal coordinates), summed as a manhattan CHAIN, weighted by nets.
-//      `guidePoint` instead uses the overlap-segment midpoint, which is ~6% off.
-// The solver-side port of this per-edge/center-anchored model is Task 3's scope; routing.cpp is
-// deliberately untouched here.
+// Post-T3, route_geometry.hpp's `accumulatePathUsage`/`guidingPoint` implement this SAME model (the
+// old overlap-midpoint `guidePoint` is retired), so routing.cpp's committed accounting now agrees
+// with this oracle by construction -- not by assumption: test/run_selfconsistency_regressions.sh
+// gates that agreement and fails if the solver's routed accounting ever diverges from this
+// independent re-scorer on the same .cfg.
 
 struct CfgSolution {
     double outline_w = 0.0;
