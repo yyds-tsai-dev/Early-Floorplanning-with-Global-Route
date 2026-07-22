@@ -20,4 +20,4 @@ test/integer_output_regression_bin
 # Archive files
 *.rar
 
-/tmp
+/tmp__pycache__/

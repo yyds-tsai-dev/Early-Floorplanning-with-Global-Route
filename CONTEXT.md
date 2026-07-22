@@ -60,6 +60,42 @@ _Avoid_: the current order-only first-open-slot placement being called real B*-t
 The planned long-term mode that runs Sequence-Pair global exploration first, converts the best placement into a B*-tree-compatible seed, then runs B*-tree local refinement.
 _Avoid_: choosing one representation permanently before measuring both
 
+**Checker Cost**:
+The official per-case validator cost reported in the alpha-test `report.json`/`checker.log`: outline area + α·wirelength + overflow/FT penalty, with α read from the testcase CSV and no runtime term.
+_Avoid_: treating this as the scoreboard ranking number
+
+**Ranking Cost**:
+The official scoreboard cost reported in the alpha-test `case_result.json`/`result.html`: outline area + α·wirelength + overflow/FT penalty + edge penalty + runtime penalty, where the harness applied per-case α values (0.3/0.15/0.1/0.1/0.1 for case0–4) that differ from the CSV α.
+_Avoid_: assuming the CSV α is what ranking used at alpha
+
+**Runtime Penalty**:
+The ranking-cost term δ · runtime_seconds · √(outline area), with δ = 0.5 at alpha test. Negligible at seconds-scale runtimes; grows linearly with wall time.
+_Avoid_: treating runtime as free, treating the 2-hour budget as the only time cost
+
+**Official Overflow Penalty**:
+β_lin · outline area · R plus a β_tail term once R exceeds the 5% threshold, where R = total channel overflow / total channel capacity. Constants at alpha test: β_lin = 20, β_tail = 1.5, β_ft = 3, γ (edge) = 1.
+_Avoid_: per-net flat penalties, per-channel local penalties
+
+**Integer Output Rule**:
+All output coordinates and dimensions must be integers (QA A43). A soft block whose integer W×H cannot equal AREA must choose W×H strictly below AREA. The checker auto-ceils fractional output without penalty today.
+_Avoid_: relying on auto-ceil, fractional soft-block dimensions
+
+**Guiding-Point Chain (official wirelength)**:
+The checker measures a path's wirelength as the manhattan chain of center-anchored guiding points: for each hop, the guiding point is the midpoint of the two nodes' facing-edge midpoints, with the shared border chosen by minimum gap (pinned 2026-07-23 from the problem statement's "guiding points → HPWL" definition plus the alpha viz polylines; reproduces official WL to ≤1e-6 on all 5 alpha cases). QA A41's "midpoint of the shared border" phrasing describes the same chain loosely — the center-anchored form is the byte-verified one.
+_Avoid_: straight-through transitions, overlap-segment midpoints as the anchor
+
+**Per-Edge Channel Demand (official overflow)**:
+The checker charges channel demand per traversal edge: each entry edge and each exit edge of a channel traversal charges the full net count to that edge's axis (left/right → horizontal, top/bottom → vertical), so a straight pass-through charges its axis twice. Byte-verified against all alpha per-channel demand tables.
+_Avoid_: per-segment dx/dy charging, single-charge pass-throughs
+
+**Alpha-Test Package**:
+The official per-team feedback bundle under `docs/official/alpha_test/<team>/`: per-case `run.log` (harness invocation + our stderr), `checker.log`, `report.json` (checker detail), `output.cfg`, `viz/`, plus top-level `case_result.json` and `result.html` (scoreboard).
+_Avoid_: mixing up which file carries checker cost versus ranking cost
+
+**Diagonal Connection Erratum**:
+Self-connections present in the case3 matrix (BLK09→BLK09 = 63, BLK13→BLK13 = 123). Organizers confirmed these are data errors (QA A44) but the 20260712 testcase upload still contains them; the checker treats them as informational only.
+_Avoid_: routing self-bundles, failing the parse on diagonal entries
+
 ## Relationships
 
 - A **Bundle Route** uses one or more **Channels** and may use one or more **Feedthroughs**.
@@ -111,6 +147,7 @@ _Avoid_: choosing one representation permanently before measuring both
 - "placement/search direction after 2026-06-14" was resolved to mean **Long-Term Placement/Search Objective**, not quick conservative tuning.
 - "Sequence-pair versus B*-tree" was resolved to mean implement and compare both through a **Placement Engine Interface**, not pick only one.
 - "hybrid optimizer" was resolved to mean sequence-pair global exploration followed by B*-tree local refinement.
+- "which α is authoritative for ranking" (QA A35.5 says testcase-defined = 0.2, but the alpha scoreboard applied per-case 0.3/0.15/0.1/0.1/0.1) — **team decision 2026-07-22**: the solver optimizes the CSV α; benchmarks report both **Checker Cost** and **Ranking Cost** side by side; the contradiction goes back to the organizers as a QA question. Official answer still pending.
 
 ## Current Strategic Design
 
