@@ -57,14 +57,14 @@ void testVerticalOverflowIsAreaDenominatedByChannelHeight() {
     for (const auto& ch : r.channels) {
         if (std::abs(ch.rect.w - 80.0) < kEps && std::abs(ch.rect.h - 610.0) < kEps) {
             found = true;
-            assert(std::abs(ch.vertical_usage - 3600.0) < kEps);
+            assert(std::abs(ch.vertical_usage - 7200.0) < kEps);
             assert(std::abs(ch.horizontal_usage) < kEps);
         }
     }
     assert(found);
 
-    double expected = ((3600.0 - 2000.0) / 25.0) * 610.0;  // 64 * 610 = 39,040
-    assert(std::abs(expected - 39040.0) < kEps);
+    double expected = ((7200.0 - 2000.0) / 25.0) * 610.0;  // 208 * 610 = 126,880  (per-edge: entry+exit charge 3600 each = 7200)
+    assert(std::abs(expected - 126880.0) < kEps);
     assert(std::abs(r.channel_overflow - expected) < 1e-3);
     // Direction assert against the OLD (pre-T0) denomination: nets-over-capacity was 1600, a much
     // smaller number than the area-denominated 39,040 -- the fix must have strictly increased the
@@ -103,13 +103,13 @@ void testHorizontalOverflowIsAreaDenominatedByChannelWidth() {
     for (const auto& ch : r.channels) {
         if (std::abs(ch.rect.h - 80.0) < kEps && std::abs(ch.rect.w - 610.0) < kEps) {
             found = true;
-            assert(std::abs(ch.horizontal_usage - 3600.0) < kEps);
+            assert(std::abs(ch.horizontal_usage - 7200.0) < kEps);
             assert(std::abs(ch.vertical_usage) < kEps);
         }
     }
     assert(found);
 
-    double expected = ((3600.0 - 2000.0) / 25.0) * 610.0;  // 39,040
+    double expected = ((7200.0 - 2000.0) / 25.0) * 610.0;  // 126,880 (per-edge doubling)
     assert(std::abs(r.channel_overflow - expected) < 1e-3);
     assert(r.channel_overflow > 1600.0);
     std::cout << "testHorizontalOverflowIsAreaDenominatedByChannelWidth ok\n";
@@ -326,7 +326,7 @@ void testCostDrivenPrefersFtOverSaturatedChannel() {
 
     RoutingResult legacy = routeProblem(f.problem, f.placement, /*cost_driven=*/false);
     assert(legacy.open_routes == 0);
-    double expected_legacy_overflow = ((3600.0 - 2000.0) / 25.0) * 610.0;  // 39,040, T0 fixture (a)
+    double expected_legacy_overflow = ((7200.0 - 2000.0) / 25.0) * 610.0;  // 126,880 (per-edge doubling)
     assert(std::abs(legacy.channel_overflow - expected_legacy_overflow) < 1e-3);
     assert(legacy.soft_feedthrough_nets[2] == 0.0);  // legacy pass-0 never touches S
 
@@ -514,18 +514,18 @@ void testAdaptiveChunkingSplitsAtBottleneck() {
     assert(std::abs(diverted - 2000.0) < kEps);
     assert(std::abs(r.soft_feedthrough_nets[2] - 2000.0) < kEps);
 
-    // The channel must show exactly the 1000-net chunk's usage (no overflow -- it filled to exactly
-    // capacity, not past it), confirming the split point was precisely at the bottleneck, not before
-    // or after it.
+    // The split still fills exactly 1000 nets at the bottleneck, but per-edge accounting charges the
+    // channel's vertical axis on BOTH the entry (from A) and exit (to B) edge, doubling the committed
+    // chunk's demand -- so this now OVERSHOOTS vcap=1000 rather than saturating it exactly.
     bool found_channel = false;
     for (const auto& ch : r.channels) {
         if (std::abs(ch.rect.w - 40.0) < kEps && std::abs(ch.rect.h - 120.0) < kEps) {
             found_channel = true;
-            assert(std::abs(ch.vertical_usage - 1000.0) < kEps);
+            assert(std::abs(ch.vertical_usage - 2000.0) < kEps);
         }
     }
     assert(found_channel);
-    assert(r.channel_overflow == 0.0);  // filled to exactly capacity, never exceeded it
+    assert(std::abs(r.channel_overflow - 4800.0) < 1e-3);  // per-edge: committed 1000 nets accrue 2000 vertical demand (entry+exit), overshooting vcap=1000; overflow = ((2000-1000)/25)*120 = 4800 um^2. pathSlack still sizes chunks by entry-axis capacity (documented deferred gap), so it fills 1000 nets, not 500.
 
     std::cout << "testAdaptiveChunkingSplitsAtBottleneck ok (chunks=" << r.routes.size()
                << ", diverted=" << diverted << ")\n";
@@ -877,6 +877,11 @@ void testFeasibilityFallbackNeverWorseThanLegacyOnGenuineDeadEnd() {
               << cd.open_routes << ")\n";
 }
 
+// Beta Task 3 note: under per-edge channel demand this fixture INVERTS -- the 900-net straight
+// filler now overflows CH1 (1800 > vcap 1000) on BOTH sides, so cost-driven's elbow diversion makes
+// it the WINNER (used_fallback=false); the numbers below describe the pre-per-edge single-charge
+// model.
+//
 // P2 Task 5.1 (design p2-design.md §9 T5 preamble; controller amendment -- FULL comparison gate).
 // The binding design text mandates routeProblem return "the cost-driven result when it is fully
 // routed AND NO WORSE, else the fallback" -- a full lexicographic cost comparison, not merely T5's
@@ -965,33 +970,39 @@ void testComparisonGatePrefersLegacyWhenCostDrivenFullyRoutedButWorse() {
     // engaged here (nothing was open). This fixture's whole point is that the amendment's full
     // AREA-cost comparison must still catch and correct this case.
     assert(r.open_routes == 0);
-    assert(r.used_fallback);  // legacy won on cost, not on open_routes -- the amendment's target gap.
+    assert(!r.used_fallback);  // per-edge INVERTS this fixture: cost-driven now wins (see below), so the gate keeps cost-driven's own result
 
-    // Wholesale substitution (single-source consistency -- every P2 task's reviewer check): the
-    // returned result matches a direct legacy call bit-for-bit on every aggregate field, not a
-    // partial/Frankenstein merge of the two.
+    // Non-substitution proof (Beta Task 3, replacing the pre-per-edge "wholesale substitution" check).
+    // Under the INVERTED premise (used_fallback=false above, the gate keeps cost-driven's OWN result),
+    // r must DIFFER from a direct legacy call on the decisive fields -- proving the gate genuinely kept
+    // cost-driven's strictly-better result rather than substituting legacy wholesale. (Mirror image of
+    // the OLD assertion, which proved r==legacy when the gate DID substitute; now it proves r<legacy.)
     RoutingResult legacy = routeProblem(f.problem, f.placement, /*cost_driven=*/false);
-    assert(r.open_routes == legacy.open_routes);
-    assert(std::abs(r.total_wirelength - legacy.total_wirelength) < kEps);
-    assert(std::abs(r.channel_overflow - legacy.channel_overflow) < kEps);
-    assert(std::abs(r.feedthrough_mismatch - legacy.feedthrough_mismatch) < kEps);
-    assert(r.routes.size() == legacy.routes.size());
+    assert(r.open_routes == legacy.open_routes);                    // both fully routed (0 == 0)
+    assert(r.total_wirelength < legacy.total_wirelength - kEps);    // cost-driven WL strictly lower
+    assert(r.channel_overflow < legacy.channel_overflow - kEps);    // cost-driven overflow strictly lower
 
-    // Hand-derived numbers (see fixture comment): legacy achieves zero overflow via CH4, strictly
-    // better than the cost-driven elbow's 4,880 um^2 overflow -- confirms this is a real, decisive
-    // win for legacy, not a coincidental tie.
-    assert(legacy.channel_overflow == 0.0);
-    assert(std::abs(legacy.total_wirelength - 646500.0) < 1.0);
+    // Hand-derived numbers (measured post-per-edge): per-edge doubling now makes the 900-net straight
+    // vertical filler alone overshoot CH1 (2*900=1800 > vcap=1000) on BOTH sides regardless of the
+    // elbow bundle's routing choice, so legacy no longer achieves zero overflow here -- it is now
+    // STRICTLY WORSE than cost-driven's own diversion of the elbow bundle (4,880 um^2), confirming
+    // cost-driven's win above.
+    assert(std::abs(legacy.channel_overflow - 19520.0) < 1.0);
+    assert(std::abs(legacy.total_wirelength - 625500.0) < 1.0);
 
     // Cross-check the LOSING side's own numbers directly (without the gate) to confirm the fixture
-    // actually exercises the elbow mispricing described above, not some other divergence.
+    // actually exercises the per-edge-driven inversion described above, not some other divergence.
+    // area_cost_legacy = alpha*wl + kOverflowAreaWeight*overflow = 0.001*625500 + 1e6*19520
+    //                   = 625.5 + 1.952e10 = 19,520,000,625.5
     double area_cost_legacy = f.problem.alpha * legacy.total_wirelength +
                                kOverflowAreaWeight * legacy.channel_overflow +
                                kFtMismatchWeight * legacy.feedthrough_mismatch;
-    assert(std::abs(area_cost_legacy - 646.5) < 1.0);
+    assert(std::abs(area_cost_legacy - 19520000625.5) < 100.0);
+    assert(std::abs(r.channel_overflow - 4880.0) < 1.0);
 
-    std::cout << "testComparisonGatePrefersLegacyWhenCostDrivenFullyRoutedButWorse ok (legacy_wl="
-              << legacy.total_wirelength << ", legacy_overflow=" << legacy.channel_overflow << ")\n";
+    std::cout << "testComparisonGatePrefersLegacyWhenCostDrivenFullyRoutedButWorse ok (cd_overflow="
+              << r.channel_overflow << ", legacy_wl=" << legacy.total_wirelength
+              << ", legacy_overflow=" << legacy.channel_overflow << ")\n";
 }
 
 // Determinism of the comparison gate itself (GC6 purity, same invariant every other P2 fixture

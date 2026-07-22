@@ -1,5 +1,6 @@
 #include <cstdlib>
 #include <algorithm>
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -77,7 +78,11 @@ int main(int argc, char** argv) {
         auto validation = validateSolution(problem, result.best_placement, result.best_routing);
         writeCfg(output_path, problem, result.best_placement, result.best_routing);
 
-        std::cerr << "engine=" << result.engine_name
+        // Beta Task 3: 12 significant figures (was the ostream default 6) so the self-consistency
+        // regression can compare solver-reported score/wirelength/overflow against efgr_rescore's
+        // output at <=1e-6 relative without display quantization masking the true agreement.
+        std::cerr << std::setprecision(12)
+                  << "engine=" << result.engine_name
                   << " iters=" << result.iterations
                   << " exact_evals=" << result.exact_evaluations
                   << " blocks=" << problem.blocks.size()
@@ -88,6 +93,7 @@ int main(int argc, char** argv) {
                   << " outline_area=" << result.best_score.outline_area
                   << " wirelength=" << result.best_score.wirelength
                   << " channel_overflow=" << result.best_routing.channel_overflow
+                  << " channel_overflow_nets=" << result.best_routing.channel_overflow_nets
                   << " feedthrough_mismatch=" << result.best_routing.feedthrough_mismatch
                   << " open_routes=" << result.best_routing.open_routes
                   << " validation=" << (validation.ok ? "ok" : "fail") << "\n";

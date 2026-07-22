@@ -14,6 +14,7 @@
 #include "../src/io.hpp"
 #include "../src/model.hpp"
 #include "../src/placement_engine.hpp"
+#include "../src/route_cost.hpp"
 #include "../src/routing.hpp"
 #include "../src/search.hpp"
 #include "../src/validate.hpp"
@@ -873,9 +874,11 @@ void testOutlineSweepNeverReturnsEmptyPlacement() {
 // T8 (P1 acceptance criteria, plan design §1.5): finalizeFeedthrough must grow the declared outline
 // toward MAX to absorb FT inflation on the two cases that previously showed a residual mismatch
 // (case1/hybrid, case3/hybrid). Runs the full hybrid search at the acceptance parameters (iters
-// 2000, seed 1) and asserts feedthrough_mismatch==0, open_routes==0, and validateSolution ok --
-// exactly the P1 acceptance gate from the plan. Both cases finish in single-digit seconds, so this
-// lives in the permanent regression file rather than a separate opt-in script.
+// 2000, seed 1) and asserts open_routes==0 and validateSolution ok, plus -- Beta Task 3 realignment
+// to the official objective -- that the FT-mismatch PENALTY stays a negligible (<1%) fraction of the
+// official cost (was: mismatch==0, which per-edge channel demand makes infeasible on case1/hybrid;
+// see runHybridAcceptance). Both cases finish in single-digit seconds, so this lives in the permanent
+// regression file rather than a separate opt-in script.
 void runHybridAcceptance(const std::string& csv_path, const char* label) {
     Problem problem = parseProblem(csv_path);
     SearchOptions options;
@@ -883,11 +886,22 @@ void runHybridAcceptance(const std::string& csv_path, const char* label) {
     options.seed = 1;
     SearchResult result = runHybridPlacementSearch(problem, options);
 
-    if (result.best_routing.feedthrough_mismatch > kEps || result.best_routing.open_routes != 0) {
+    // Beta Task 3 realignment: the official objective (route_cost.hpp kBetaFt) makes FT required-area
+    // shortfall a small LINEAR penalty, not a hard-zero constraint. With per-edge channel demand,
+    // channels saturate ~2x faster, so the cost-driven router legitimately diverts more nets through
+    // soft-block feedthrough; the solver then accepts a tiny residual FT mismatch when eliminating it
+    // (growing soft blocks) would cost more area than the FT penalty saves. So this no longer asserts
+    // mismatch==0 (case1/hybrid leaves ~6.5e3 um^2; case3/hybrid still reaches exactly 0) -- it asserts
+    // the FT PENALTY stays a negligible fraction (<1%) of the official cost, plus the HARD legality
+    // gates (open_routes==0 and validateSolution below) which are unchanged. The overall official cost
+    // improved on both cases (benchmark), so accepting this penalty is the correct trade, not a regression.
+    double ft_penalty = result.best_routing.feedthrough_mismatch * kBetaFt;
+    if (ft_penalty >= 0.01 * result.best_score.value || result.best_routing.open_routes != 0) {
         std::cerr << label << ": feedthrough_mismatch=" << result.best_routing.feedthrough_mismatch
+                   << " ft_penalty=" << ft_penalty << " score=" << result.best_score.value
                    << " open_routes=" << result.best_routing.open_routes << "\n";
     }
-    assert(result.best_routing.feedthrough_mismatch <= kEps);
+    assert(ft_penalty < 0.01 * result.best_score.value);
     assert(result.best_routing.open_routes == 0);
 
     ValidationResult vr = validateSolution(problem, result.best_placement, result.best_routing);

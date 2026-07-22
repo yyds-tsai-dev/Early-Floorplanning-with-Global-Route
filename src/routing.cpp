@@ -403,6 +403,15 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
                 double missing_width = (ch.vertical_usage - vcap) / 25.0;
                 rr.channel_overflow += missing_width * ch.rect.h;
             }
+            // C1 milestone: checker-unit overflow/capacity, RAW 25*h / 25*w (no max(1.0, ·) clamp --
+            // matches the official checker's capacity_h/capacity_v_by_channel exactly, e.g. case0
+            // CH6 capacity_h = 25*1.231 = 30.775). Feeds eval.cpp's global R = overflow/capacity
+            // penalty; does not replace the area-denominated channel_overflow accrual above.
+            double cap_h = 25.0 * ch.rect.h;
+            double cap_v = 25.0 * ch.rect.w;
+            rr.channel_capacity_total += cap_h + cap_v;
+            if (ch.horizontal_usage > cap_h) rr.channel_overflow_nets += ch.horizontal_usage - cap_h;
+            if (ch.vertical_usage > cap_v) rr.channel_overflow_nets += ch.vertical_usage - cap_v;
         }
         for (std::size_t i = 0; i < rr.soft_feedthrough_nets.size(); ++i) {
             double nets = rr.soft_feedthrough_nets[i];

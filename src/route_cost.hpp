@@ -13,12 +13,32 @@ namespace efgr {
 // (future) cost-driven Dijkstra pass edge weights denominated in the SAME units the scorer charges
 // (eval.cpp:145-146), so the shortest path is the min-Delta-Cost path.
 
-// Named weights (T0 deferred item): match eval.cpp's shared 1e6 multipliers exactly (routing.cpp's
-// area-denominated channel_overflow and feedthrough_mismatch, both um^2). Do NOT change eval.cpp's
-// literals in this task (T6 wires that consistency); these constants exist so this header and any
-// future router code reference a name instead of repeating the magic number.
-constexpr double kOverflowAreaWeight = 1e6;  // per um^2 of channel overflow area (eval.cpp:145)
-constexpr double kFtMismatchWeight = 1e6;    // per um^2 of FT required-area shortfall (eval.cpp:146)
+// Named weights: ROUTER-SIDE marginal pricing only (channelMarginalCost/softFtMarginalCost below,
+// and the cost-driven Dijkstra's history surcharge / round-selection roundCost in routing.cpp).
+// These area-denominated per-channel proxies (routing.cpp's channel_overflow and
+// feedthrough_mismatch, both um^2) are what the router uses internally to find low-overflow /
+// low-FT-mismatch PATHS -- a local, per-edge marginal signal for search, not the scorer's cost.
+// C1 milestone: eval.cpp's exact tier no longer uses these weights at all. It charges a GLOBAL,
+// checker-faithful penalty instead -- kBetaLin/kBetaTail (below) applied to R =
+// channel_overflow_nets/channel_capacity_total (routing.cpp, RAW 25*h/25*w capacity), plus a flat
+// kBetaFt * feedthrough_mismatch term. The router-scorer "consistency invariant" this header used
+// to document is gone by design: the router's marginal proxy and the scorer's global penalty are
+// deliberately decoupled now, and kOverflowAreaWeight/kFtMismatchWeight are kept unchanged here
+// purely so the router's own search signal is undisturbed by the C1 scorer remap.
+constexpr double kOverflowAreaWeight = 1e6;  // per um^2 of channel overflow area (router-side proxy only)
+constexpr double kFtMismatchWeight = 1e6;    // per um^2 of FT required-area shortfall (router-side proxy only)
+
+// C1 milestone (official-checker cost replica): SCORER-side global overflow-rate penalty
+// coefficients + FT excess weight, matching the byte-verified official checker's cost_breakdown
+// fields exactly (beta_lin, beta_tail, threshold, beta_ft). Consumed by eval.cpp's exact-tier scorer
+// (routeAndScoreAt) applied to R = channel_overflow_nets/channel_capacity_total (model.hpp fields,
+// populated by routing.cpp). Beta Task 3: these live HERE, not in model.hpp, so they do not collide
+// with src/cfg_score.cpp's own anonymous-namespace kBetaLin/kBetaTail (the locked golden re-scorer,
+// which includes model.hpp but NOT this header) -- see model.hpp's reconciliation note.
+constexpr double kBetaLin = 20.0;                 // linear overflow-rate coefficient
+constexpr double kBetaTail = 1.5;                 // steeper tail coefficient (R > threshold)
+constexpr double kOverflowRateThreshold = 0.05;   // overflow-rate threshold for the tail
+constexpr double kBetaFt = 3.0;                   // flat per-um^2 FT required-area shortfall weight
 
 // Channel overflow AREA for a given direction at `usage` nets (design p2-design.md §8.1 / T0
 // denomination, routing.cpp:221-243): horizontal usage is capacitated by 25*h (missing capacity is

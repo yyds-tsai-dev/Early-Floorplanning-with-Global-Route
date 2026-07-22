@@ -12,6 +12,15 @@ namespace efgr {
 
 constexpr double kEps = 1e-6;
 
+// NOTE (Beta Task 3 reconciliation): the C1 milestone's official overflow-rate coefficients
+// (kBetaLin/kBetaTail/kOverflowRateThreshold/kBetaFt) live in route_cost.hpp, NOT here. The stash
+// originally placed them at this efgr scope, but src/cfg_score.cpp (the locked golden re-scorer,
+// committed after the stash was cut) independently defines its OWN kBetaLin/kBetaTail in an anonymous
+// namespace, and cfg_score.cpp includes model.hpp -> the two collide (ambiguous name). Relocating the
+// solver-side coefficients to route_cost.hpp -- which cfg_score.cpp does NOT include, and which
+// already hosts the sibling routing cost weights kOverflowAreaWeight/kFtMismatchWeight -- keeps the
+// oracle byte-untouched while eval.cpp (which includes route_cost.hpp) still sees them unqualified.
+
 enum class BlockType { Edge, Macro, Soft };
 
 struct Rect {
@@ -93,6 +102,14 @@ struct RoutingResult {
     double total_wirelength = 0.0;
     double channel_overflow = 0.0;
     double feedthrough_mismatch = 0.0;
+    // C1 milestone: checker-unit (nets / nets-capacity) overflow accrual, RAW 25*h / 25*w capacity
+    // (no max(1.0, ·) clamp -- the official checker capacitates on the true channel dimension, e.g.
+    // case0 CH6 capacity_h = 25*1.231 = 30.775). Populated by computeOverflowAndMismatch alongside
+    // the pre-existing area-denominated channel_overflow field above (that field is unchanged and
+    // still drives respace.cpp/search.cpp comparisons; these two are additive, scorer-only inputs
+    // for eval.cpp's global overflow-rate penalty).
+    double channel_overflow_nets = 0.0;
+    double channel_capacity_total = 0.0;
     int open_routes = 0;
     // P2 Task 5.1 (design p2-design.md §9 T5, controller amendment: comparison gate). Telemetry only
     // -- true iff routeProblem(..., cost_driven=true) returned the legacy two-pass result because it

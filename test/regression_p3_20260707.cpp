@@ -945,9 +945,11 @@ void testFinalizeFeedthroughRespaceCongestedVariant() {
     SearchResult result;
     result.best_placement = pl;
     result.best_score = exactScore(p, pl, &result.best_routing);
-    // Precondition: both FT under-provisioning AND channel congestion are real before finalize.
+    // Precondition: FT under-provisioning is real before finalize. Beta Task 3: with per-edge channel
+    // demand the cost-driven router now diverts this bundle through BLK02's feedthrough rather than
+    // overflowing the channel, so channel_overflow is 0 here (was >0 under the single-charge model) --
+    // the fixture now exercises finalize's FT paydown alone, which still drives the mismatch to 0 below.
     assert(result.best_routing.feedthrough_mismatch > kEps);
-    assert(result.best_routing.channel_overflow > kEps);
 
     std::unique_ptr<PlacementEngine> engine = makePlacementEngine("bstar");
     finalizeFeedthrough(p, *engine, result);
