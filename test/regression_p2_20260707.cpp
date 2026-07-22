@@ -926,7 +926,16 @@ struct ElbowMispricingFixture {
     Placement placement;
 };
 
-ElbowMispricingFixture makeElbowMispricingFixture() {
+// `elbow_nets` (Beta Task 3 review Finding 1 fix, default 300 = this fixture's original value used
+// by testComparisonGateKeepsCostDrivenWhenItWins/testComparisonGateDeterministic below): scaling the
+// elbow bundle's own net count scales cost-driven's blind self-overflow on CH1 (its exit hop into
+// TGT1 is never priced, see routing.cpp:231-239) roughly linearly, while legacy's overflow stays
+// pinned at 19,520 um^2 (legacy always detours the elbow via CH4 entirely, so only the filler's own
+// unavoidable pass-through ever touches CH1). Swept empirically against the compiled router: cost-
+// driven still narrowly self-wins at elbow_nets=850 (self-overflow 18,300 < legacy's 19,520); by 900
+// the two cross and used_fallback flips true. testComparisonGateSwitchesToLegacyWhenCostDrivenFully
+// RoutedButWorse below uses elbow_nets=1000, comfortably past that crossover.
+ElbowMispricingFixture makeElbowMispricingFixture(int elbow_nets = 300) {
     ElbowMispricingFixture f;
     Problem& p = f.problem;
     p.outline_w = 200.0;
@@ -949,7 +958,7 @@ ElbowMispricingFixture makeElbowMispricingFixture() {
     Bundle elbow;  // SRC2 -> TGT1: cost-driven takes the mispriced CH1 elbow; legacy detours via CH4.
     elbow.source = 2;
     elbow.target = 1;
-    elbow.nets = 300;
+    elbow.nets = elbow_nets;
     p.bundles = {filler, elbow};
 
     Placement& pl = f.placement;
@@ -962,7 +971,13 @@ ElbowMispricingFixture makeElbowMispricingFixture() {
     return f;
 }
 
-void testComparisonGatePrefersLegacyWhenCostDrivenFullyRoutedButWorse() {
+// Beta Task 3 review renamed this from testComparisonGatePrefersLegacyWhenCostDrivenFullyRoutedBut
+// Worse: per-edge accounting inverted the fixture's outcome (see makeElbowMispricingFixture's comment
+// above) so it now asserts cost-driven WINS, not legacy -- the name must describe what the test
+// actually checks. testComparisonGateSwitchesToLegacyWhenCostDrivenFullyRoutedButWorse below (new)
+// restores coverage of the used_fallback=true branch this test's old name promised but no longer
+// exercised.
+void testComparisonGateKeepsCostDrivenWhenItWins() {
     ElbowMispricingFixture f = makeElbowMispricingFixture();
 
     RoutingResult r = routeProblem(f.problem, f.placement, /*cost_driven=*/true);
@@ -1000,9 +1015,50 @@ void testComparisonGatePrefersLegacyWhenCostDrivenFullyRoutedButWorse() {
     assert(std::abs(area_cost_legacy - 19520000625.5) < 100.0);
     assert(std::abs(r.channel_overflow - 4880.0) < 1.0);
 
-    std::cout << "testComparisonGatePrefersLegacyWhenCostDrivenFullyRoutedButWorse ok (cd_overflow="
+    std::cout << "testComparisonGateKeepsCostDrivenWhenItWins ok (cd_overflow="
               << r.channel_overflow << ", legacy_wl=" << legacy.total_wirelength
               << ", legacy_overflow=" << legacy.channel_overflow << ")\n";
+}
+
+// P2 Task 5.1 legacy-switch coverage (Beta Task 3 review Finding 1): the fixture's DEFAULT elbow_nets
+// (300, above) no longer exercises the used_fallback=true branch under per-edge accounting -- see
+// testComparisonGateKeepsCostDrivenWhenItWins. This is the branch's ONLY remaining coverage: reusing
+// the identical geometry/filler, only elbow_nets changes (300 -> 1000, see makeElbowMispricingFixture's
+// comment for the empirical crossover sweep). Confirmed via a scratch probe against the compiled
+// router (same discipline as the fixture's own "confirmed... before being transcribed here" comment).
+void testComparisonGateSwitchesToLegacyWhenCostDrivenFullyRoutedButWorse() {
+    ElbowMispricingFixture f = makeElbowMispricingFixture(/*elbow_nets=*/1000);
+
+    RoutingResult r = routeProblem(f.problem, f.placement, /*cost_driven=*/true);
+    RoutingResult legacy = routeProblem(f.problem, f.placement, /*cost_driven=*/false);
+
+    // Both sides fully routed -- this exercises the FULL area-cost comparison, not the older T5
+    // open-routes-only fallback (which would never engage here since nothing is open on either side).
+    assert(r.open_routes == 0);
+    assert(legacy.open_routes == 0);
+    assert(r.used_fallback);  // the branch this test exists to cover
+
+    // The gate must return the legacy pass's result WHOLESALE (not a blend): decisive metrics are
+    // bit-identical to a direct legacy call on the same (problem, placement) -- probe-confirmed values
+    // total_wirelength=804000, channel_overflow=19520, feedthrough_mismatch=0, routes.size()=2.
+    assert(r.open_routes == legacy.open_routes);
+    assert(std::abs(r.total_wirelength - legacy.total_wirelength) < kEps);
+    assert(std::abs(r.channel_overflow - legacy.channel_overflow) < kEps);
+    assert(std::abs(r.feedthrough_mismatch - legacy.feedthrough_mismatch) < kEps);
+    assert(r.routes.size() == legacy.routes.size());
+    assert(std::abs(r.total_wirelength - 804000.0) < 1.0);
+    assert(std::abs(r.channel_overflow - 19520.0) < 1.0);
+
+    // Determinism (same discipline as testComparisonGateDeterministic below): two cost_driven=true
+    // calls on the identical (problem, placement) must be bit-identical, including used_fallback.
+    RoutingResult r2 = routeProblem(f.problem, f.placement, /*cost_driven=*/true);
+    assert(r2.used_fallback == r.used_fallback);
+    assert(std::abs(r2.total_wirelength - r.total_wirelength) < kEps);
+    assert(std::abs(r2.channel_overflow - r.channel_overflow) < kEps);
+
+    std::cout << "testComparisonGateSwitchesToLegacyWhenCostDrivenFullyRoutedButWorse ok (wl="
+              << r.total_wirelength << ", overflow=" << r.channel_overflow
+              << ", used_fallback=" << r.used_fallback << ")\n";
 }
 
 // Determinism of the comparison gate itself (GC6 purity, same invariant every other P2 fixture
@@ -1157,7 +1213,8 @@ int main() {
     testNegotiationClearsRoundZeroOverflow();
     testNegotiatedRoutingDeterministic();
     testFeasibilityFallbackNeverWorseThanLegacyOnGenuineDeadEnd();
-    testComparisonGatePrefersLegacyWhenCostDrivenFullyRoutedButWorse();
+    testComparisonGateKeepsCostDrivenWhenItWins();
+    testComparisonGateSwitchesToLegacyWhenCostDrivenFullyRoutedButWorse();
     testComparisonGateDeterministic();
     testRoundConsistencyOfSoftFeedthroughFields();
     std::cout << "P2 T0+T1+T2+T3+T4+T5+T5.1+T6 regressions passed\n";

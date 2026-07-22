@@ -875,33 +875,55 @@ void testOutlineSweepNeverReturnsEmptyPlacement() {
 // toward MAX to absorb FT inflation on the two cases that previously showed a residual mismatch
 // (case1/hybrid, case3/hybrid). Runs the full hybrid search at the acceptance parameters (iters
 // 2000, seed 1) and asserts open_routes==0 and validateSolution ok, plus -- Beta Task 3 realignment
-// to the official objective -- that the FT-mismatch PENALTY stays a negligible (<1%) fraction of the
-// official cost (was: mismatch==0, which per-edge channel demand makes infeasible on case1/hybrid;
-// see runHybridAcceptance). Both cases finish in single-digit seconds, so this lives in the permanent
-// regression file rather than a separate opt-in script.
-void runHybridAcceptance(const std::string& csv_path, const char* label) {
+// to the official objective -- that any FT-mismatch PENALTY stays negligible (was: mismatch==0, which
+// per-edge channel demand makes infeasible on case1/hybrid; see runHybridAcceptance). Both cases
+// finish in single-digit seconds, so this lives in the permanent regression file rather than a
+// separate opt-in script.
+//
+// Beta Task 3 review Finding 2: the original fix used a single uniform <1% band for BOTH cases, but
+// case3/hybrid still reaches EXACT FT parity (mismatch==0) and case1/hybrid's observed residual was a
+// small fraction of score -- a 1% band was far looser than needed and would not catch a real
+// regression until it was already large. Split per case (`expect_exact_ft_parity`): case3 keeps the
+// hard ratchet (feedthrough_mismatch <= kEps, i.e. still exactly 0 -- no loosening at all, reconfirmed
+// by this fix); case1 gets a tight band (ft_penalty <= 0.002*score, 0.2%). This band is a TRIPWIRE,
+// not a target: the official objective (route_cost.hpp kBetaFt) makes FT required-area shortfall a
+// small LINEAR penalty, not a hard-zero constraint, and with per-edge channel demand (channels
+// saturate ~2x faster) the cost-driven router legitimately diverts more nets through soft-block
+// feedthrough on case1 -- the solver accepts a tiny residual FT mismatch there when eliminating it
+// (growing soft blocks) would cost more area than the FT penalty saves. The overall official cost
+// improved on both cases (benchmark), so accepting case1's small penalty is the correct trade, not a
+// regression; the band just means a FUTURE change that blows this residual up much further gets
+// caught early.
+//
+// Numeric note (deviates from the review's literal "0.1%/6496 um^2" recommendation, on measurement,
+// not on intent): re-run against current HEAD (2791587, an unrelated placement-decode change that
+// landed after the review was written) measures feedthrough_mismatch=6150.1 um^2, ratio=0.1158%, not
+// the review's cited 6496 um^2/0.066% -- the SA search's outcome shifted with the intervening decode
+// change, as heuristic search results generally can. 0.1% would therefore fail on current HEAD; 0.2%
+// keeps ~1.7x headroom over the freshly-measured 0.1158% while staying 5x tighter than the original
+// 1% band this finding was about. If this value drifts again, re-measure (this function already
+// prints the ratio on every near-fail) rather than widen blindly.
+void runHybridAcceptance(const std::string& csv_path, const char* label, bool expect_exact_ft_parity) {
     Problem problem = parseProblem(csv_path);
     SearchOptions options;
     options.iters = 2000;
     options.seed = 1;
     SearchResult result = runHybridPlacementSearch(problem, options);
 
-    // Beta Task 3 realignment: the official objective (route_cost.hpp kBetaFt) makes FT required-area
-    // shortfall a small LINEAR penalty, not a hard-zero constraint. With per-edge channel demand,
-    // channels saturate ~2x faster, so the cost-driven router legitimately diverts more nets through
-    // soft-block feedthrough; the solver then accepts a tiny residual FT mismatch when eliminating it
-    // (growing soft blocks) would cost more area than the FT penalty saves. So this no longer asserts
-    // mismatch==0 (case1/hybrid leaves ~6.5e3 um^2; case3/hybrid still reaches exactly 0) -- it asserts
-    // the FT PENALTY stays a negligible fraction (<1%) of the official cost, plus the HARD legality
-    // gates (open_routes==0 and validateSolution below) which are unchanged. The overall official cost
-    // improved on both cases (benchmark), so accepting this penalty is the correct trade, not a regression.
     double ft_penalty = result.best_routing.feedthrough_mismatch * kBetaFt;
-    if (ft_penalty >= 0.01 * result.best_score.value || result.best_routing.open_routes != 0) {
+    double ratio = result.best_score.value > 0.0 ? ft_penalty / result.best_score.value : 0.0;
+    bool near_fail = expect_exact_ft_parity ? result.best_routing.feedthrough_mismatch > kEps
+                                             : ft_penalty >= 0.002 * result.best_score.value;
+    if (near_fail || result.best_routing.open_routes != 0) {
         std::cerr << label << ": feedthrough_mismatch=" << result.best_routing.feedthrough_mismatch
                    << " ft_penalty=" << ft_penalty << " score=" << result.best_score.value
-                   << " open_routes=" << result.best_routing.open_routes << "\n";
+                   << " ratio=" << ratio << " open_routes=" << result.best_routing.open_routes << "\n";
     }
-    assert(ft_penalty < 0.01 * result.best_score.value);
+    if (expect_exact_ft_parity) {
+        assert(result.best_routing.feedthrough_mismatch <= kEps);  // case3: unchanged hard ratchet
+    } else {
+        assert(ft_penalty <= 0.002 * result.best_score.value);  // case1: tight 0.2% tripwire (see note above)
+    }
     assert(result.best_routing.open_routes == 0);
 
     ValidationResult vr = validateSolution(problem, result.best_placement, result.best_routing);
@@ -910,15 +932,18 @@ void runHybridAcceptance(const std::string& csv_path, const char* label) {
     }
     assert(vr.ok);
     std::cout << label << " ok (mismatch=" << result.best_routing.feedthrough_mismatch
+               << " ft_penalty_ratio=" << ratio
                << " open_routes=" << result.best_routing.open_routes << ")\n";
 }
 
 void testFinalizeFeedthroughAcceptanceCase1Hybrid() {
-    runHybridAcceptance("test/2026 ICCAD_case.case1.csv", "testFinalizeFeedthroughAcceptanceCase1Hybrid");
+    runHybridAcceptance("test/2026 ICCAD_case.case1.csv", "testFinalizeFeedthroughAcceptanceCase1Hybrid",
+                         /*expect_exact_ft_parity=*/false);
 }
 
 void testFinalizeFeedthroughAcceptanceCase3Hybrid() {
-    runHybridAcceptance("test/2026 ICCAD_case.case3.csv", "testFinalizeFeedthroughAcceptanceCase3Hybrid");
+    runHybridAcceptance("test/2026 ICCAD_case.case3.csv", "testFinalizeFeedthroughAcceptanceCase3Hybrid",
+                         /*expect_exact_ft_parity=*/true);
 }
 
 }  // namespace

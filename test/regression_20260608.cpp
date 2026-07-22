@@ -116,6 +116,14 @@ int testLargeBundleSplitsAcrossParallelChannels() {
     int total_nets = 0;
     for (const auto& route : r.routes) total_nets += route.nets;
     if (total_nets != 1800) return fail("split routes must preserve total net demand");
+    // Beta Task 3 review Finding 3: Task 3 dropped the overflow assertion entirely when it stopped
+    // being exactly zero (see comment above), leaving a future overflow blow-up invisible here. Pin
+    // the CURRENT observed value with a tight tolerance, same pattern as regression_p2_20260707.cpp's
+    // testAdaptiveChunkingSplitsAtBottleneck (pins 4800 +/- 1e-3): confirmed deterministic (re-run
+    // twice, bit-identical at setprecision(17)) rather than derived by hand.
+    if (std::abs(r.channel_overflow - 8120.0) >= 1e-3) {
+        return fail("channel_overflow drifted from the pinned 8120 um^2 -- re-measure and update the pin, don't widen blindly");
+    }
     return 0;
 }
 
