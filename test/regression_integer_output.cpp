@@ -46,6 +46,28 @@ int main() {
         }
         std::printf("case%d integer decode ok\n", c);
     }
+
+    // Beta Task 4 post-packaging fix: the fractional-output leak (src/respace.cpp's relaxOneAxis
+    // widening gaps by need/25.0 without integerizing) was dormant under bstar at Task 4 review
+    // time ("early-exit fires first"), but Task 3's per-edge accounting makes respace fire on
+    // congested cases under the DEFAULT hybrid engine -- case1/case3 at the production default
+    // iters=1000 is the exact repro shape. Re-run those two cases through
+    // runHybridPlacementSearch (not bstar) at that shape and re-assert the same isInt checks on
+    // every rect plus the stamped outline.
+    for (int c : {1, 3}) {
+        Problem problem = parseProblem("test/2026 ICCAD_case.case" + std::to_string(c) + ".csv");
+        SearchOptions opt; opt.iters = 1000; opt.seed = 1;
+        SearchResult r = runHybridPlacementSearch(problem, opt);
+        assert(r.best_routing.open_routes == 0);
+        for (const Rect& rect : r.best_placement.rects) {
+            assert(isInt(rect.x) && isInt(rect.y) && isInt(rect.w) && isInt(rect.h));
+        }
+        if (r.best_placement.outline_w > 0.0) {
+            assert(isInt(r.best_placement.outline_w) && isInt(r.best_placement.outline_h));
+        }
+        std::printf("case%d hybrid integer decode ok\n", c);
+    }
+
     std::puts("integer output regressions passed");
     return 0;
 }

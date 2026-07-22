@@ -139,6 +139,16 @@ std::map<std::pair<int, int>, double> mergeDemandsMax(const std::vector<StripDem
     return merged;
 }
 
+// Integer-quantizes one widening contribution before it is folded into a coordinate (beta-task-4
+// post-packaging fix: contest output must be all-integer, QA A43). `need_w`/`need_h` originate as
+// usage/25.0 (channelDemands) and are then further scaled below by the secant MAX-clamp fallback,
+// so neither value alone is guaranteed integral -- this is the one point every widening delta
+// passes through on its way into new_coord[b], and hence into placement.rects[i].x/y. Ceil, never
+// round/floor: widening MORE only ever adds slack, so it can't turn a satisfied demand into an
+// unsatisfied one. The -kEps guard absorbs float noise so an already-integral contribution (e.g.
+// scale==1.0 applied to an exact need) is not bumped up an unnecessary extra unit.
+double ceilWidening(double x) { return std::ceil(x - kEps); }
+
 // Relaxes one axis (H: x using need_w/width; V: y using need_h/height) via longest-path over
 // ALL constraint-graph predecessors (not a single selected one -- p3-task-2 review, 2 Critical
 // findings), folding each node's OLD coordinate in as a virtual edge from the wall so the relax
@@ -219,7 +229,7 @@ std::vector<double> relaxAxis(const Problem& problem, const Placement& placement
             double demand = 0.0;
             auto it = merged.find(std::make_pair(a, b));
             if (it != merged.end()) demand = it->second;
-            best = std::max(best, new_coord[a] + size[a] + scale * demand);
+            best = std::max(best, new_coord[a] + size[a] + ceilWidening(scale * demand));
         }
 
         // Term 2: every demand pair keyed EXACTLY (a,b) applies regardless of crossOverlap(a,b) --
@@ -236,7 +246,7 @@ std::vector<double> relaxAxis(const Problem& problem, const Placement& placement
             if (a != -1 && (order_rank[a] < 0 || order_rank[a] >= order_rank[b])) continue;
             double a_new = (a == -1) ? 0.0 : new_coord[a];
             double a_size = (a == -1) ? 0.0 : size[a];
-            best = std::max(best, a_new + a_size + scale * entry.second);
+            best = std::max(best, a_new + a_size + ceilWidening(scale * entry.second));
         }
 
         new_coord[b] = best;
