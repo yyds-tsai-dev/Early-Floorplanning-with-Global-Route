@@ -19,6 +19,17 @@ bool axisOverlap(double a0, double a1, double b0, double b1) {
     return std::min(a1, b1) - std::max(a0, b0) > kEps;
 }
 
+// Value stored by the exact-eval caches (runPlacementSearch's `exact_cache`,
+// finalizeFeedthrough's `inflated_exact_cache`), keyed by placementKey(INPUT placement). Carries the
+// EFFECTIVE placement (exactScore's grow may re-anchor edge blocks at a larger outline) alongside
+// score/routing so a cache hit reproduces the exact same triple and every stored best/committed
+// placement stays consistent with its stored routing.
+struct ExactEvalEntry {
+    Score score;
+    RoutingResult routing;
+    Placement placement;
+};
+
 }  // namespace
 
 Placement compactTowardOrigin(const Problem& problem, Placement placement) {
@@ -206,9 +217,13 @@ OutlineSweepResult outlineSweep(const Problem& problem, const Placement& base, c
         if (!anchored) continue;
 
         RoutingResult routing;
-        Score score = exactCached(variant, &routing);
+        // The effective placement (exactScore's grow may re-anchor edge blocks at a larger outline)
+        // is what must land in OutlineSweepResult.placement, not `variant` -- otherwise the returned
+        // routing's channels could reference geometry outside `variant`'s stamped outline.
+        Placement effective;
+        Score score = exactCached(variant, &routing, &effective);
         if (!have_best || outlineSweepBetter(routing, score.value, best.routing, best.score.value)) {
-            best = OutlineSweepResult{score, variant, routing};
+            best = OutlineSweepResult{score, effective, routing};
             have_best = true;
         }
     }
@@ -226,8 +241,9 @@ OutlineSweepResult outlineSweep(const Problem& problem, const Placement& base, c
         fallback.outline_h = 0.0;
         shrinkWrapOutline(problem, fallback);
         RoutingResult routing;
-        Score score = exactCached(fallback, &routing);
-        best = OutlineSweepResult{score, fallback, routing};
+        Placement effective;
+        Score score = exactCached(fallback, &routing, &effective);
+        best = OutlineSweepResult{score, effective, routing};
         have_best = true;
     }
     return best;
@@ -270,7 +286,12 @@ void finalizeFeedthrough(const Problem& problem, const PlacementEngine& engine, 
             shrinkWrapOutline(inflated, placement);
         }
         RoutingResult new_routing;
-        Score exact = exactScore(inflated, placement, &new_routing);
+        // Capture the effective placement (exactScore's grow may re-anchor edge blocks at a larger
+        // outline) so the tryCommit below stores geometry consistent with new_routing, never the raw
+        // pre-grow `placement`. `placement` itself is reused unchanged below (respaceFixedPoint /
+        // compactTowardOrigin), so a separate variable is required.
+        Placement decode_effective;
+        Score exact = exactScore(inflated, placement, &new_routing, &decode_effective);
         routing = new_routing;
         // T6 (design p3-design.md §3.4/§5, plan Task 6): respace the inflated re-decode against
         // its own routed channel demand BEFORE tryCommit -- FT inflation grows a soft block in
@@ -285,22 +306,26 @@ void finalizeFeedthrough(const Problem& problem, const PlacementEngine& engine, 
         // scored via `exact` above -- without a cache that duplicates a real exactScore/routeProblem
         // call per pass per variant (this function calls respaceFixedPoint up to twice per pass,
         // across up to 3 passes).
-        std::unordered_map<std::string, std::pair<Score, RoutingResult>> inflated_exact_cache;
-        ExactCachedFn inflatedExact = [&](const Placement& cand, RoutingResult* routing_out) {
+        std::unordered_map<std::string, ExactEvalEntry> inflated_exact_cache;
+        ExactCachedFn inflatedExact = [&](const Placement& cand, RoutingResult* routing_out,
+                                          Placement* placement_out) {
             std::string key = placementKey(cand);
             auto it = inflated_exact_cache.find(key);
             if (it != inflated_exact_cache.end()) {
-                if (routing_out) *routing_out = it->second.second;
-                return it->second.first;
+                if (routing_out) *routing_out = it->second.routing;
+                if (placement_out) *placement_out = it->second.placement;
+                return it->second.score;
             }
             RoutingResult routing;
-            Score score = exactScore(inflated, cand, &routing);
-            inflated_exact_cache.emplace(std::move(key), std::make_pair(score, routing));
+            Placement effective;
+            Score score = exactScore(inflated, cand, &routing, &effective);
+            inflated_exact_cache.emplace(std::move(key), ExactEvalEntry{score, routing, effective});
             if (routing_out) *routing_out = routing;
+            if (placement_out) *placement_out = effective;
             return score;
         };
         RespaceResult respaced = respaceFixedPoint(inflated, placement, inflatedExact);
-        tryCommit(placement, exact, new_routing);
+        tryCommit(decode_effective, exact, new_routing);
         tryCommit(respaced.placement, respaced.score, respaced.routing);
         // Reclaim outline/overflow lost to the inflated re-decode: same dims, tighter packing.
         Placement compacted = compactTowardOrigin(inflated, placement);
@@ -313,8 +338,9 @@ void finalizeFeedthrough(const Problem& problem, const PlacementEngine& engine, 
             // stamp 0 -> falls back to MAX) even though it was scored/routed at a smaller outline.
             shrinkWrapOutline(inflated, compacted);
             RoutingResult compacted_routing;
-            Score compacted_exact = exactScore(inflated, compacted, &compacted_routing);
-            tryCommit(compacted, compacted_exact, compacted_routing);
+            Placement compacted_effective;
+            Score compacted_exact = exactScore(inflated, compacted, &compacted_routing, &compacted_effective);
+            tryCommit(compacted_effective, compacted_exact, compacted_routing);
             // Same T6 respace, applied to the compacted variant before ITS tryCommit.
             RespaceResult compacted_respaced = respaceFixedPoint(inflated, compacted, inflatedExact);
             tryCommit(compacted_respaced.placement, compacted_respaced.score, compacted_respaced.routing);
@@ -331,8 +357,9 @@ void finalizeFeedthrough(const Problem& problem, const PlacementEngine& engine, 
             Placement cand = engine.decode(inflated, repair);
             if (!fitsOutlineWithoutOverlap(inflated, cand)) continue;
             RoutingResult cand_routing;
-            Score cand_exact = exactScore(inflated, cand, &cand_routing);
-            tryCommit(cand, cand_exact, cand_routing);
+            Placement cand_effective;
+            Score cand_exact = exactScore(inflated, cand, &cand_routing, &cand_effective);
+            tryCommit(cand_effective, cand_exact, cand_routing);
         }
     }
 }
@@ -357,22 +384,31 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
 
     PlacementState best_state = current;
     result.best_placement = current_place;
-    std::unordered_map<std::string, std::pair<Score, RoutingResult>> exact_cache;
-    auto exactCached = [&](const Placement& placement, RoutingResult* routing_out) {
+    std::unordered_map<std::string, ExactEvalEntry> exact_cache;
+    auto exactCached = [&](const Placement& placement, RoutingResult* routing_out, Placement* placement_out) {
         std::string key = placementKey(placement);
         auto it = exact_cache.find(key);
         if (it != exact_cache.end()) {
-            if (routing_out) *routing_out = it->second.second;
-            return it->second.first;
+            if (routing_out) *routing_out = it->second.routing;
+            if (placement_out) *placement_out = it->second.placement;
+            return it->second.score;
         }
         RoutingResult routing;
-        Score score = exactScore(problem, placement, &routing);
-        exact_cache.emplace(std::move(key), std::make_pair(score, routing));
+        Placement effective;
+        Score score = exactScore(problem, placement, &routing, &effective);
+        exact_cache.emplace(std::move(key), ExactEvalEntry{score, routing, effective});
         ++result.exact_evaluations;
         if (routing_out) *routing_out = routing;
+        if (placement_out) *placement_out = effective;
         return score;
     };
-    result.best_score = exactCached(result.best_placement, &result.best_routing);
+    {
+        // Seed best from the effective placement, so best_placement/best_routing start consistent
+        // even if this initial candidate's tight outline triggered the corrective grow.
+        Placement effective;
+        result.best_score = exactCached(result.best_placement, &result.best_routing, &effective);
+        result.best_placement = effective;
+    }
 
     struct CheapCandidate {
         double value;
@@ -392,7 +428,11 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
         constexpr std::size_t kTopCheapCandidates = 16;
         if (top_candidates.size() > kTopCheapCandidates) top_candidates.resize(kTopCheapCandidates);
     };
-    rememberCandidate(result.best_placement, current_score);
+    // Seed the cheap-candidate pool with `current_place` (the placement `current_score` was actually
+    // computed on), NOT result.best_placement -- the latter may now be the grown effective placement
+    // from the seed exact-eval above, which would mis-pair a grown placement with the ungrown cheap
+    // score. When the grow does not fire these are byte-identical (effective == current_place).
+    rememberCandidate(current_place, current_score);
 
     double temp = std::max(1.0, options.initial_temperature);
     int exact_interval = std::max(1, options.exact_interval);
@@ -428,11 +468,12 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
 
         if (iter % exact_interval == 0 || cand_score.value < result.best_score.value) {
             RoutingResult routing;
-            Score exact = exactCached(cand_place, &routing);
+            Placement effective;
+            Score exact = exactCached(cand_place, &routing, &effective);
             if (exact.value < result.best_score.value) {
                 result.best_score = exact;
                 best_state = candidate;
-                result.best_placement = cand_place;
+                result.best_placement = effective;
                 result.best_routing = routing;
             }
         }

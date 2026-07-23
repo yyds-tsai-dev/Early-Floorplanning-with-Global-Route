@@ -705,8 +705,8 @@ void testRespaceFixedPointCase1BStarSeed1NeverRegresses() {
 
     // Plain (non-caching) exactCached lambda: respaceFixedPoint must work with any conforming
     // ExactCachedFn, not just the SA's memoizing one.
-    ExactCachedFn exactCached = [&](const Placement& p, RoutingResult* routing_out) {
-        return exactScore(problem, p, routing_out);
+    ExactCachedFn exactCached = [&](const Placement& p, RoutingResult* routing_out, Placement* placement_out) {
+        return exactScore(problem, p, routing_out, placement_out);
     };
 
     RoutingResult baseline_routing;
@@ -782,8 +782,8 @@ void testRespaceFixedPointSyntheticTwoAxisSlackReducesOverflow() {
     pl.rects = {Rect{0, 55, 100, 100}, Rect{200, 55, 100, 100}, Rect{0, 165, 300, 50}, Rect{0, 0, 300, 50}};
     pl.aspect = {1.0, 1.0, 1.0, 1.0};
 
-    ExactCachedFn exactCached = [&](const Placement& cand, RoutingResult* routing_out) {
-        return exactScore(p, cand, routing_out);
+    ExactCachedFn exactCached = [&](const Placement& cand, RoutingResult* routing_out, Placement* placement_out) {
+        return exactScore(p, cand, routing_out, placement_out);
     };
 
     RoutingResult baseline_routing;

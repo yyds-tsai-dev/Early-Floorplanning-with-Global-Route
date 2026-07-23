@@ -6,6 +6,7 @@
 #include <memory>
 #include <random>
 #include <sstream>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 
@@ -621,7 +622,8 @@ void testOutlineSweepPrefersLowerScoreOverTighterArea() {
     // margin 0.0's own rung, and only that rung) is "too tight to route" -- large synthetic
     // overflow penalty. Everything strictly bigger (any later rung that actually grew) is clean.
     // This directly encodes the R1 trade: tight wins on raw area, loses once overflow is charged.
-    auto mockExactCached = [&](const Placement& placement, RoutingResult* routing_out) {
+    auto mockExactCached = [&](const Placement& placement, RoutingResult* routing_out,
+                               Placement* placement_out = nullptr) {
         RoutingResult routing;
         Score score;
         score.outline_area = placement.outline_w * placement.outline_h;
@@ -631,6 +633,7 @@ void testOutlineSweepPrefersLowerScoreOverTighterArea() {
         score.value = score.outline_area + score.penalty;
         routing.open_routes = 0;
         if (routing_out) *routing_out = routing;
+        if (placement_out) *placement_out = placement;  // mock never grows: effective == input
         return score;
     };
 
@@ -804,10 +807,11 @@ void testOutlineSweepProbesDistinctOutlinesCase0() {
 
     std::vector<double> probed_areas;
     double first_area = -1.0;
-    ExactCachedFn probe = [&](const Placement& p, RoutingResult* routing_out) {
+    ExactCachedFn probe = [&](const Placement& p, RoutingResult* routing_out, Placement* placement_out) {
         double area = p.outline_w * p.outline_h;
         probed_areas.push_back(area);
         if (first_area < 0.0) first_area = area;
+        if (placement_out) *placement_out = p;  // probe never grows: effective == input
         RoutingResult routing;
         routing.open_routes = 0;
         Score score;
@@ -848,18 +852,21 @@ void testOutlineSweepNeverReturnsEmptyPlacement() {
     PlacementState state = engine->initialState(problem, rng);
     Placement placement = engine->decode(problem, state);
 
-    std::unordered_map<std::string, std::pair<Score, RoutingResult>> exact_cache;
-    ExactCachedFn exactCached = [&](const Placement& p, RoutingResult* routing_out) {
+    std::unordered_map<std::string, std::tuple<Score, RoutingResult, Placement>> exact_cache;
+    ExactCachedFn exactCached = [&](const Placement& p, RoutingResult* routing_out, Placement* placement_out) {
         std::string key = placementKey(p);
         auto it = exact_cache.find(key);
         if (it != exact_cache.end()) {
-            if (routing_out) *routing_out = it->second.second;
-            return it->second.first;
+            if (routing_out) *routing_out = std::get<1>(it->second);
+            if (placement_out) *placement_out = std::get<2>(it->second);
+            return std::get<0>(it->second);
         }
         RoutingResult routing;
-        Score score = exactScore(problem, p, &routing);
-        exact_cache.emplace(key, std::make_pair(score, routing));
+        Placement effective;
+        Score score = exactScore(problem, p, &routing, &effective);
+        exact_cache.emplace(key, std::make_tuple(score, routing, effective));
         if (routing_out) *routing_out = routing;
+        if (placement_out) *placement_out = effective;
         return score;
     };
 
@@ -946,6 +953,107 @@ void testFinalizeFeedthroughAcceptanceCase3Hybrid() {
                          /*expect_exact_ft_parity=*/true);
 }
 
+// beta Codex-fix (corrective-grow consistency): exactScore's one-step corrective grow (eval.cpp
+// §1.4) re-anchors edge blocks at a LARGER outline and re-routes when the tight declared outline is
+// too congested to route, so the score/routing it returns can describe DIFFERENT geometry than the
+// input placement. Before the fix exactScore returned only Score + *routing_out, so callers kept
+// their original (tight) rects while storing the grown routing -- emitting a cfg whose CHANNEL/PATH
+// geometry lay OUTSIDE the BLOCK rects' outline, an internal inconsistency validateSolution cannot
+// catch yet the official checker would. The new Placement* placement_out surfaces the EFFECTIVE
+// placement so a caller-stored (placement, routing) pair stays mutually consistent.
+//
+// Non-vacuous fixture: three stacked CORE (Macro) blocks tile a 300x300 tight bbox. S (source,
+// bottom) and T (target, top) are separated by Macro B (middle) -- a Macro is never allowed as a
+// routing intermediate -- and at the tight outline S/B/T cover every x-strip, so there is NO channel
+// between S and T and S->T is an OPEN route. The one-step grow to 315x315 (+5% floor) opens a
+// full-height right-edge channel that both S and T abut (S -> CH_right -> T), clearing the open
+// route, so the grow fires and is adopted (open 1 -> 0). No edge blocks means the grow moves nothing
+// but the outline stamp; the assertions below hold on the returned effective placement.
+void testCorrectiveGrowPlacementConsistency() {
+    Problem problem;
+    auto addMacro = [&](const std::string& name, double x, double y, double w, double h) {
+        Block b;
+        b.name = name;
+        b.width = w;
+        b.height = h;
+        b.area = w * h;
+        b.ft_base_area = w * h;
+        b.ar_min = 1.0;
+        b.ar_max = 1.0;
+        b.type = BlockType::Macro;
+        problem.block_index[name] = static_cast<int>(problem.blocks.size());
+        problem.blocks.push_back(b);
+        return Rect{x, y, w, h};
+    };
+    problem.outline_w = 1000.0;
+    problem.outline_h = 1000.0;
+    problem.alpha = 0.2;
+
+    Placement pl;
+    pl.rects.push_back(addMacro("S", 0.0, 0.0, 300.0, 100.0));    // index 0: source (bottom)
+    pl.rects.push_back(addMacro("B", 0.0, 100.0, 300.0, 100.0));  // index 1: Macro blocker (middle)
+    pl.rects.push_back(addMacro("T", 0.0, 200.0, 300.0, 100.0));  // index 2: target (top)
+    pl.aspect.assign(problem.blocks.size(), 1.0);
+
+    Bundle bun;
+    bun.source = 0;  // S
+    bun.target = 2;  // T
+    bun.nets = 100;
+    problem.bundles = {bun};
+
+    // Stamp the tight bbox (300x300): S/B/T tile it exactly, so exactScore routes there first.
+    pl.outline_w = 300.0;
+    pl.outline_h = 300.0;
+
+    // Precondition (non-vacuous): the tight placement genuinely has an open route.
+    Problem tight_scoped = scopedAtDeclaredOutline(problem, 300.0, 300.0);
+    RoutingResult tight_routing = routeProblem(tight_scoped, pl);
+    assert(tight_routing.open_routes > 0);
+
+    RoutingResult routing;
+    Placement effective;
+    Score score = exactScore(problem, pl, &routing, &effective);
+
+    // The grow fired and cleared the open route.
+    assert(routing.open_routes == 0);
+    // Effective placement grew strictly past the tight 300x300 stamp, and its stamp is INTEGRAL
+    // (Part D: anchorAtOutline stamps the ceil'd grown target exactly).
+    assert(effective.outline_w > 300.0 + kEps || effective.outline_h > 300.0 + kEps);
+    assert(effective.outline_w == std::floor(effective.outline_w));
+    assert(effective.outline_h == std::floor(effective.outline_h));
+    // Core rects are never moved by the grow (only edge blocks re-anchor; there are none here).
+    for (std::size_t i = 0; i < pl.rects.size(); ++i) {
+        assert(rectsByteEqual(pl.rects[i], effective.rects[i]));
+    }
+
+    // Consistency 1: every channel in the returned routing lies within the EFFECTIVE outline. This
+    // is exactly what fails against the INPUT's 300x300 stamp (the grown right/top channels sit
+    // outside it) -- the inconsistency this fix removes.
+    for (const auto& ch : routing.channels) {
+        assert(ch.rect.x >= -kEps);
+        assert(ch.rect.y >= -kEps);
+        assert(ch.rect.right() <= effective.outline_w + kEps);
+        assert(ch.rect.top() <= effective.outline_h + kEps);
+    }
+
+    // Consistency 2: re-routing the effective placement at ITS stamped outline reproduces the
+    // returned routing's open_routes==0 (the stored routing is the one this geometry produces).
+    Problem eff_scoped = scopedAtDeclaredOutline(problem, effective.outline_w, effective.outline_h);
+    RoutingResult recomputed = routeProblem(eff_scoped, effective);
+    assert(recomputed.open_routes == 0);
+
+    // Consistency 3: the effective placement validates against the returned routing (the pair a
+    // caller would emit is internally legal). validateSolution reads effective's stamped outline.
+    ValidationResult vr = validateSolution(problem, effective, routing);
+    if (!vr.ok) {
+        for (const auto& m : vr.messages) std::cerr << "validate: " << m << "\n";
+    }
+    assert(vr.ok);
+
+    (void)score;
+    std::cout << "testCorrectiveGrowPlacementConsistency ok\n";
+}
+
 }  // namespace
 
 int main() {
@@ -972,6 +1080,7 @@ int main() {
     testOutlineSweepNeverReturnsEmptyPlacement();
     testFinalizeFeedthroughAcceptanceCase1Hybrid();
     testFinalizeFeedthroughAcceptanceCase3Hybrid();
+    testCorrectiveGrowPlacementConsistency();
     std::cout << "p1 regressions passed\n";
     return 0;
 }

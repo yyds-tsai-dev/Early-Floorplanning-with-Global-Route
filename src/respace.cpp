@@ -417,8 +417,14 @@ bool respaceToDemand(const Problem& problem, Placement& placement, const Routing
 
 RespaceResult respaceFixedPoint(const Problem& problem, const Placement& base, const ExactCachedFn& exactCached) {
     RespaceResult best;
+    // best.placement receives the EFFECTIVE placement exactCached scored/routed: exactScore's
+    // corrective grow may re-anchor edge blocks at a larger outline, so best.routing can describe
+    // different geometry than `base`. Seed with `base`, then let exactCached overwrite it with the
+    // geometry actually paired with best.routing -- byte-identical to `base` when the grow does not
+    // fire. (base and best.placement are distinct objects, so passing &best.placement while `base` is
+    // read as the input arg is safe: exactScore copies its input before writing placement_out.)
     best.placement = base;
-    best.score = exactCached(base, &best.routing);
+    best.score = exactCached(base, &best.routing, &best.placement);
     best.improved = false;
 
     // Early exit (design §3.5): already overflow-free and legal -- nothing for the loop to do.
@@ -435,10 +441,15 @@ RespaceResult respaceFixedPoint(const Problem& problem, const Placement& base, c
         if (rectsUnchanged(candidate, current)) break;  // geometric no-op -- further iters can't help
 
         RoutingResult candidate_routing;
-        Score candidate_score = exactCached(candidate, &candidate_routing);
+        // Store the effective placement (grow may re-anchor at a larger outline), not the raw
+        // `candidate`, so best.placement stays consistent with best.routing. `current` (advanced
+        // below) intentionally stays the un-grown `candidate` -- it is the next relax seed, and when
+        // the grow does not fire candidate_effective == candidate anyway.
+        Placement candidate_effective;
+        Score candidate_score = exactCached(candidate, &candidate_routing, &candidate_effective);
 
         if (respaceCandidateBetter(candidate_routing, candidate_score.value, best.routing, best.score.value)) {
-            best.placement = candidate;
+            best.placement = candidate_effective;
             best.routing = candidate_routing;
             best.score = candidate_score;
             best.improved = true;

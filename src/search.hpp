@@ -28,7 +28,15 @@ struct SearchResult {
 
 // Exact-scoring callback shape used by the elite pass's exact_cache (search.cpp's `exactCached`
 // lambda) and injected into outlineSweep below so the sweep shares the same cache/dedupe path.
-using ExactCachedFn = std::function<Score(const Placement&, RoutingResult*)>;
+// Third arg (Placement*, may be null) receives the EFFECTIVE placement exactScore actually
+// scored/routed -- when exactScore's corrective grow fires it re-anchors edge blocks at a larger
+// outline, so the returned routing describes different geometry than the input. Consumers
+// (outlineSweep, respaceFixedPoint) store this effective placement, not the raw input, so the
+// placement they hand back is mutually consistent with the routing they hand back. The cache stores
+// the (score, routing, effective placement) triple keyed by the INPUT placementKey, so cache hits
+// reproduce the same triple (dedupe semantics unchanged; the mapping input -> triple is deterministic
+// because exactScore is deterministic).
+using ExactCachedFn = std::function<Score(const Placement&, RoutingResult*, Placement*)>;
 
 struct OutlineSweepResult {
     Score score;

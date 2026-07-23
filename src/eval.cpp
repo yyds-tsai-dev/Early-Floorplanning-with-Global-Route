@@ -187,7 +187,8 @@ Score routeAndScoreAt(const Problem& problem, const Placement& placement, double
 
 }  // namespace
 
-Score exactScore(const Problem& problem, const Placement& placement, RoutingResult* routing_out) {
+Score exactScore(const Problem& problem, const Placement& placement, RoutingResult* routing_out,
+                 Placement* placement_out) {
     // Scope routing to the placement's STAMPED declared outline (design §1.4) -- not a bbox
     // recomputed from usedOutline, which ignores the shrink-wrap entirely. When unset (0,0; e.g.
     // a hand-built placement, or one whose stamp went stale -- see compactTowardOrigin's reset),
@@ -250,6 +251,13 @@ Score exactScore(const Problem& problem, const Placement& placement, RoutingResu
     }
 
     if (routing_out) *routing_out = routing;
+    // Surface the placement actually scored/routed (design §1.4 consistency fix): `local` is the
+    // input when the grow never fired, or the grown+re-anchored geometry when it did. Its outline
+    // stamp is integral in the grow path -- anchorAtOutline stamps EXACTLY grown_w/grown_h, and both
+    // are ceil'd integers above (Part D). Callers that keep the returned score/routing for emission
+    // or comparison store THIS placement, never the raw input, so channels/paths never reference
+    // geometry outside the emitted BLOCK rects' outline.
+    if (placement_out) *placement_out = local;
     return score;
 }
 
