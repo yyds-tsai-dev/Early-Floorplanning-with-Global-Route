@@ -1,0 +1,97 @@
+== commits ==
+4a9cf72 fix: direct block abutment routes have zero wirelength per cost spec
+
+== stat ==
+ src/routing.cpp                 |  1 -
+ test/regression_p0_20260706.cpp | 39 +++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 39 insertions(+), 1 deletion(-)
+
+== diff ==
+diff --git a/src/routing.cpp b/src/routing.cpp
+index 39d1436..57b7d48 100644
+--- a/src/routing.cpp
++++ b/src/routing.cpp
+@@ -170,21 +170,20 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement) {
+         }
+ 
+         std::vector<std::pair<double, double>> guides;
+         for (std::size_t i = 0; i + 1 < route.node_path.size(); ++i) {
+             int a = route.node_path[i], b = route.node_path[i + 1];
+             guides.push_back(guidePoint(rects[a], rects[b]));
+         }
+         for (std::size_t i = 0; i + 1 < guides.size(); ++i) {
+             route.wirelength += manhattan(guides[i].first, guides[i].second, guides[i + 1].first, guides[i + 1].second) * nets;
+         }
+-        if (guides.size() == 1) route.wirelength += nets;
+ 
+         for (std::size_t i = 1; i + 1 < route.node_path.size(); ++i) {
+             int node = route.node_path[i];
+             if (node < n_blocks && isSoft(problem.blocks[node].type)) {
+                 result.soft_feedthrough_nets[node] += nets;
+             }
+             if (node >= n_blocks && i - 1 < guides.size() && i < guides.size()) {
+                 auto& ch = result.channels[node - n_blocks];
+                 double dx = std::abs(guides[i].first - guides[i - 1].first);
+                 double dy = std::abs(guides[i].second - guides[i - 1].second);
+diff --git a/test/regression_p0_20260706.cpp b/test/regression_p0_20260706.cpp
+index 7c2d5f8..6e29a45 100644
+--- a/test/regression_p0_20260706.cpp
++++ b/test/regression_p0_20260706.cpp
+@@ -76,18 +76,57 @@ void testRoutingMismatchUsesCeiledMath() {
+     Problem p = forcedFtProblem();
+     Placement pl = rowPlacement();
+     RoutingResult r = routeProblem(p, pl);
+     assert(r.open_routes == 0);
+     assert(r.soft_feedthrough_nets[1] > 0.0);  // FT through BLK02 was forced
+     double required = ftRequiredArea(90000.0, ftExtend(900.0, 0.2));  // extend = ceil(3.6) = 4 -> (300+4)^2 = 92416.00
+     assert(near(required, 92416.00));
+     assert(near(r.feedthrough_mismatch, required - 90000.0, 1e-3));
+     std::cout << "testRoutingMismatchUsesCeiledMath ok\n";
+ }
++
++void testDirectAbutmentZeroWirelength() {
++    Problem p;
++    auto addSoft = [&](const std::string& name, double x_hint) {
++        (void)x_hint;
++        Block b;
++        b.name = name;
++        b.area = 10000.0;
++        b.type = BlockType::Soft;
++        b.ar_min = 0.25;
++        b.ar_max = 4.0;
++        b.ft_rates = {0.2, 0.4, 0.8, 1.0};
++        p.block_index[name] = static_cast<int>(p.blocks.size());
++        p.blocks.push_back(b);
++    };
++    addSoft("BLK01", 0.0);
++    addSoft("BLK02", 100.0);
++    p.outline_w = 200.0;
++    p.outline_h = 100.0;
++    p.alpha = 1.0;
++    Bundle bd;
++    bd.source = 0;
++    bd.target = 1;
++    bd.nets = 100;
++    p.bundles.push_back(bd);
++
++    Placement pl;
++    pl.rects = {Rect{0.0, 0.0, 100.0, 100.0}, Rect{100.0, 0.0, 100.0, 100.0}};
++    pl.aspect = {1.0, 1.0};
++
++    RoutingResult r = routeProblem(p, pl);
++    assert(r.open_routes == 0);
++    assert(r.routes.size() == 1);
++    assert(r.routes[0].node_path.size() == 2);  // direct block->block, no channel
++    assert(near(r.routes[0].wirelength, 0.0));  // 1 guiding point -> empty HPWL sum
++    assert(near(r.total_wirelength, 0.0));
++    std::cout << "testDirectAbutmentZeroWirelength ok\n";
++}
+ }  // namespace
+ 
+ int main() {
+     testFtMathOfficialExamples();
+     testRoutingMismatchUsesCeiledMath();
++    testDirectAbutmentZeroWirelength();
+     std::cout << "p0 regressions passed\n";
+     return 0;
+ }

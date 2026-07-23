@@ -1,0 +1,504 @@
+== commits ==
+262e77c fix: use spec-exact ceil'd FT area math in routing mismatch and eval proxy
+
+== stat ==
+ src/eval.cpp                         | 15 +++--------
+ src/io.cpp                           |  1 +
+ src/model.hpp                        |  1 +
+ src/routing.cpp                      | 17 ++++--------
+ test/placement_engine_regression.cpp | 10 ++++----
+ test/regression_20260608.cpp         | 16 ++++++------
+ test/regression_20260618.cpp         | 10 ++++----
+ test/regression_p0_20260706.cpp      | 50 ++++++++++++++++++++++++++++++++++++
+ 8 files changed, 79 insertions(+), 41 deletions(-)
+
+== diff ==
+diff --git a/src/eval.cpp b/src/eval.cpp
+index 7a776a4..4024d87 100644
+--- a/src/eval.cpp
++++ b/src/eval.cpp
+@@ -1,35 +1,29 @@
+ #include "eval.hpp"
+ 
++#include "ft.hpp"
++
+ namespace efgr {
+ namespace {
+ 
+ std::pair<double, double> usedOutline(const Problem& problem, const Placement& placement) {
+     double w = 0.0;
+     double h = 0.0;
+     for (const auto& r : placement.rects) {
+         w = std::max(w, r.right());
+         h = std::max(h, r.top());
+     }
+     w = std::max(1.0, std::min(problem.outline_w, w));
+     h = std::max(1.0, std::min(problem.outline_h, h));
+     return {w, h};
+ }
+ 
+-double ftRateForProxy(const Block& block, double nets) {
+-    if (block.ft_rates.empty()) return 0.0;
+-    if (nets <= 3000.0) return block.ft_rates[0];
+-    if (nets <= 6000.0) return block.ft_rates.size() > 1 ? block.ft_rates[1] : block.ft_rates.back();
+-    if (nets <= 9000.0) return block.ft_rates.size() > 2 ? block.ft_rates[2] : block.ft_rates.back();
+-    return block.ft_rates.size() > 3 ? block.ft_rates[3] : block.ft_rates.back();
+-}
+-
+ bool intersectsOpen(const Rect& a, const Rect& b) {
+     return a.x + kEps < b.right() && b.x + kEps < a.right() &&
+            a.y + kEps < b.top() && b.y + kEps < a.top();
+ }
+ 
+ double routeAwareProxyPenalty(const Problem& problem, const Placement& placement) {
+     double penalty = 0.0;
+     for (const auto& bundle : problem.bundles) {
+         const auto& a = placement.rects[bundle.source];
+         const auto& b = placement.rects[bundle.target];
+@@ -44,23 +38,22 @@ double routeAwareProxyPenalty(const Problem& problem, const Placement& placement
+         double capacity = narrow * 25.0;
+         double overflow = std::max(0.0, static_cast<double>(bundle.nets) - capacity);
+         penalty += overflow * overflow * 100.0;
+ 
+         Rect bbox{std::min(a.cx(), b.cx()), std::min(a.cy(), b.cy()),
+                   std::max(1.0, std::abs(a.cx() - b.cx())), std::max(1.0, std::abs(a.cy() - b.cy()))};
+         for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
+             if (static_cast<int>(i) == bundle.source || static_cast<int>(i) == bundle.target) continue;
+             if (!isSoft(problem.blocks[i].type)) continue;
+             if (!intersectsOpen(bbox, placement.rects[i])) continue;
+-            double delta = (bundle.nets / 25.0) * ftRateForProxy(problem.blocks[i], bundle.nets) * 0.5;
+-            double side = std::sqrt(std::max(1.0, problem.blocks[i].area)) + delta;
+-            double required_area = side * side;
++            double base = problem.blocks[i].ft_base_area > 0.0 ? problem.blocks[i].ft_base_area : problem.blocks[i].area;
++            double required_area = ftRequiredArea(base, ftExtend(bundle.nets, ftTierRate(problem.blocks[i], bundle.nets)));
+             double actual_area = placement.rects[i].w * placement.rects[i].h;
+             penalty += std::max(0.0, required_area - actual_area) * 1000.0;
+         }
+     }
+     return penalty;
+ }
+ 
+ }  // namespace
+ 
+ Score cheapScore(const Problem& problem, const Placement& placement) {
+diff --git a/src/io.cpp b/src/io.cpp
+index 9776339..e1476d6 100644
+--- a/src/io.cpp
++++ b/src/io.cpp
+@@ -147,20 +147,21 @@ Problem parseProblem(const std::string& path) {
+             in_block_table = true;
+             continue;
+         }
+         if (row[0] == "OUTLINE" || row[0] == "CONN MATRIX") {
+             in_block_table = false;
+         }
+         if (in_block_table && row[0].rfind("BLK", 0) == 0) {
+             Block b;
+             b.name = row[0];
+             b.area = row.size() > 1 ? parseDouble(row[1]) : 0.0;
++            b.ft_base_area = b.area;
+             b.width = row.size() > 2 ? parseDouble(row[2]) : 0.0;
+             b.height = row.size() > 3 ? parseDouble(row[3]) : 0.0;
+             parseAspect(b, row.size() > 4 ? row[4] : "1");
+             b.type = parseType(row.size() > 5 ? row[5] : "SOFT");
+             b.locations = splitLocations(row.size() > 6 ? row[6] : "");
+             std::size_t ft_start = 7;
+             if (row.size() > 7 && !row[7].empty() && !hasPercent(row[7])) {
+                 b.port_edges = splitEdges(row[7]);
+                 b.port_edge = b.port_edges.empty() ? 0 : b.port_edges.front();
+                 ft_start = 8;
+diff --git a/src/model.hpp b/src/model.hpp
+index 1a0758f..3ca8b4c 100644
+--- a/src/model.hpp
++++ b/src/model.hpp
+@@ -22,20 +22,21 @@ struct Rect {
+ 
+     double right() const { return x + w; }
+     double top() const { return y + h; }
+     double cx() const { return x + w * 0.5; }
+     double cy() const { return y + h * 0.5; }
+ };
+ 
+ struct Block {
+     std::string name;
+     double area = 0.0;
++    double ft_base_area = 0.0;  // original input area; FT required-area base (never inflated)
+     double width = 0.0;
+     double height = 0.0;
+     double ar_min = 1.0;
+     double ar_max = 1.0;
+     BlockType type = BlockType::Soft;
+     std::vector<std::string> locations;
+     std::vector<double> ft_rates;
+     int port_edge = 0;
+     std::vector<int> port_edges;
+ };
+diff --git a/src/routing.cpp b/src/routing.cpp
+index 976352d..39d1436 100644
+--- a/src/routing.cpp
++++ b/src/routing.cpp
+@@ -1,15 +1,17 @@
+ #include "routing.hpp"
+ 
+ #include <queue>
+ #include <set>
+ 
++#include "ft.hpp"
++
+ namespace efgr {
+ namespace {
+ 
+ bool positiveTouch(const Rect& a, const Rect& b) {
+     bool vertical = (std::abs(a.right() - b.x) < kEps || std::abs(b.right() - a.x) < kEps) &&
+                     std::min(a.top(), b.top()) - std::max(a.y, b.y) > kEps;
+     bool horizontal = (std::abs(a.top() - b.y) < kEps || std::abs(b.top() - a.y) < kEps) &&
+                       std::min(a.right(), b.right()) - std::max(a.x, b.x) > kEps;
+     return vertical || horizontal;
+ }
+@@ -27,28 +29,20 @@ std::pair<double, double> guidePoint(const Rect& a, const Rect& b) {
+         double lo = std::max(a.y, b.y);
+         double hi = std::min(a.top(), b.top());
+         return {x, (lo + hi) * 0.5};
+     }
+     double y = std::abs(a.top() - b.y) < kEps ? a.top() : b.top();
+     double lo = std::max(a.x, b.x);
+     double hi = std::min(a.right(), b.right());
+     return {(lo + hi) * 0.5, y};
+ }
+ 
+-double ftRateFor(const Block& block, double nets) {
+-    if (block.ft_rates.empty()) return 0.0;
+-    if (nets <= 3000.0) return block.ft_rates[0];
+-    if (nets <= 6000.0) return block.ft_rates.size() > 1 ? block.ft_rates[1] : block.ft_rates.back();
+-    if (nets <= 9000.0) return block.ft_rates.size() > 2 ? block.ft_rates[2] : block.ft_rates.back();
+-    return block.ft_rates.size() > 3 ? block.ft_rates[3] : block.ft_rates.back();
+-}
+-
+ bool portAllows(const Block& block, int edge) {
+     if (!block.port_edges.empty()) {
+         return std::find(block.port_edges.begin(), block.port_edges.end(), edge) != block.port_edges.end();
+     }
+     return block.port_edge <= 0 || block.port_edge == edge;
+ }
+ 
+ }  // namespace
+ 
+ std::vector<Channel> extractChannels(const Problem& problem, const Placement& placement) {
+@@ -227,20 +221,19 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement) {
+ 
+     for (const auto& ch : result.channels) {
+         double hcap = 25.0 * std::max(1.0, ch.rect.h);
+         double vcap = 25.0 * std::max(1.0, ch.rect.w);
+         if (ch.horizontal_usage > hcap) result.channel_overflow += ch.horizontal_usage - hcap;
+         if (ch.vertical_usage > vcap) result.channel_overflow += ch.vertical_usage - vcap;
+     }
+     for (std::size_t i = 0; i < result.soft_feedthrough_nets.size(); ++i) {
+         double nets = result.soft_feedthrough_nets[i];
+         if (nets <= 0.0 || !isSoft(problem.blocks[i].type)) continue;
+-        double delta = (nets / 25.0) * ftRateFor(problem.blocks[i], nets) * 0.5;
+-        double side = std::sqrt(std::max(1.0, problem.blocks[i].area)) + delta;
+-        double required_area = side * side;
+-        double actual_area = placement.rects[i].w * placement.rects[i].h;
++        double base = problem.blocks[i].ft_base_area > 0.0 ? problem.blocks[i].ft_base_area : problem.blocks[i].area;
++        double required_area = ftRequiredArea(base, ftExtend(nets, ftTierRate(problem.blocks[i], nets)));
++        double actual_area = round2(placement.rects[i].w * placement.rects[i].h);
+         if (actual_area + kEps < required_area) result.feedthrough_mismatch += required_area - actual_area;
+     }
+     return result;
+ }
+ 
+ }  // namespace efgr
+diff --git a/test/placement_engine_regression.cpp b/test/placement_engine_regression.cpp
+index 7c39418..c091329 100644
+--- a/test/placement_engine_regression.cpp
++++ b/test/placement_engine_regression.cpp
+@@ -24,36 +24,36 @@ bool anyOverlap(const Placement& placement) {
+     }
+     return false;
+ }
+ 
+ Problem makeThreeSoftProblem() {
+     Problem p;
+     p.outline_w = 200.0;
+     p.outline_h = 120.0;
+     p.alpha = 1.0;
+     p.blocks = {
+-        Block{"A", 400.0, 0.0, 0.0, 0.5, 2.0, BlockType::Soft, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
+-        Block{"B", 900.0, 0.0, 0.0, 0.5, 2.0, BlockType::Soft, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
+-        Block{"C", 625.0, 0.0, 0.0, 0.5, 2.0, BlockType::Soft, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
++        Block{"A", 400.0, 400.0, 0.0, 0.0, 0.5, 2.0, BlockType::Soft, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
++        Block{"B", 900.0, 900.0, 0.0, 0.0, 0.5, 2.0, BlockType::Soft, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
++        Block{"C", 625.0, 625.0, 0.0, 0.0, 0.5, 2.0, BlockType::Soft, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
+     };
+     for (std::size_t i = 0; i < p.blocks.size(); ++i) p.block_index[p.blocks[i].name] = static_cast<int>(i);
+     p.bundles.push_back(Bundle{0, 2, 10});
+     return p;
+ }
+ 
+ Problem makeEdgeAnchoredProblem() {
+     Problem p;
+     p.outline_w = 120.0;
+     p.outline_h = 100.0;
+     p.blocks = {
+-        Block{"EDGE", 100.0, 10.0, 10.0, 1.0, 1.0, BlockType::Edge, {"TR"}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
+-        Block{"SOFT", 400.0, 0.0, 0.0, 1.0, 1.0, BlockType::Soft, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
++        Block{"EDGE", 100.0, 100.0, 10.0, 10.0, 1.0, 1.0, BlockType::Edge, {"TR"}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
++        Block{"SOFT", 400.0, 400.0, 0.0, 0.0, 1.0, 1.0, BlockType::Soft, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
+     };
+     p.block_index["EDGE"] = 0;
+     p.block_index["SOFT"] = 1;
+     return p;
+ }
+ 
+ int testSequencePairInitialDecodeRespectsOrder() {
+     Problem p = makeThreeSoftProblem();
+     std::mt19937 rng(7);
+     std::unique_ptr<PlacementEngine> engine = makePlacementEngine("sp");
+diff --git a/test/regression_20260608.cpp b/test/regression_20260608.cpp
+index 7237211..bd41836 100644
+--- a/test/regression_20260608.cpp
++++ b/test/regression_20260608.cpp
+@@ -29,22 +29,22 @@ int testParsePortAndFtRates() {
+         return fail("PORT column must not be parsed as an FT conversion rate");
+     }
+     return 0;
+ }
+ 
+ int testHorizontalChannelCapacityUsesHeight() {
+     Problem p;
+     p.outline_w = 70.0;
+     p.outline_h = 100.0;
+     p.blocks = {
+-        Block{"SRC", 1000.0, 10.0, 100.0, 1.0, 1.0, BlockType::Macro, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
+-        Block{"DST", 1000.0, 10.0, 100.0, 1.0, 1.0, BlockType::Macro, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
++        Block{"SRC", 1000.0, 1000.0, 10.0, 100.0, 1.0, 1.0, BlockType::Macro, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
++        Block{"DST", 1000.0, 1000.0, 10.0, 100.0, 1.0, 1.0, BlockType::Macro, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
+     };
+     p.block_index["SRC"] = 0;
+     p.block_index["DST"] = 1;
+     p.bundles.push_back(Bundle{0, 1, 2500});
+ 
+     Placement placement;
+     placement.rects = {Rect{0.0, 0.0, 10.0, 100.0}, Rect{60.0, 0.0, 10.0, 100.0}};
+     placement.aspect = {1.0, 1.0};
+ 
+     RoutingResult r = routeProblem(p, placement);
+@@ -53,23 +53,23 @@ int testHorizontalChannelCapacityUsesHeight() {
+         return fail("2500 horizontal nets should fit in a 50x100 channel");
+     }
+     return 0;
+ }
+ 
+ int testFeedthroughMismatchIsMeasured() {
+     Problem p;
+     p.outline_w = 200.0;
+     p.outline_h = 100.0;
+     p.blocks = {
+-        Block{"SRC", 1000.0, 10.0, 100.0, 1.0, 1.0, BlockType::Macro, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
+-        Block{"MID", 10000.0, 0.0, 0.0, 1.0, 1.0, BlockType::Soft, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
+-        Block{"DST", 1000.0, 10.0, 100.0, 1.0, 1.0, BlockType::Macro, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
++        Block{"SRC", 1000.0, 1000.0, 10.0, 100.0, 1.0, 1.0, BlockType::Macro, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
++        Block{"MID", 10000.0, 10000.0, 0.0, 0.0, 1.0, 1.0, BlockType::Soft, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
++        Block{"DST", 1000.0, 1000.0, 10.0, 100.0, 1.0, 1.0, BlockType::Macro, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
+     };
+     p.block_index["SRC"] = 0;
+     p.block_index["MID"] = 1;
+     p.block_index["DST"] = 2;
+     p.bundles.push_back(Bundle{0, 2, 2000});
+ 
+     Placement placement;
+     placement.rects = {
+         Rect{0.0, 0.0, 10.0, 100.0},
+         Rect{10.0, 0.0, 100.0, 100.0},
+@@ -83,23 +83,23 @@ int testFeedthroughMismatchIsMeasured() {
+         return fail("unexpanded soft block feedthrough should produce area mismatch");
+     }
+     return 0;
+ }
+ 
+ int testLargeBundleSplitsAcrossParallelChannels() {
+     Problem p;
+     p.outline_w = 200.0;
+     p.outline_h = 100.0;
+     p.blocks = {
+-        Block{"SRC", 1000.0, 10.0, 100.0, 1.0, 1.0, BlockType::Macro, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
+-        Block{"OBS", 200.0, 10.0, 20.0, 1.0, 1.0, BlockType::Macro, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
+-        Block{"DST", 1000.0, 10.0, 100.0, 1.0, 1.0, BlockType::Macro, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
++        Block{"SRC", 1000.0, 1000.0, 10.0, 100.0, 1.0, 1.0, BlockType::Macro, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
++        Block{"OBS", 200.0, 200.0, 10.0, 20.0, 1.0, 1.0, BlockType::Macro, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
++        Block{"DST", 1000.0, 1000.0, 10.0, 100.0, 1.0, 1.0, BlockType::Macro, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
+     };
+     p.block_index["SRC"] = 0;
+     p.block_index["OBS"] = 1;
+     p.block_index["DST"] = 2;
+     p.bundles.push_back(Bundle{0, 2, 1800});
+ 
+     Placement placement;
+     placement.rects = {
+         Rect{0.0, 0.0, 10.0, 100.0},
+         Rect{90.0, 40.0, 10.0, 20.0},
+diff --git a/test/regression_20260618.cpp b/test/regression_20260618.cpp
+index c1f9526..7307eb8 100644
+--- a/test/regression_20260618.cpp
++++ b/test/regression_20260618.cpp
+@@ -38,22 +38,22 @@ std::string writeTempCsv(const std::string& name, const std::string& content) {
+     out << content;
+     return path;
+ }
+ 
+ Problem makeTwoMacroProblem(int nets) {
+     Problem p;
+     p.outline_w = 1000.0;
+     p.outline_h = 1000.0;
+     p.alpha = 0.2;
+     p.blocks = {
+-        Block{"A", 100.0, 10.0, 10.0, 1.0, 1.0, BlockType::Macro, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
+-        Block{"B", 100.0, 10.0, 10.0, 1.0, 1.0, BlockType::Macro, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
++        Block{"A", 100.0, 100.0, 10.0, 10.0, 1.0, 1.0, BlockType::Macro, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
++        Block{"B", 100.0, 100.0, 10.0, 10.0, 1.0, 1.0, BlockType::Macro, {}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
+     };
+     p.block_index["A"] = 0;
+     p.block_index["B"] = 1;
+     p.bundles.push_back(Bundle{0, 1, nets});
+     return p;
+ }
+ 
+ int testBomCsvAndMultiPortEdgeRoute() {
+     const std::string csv =
+         "\xEF\xBB\xBF"
+@@ -83,21 +83,21 @@ int testBomCsvAndMultiPortEdgeRoute() {
+     RoutingResult routing = routeProblem(p, placement);
+     if (routing.open_routes != 0) return fail("PORT EDGE 1,2 should allow route through edge 2");
+     return 0;
+ }
+ 
+ int testParallelLocationRequiresSegmentOverlap() {
+     Problem p;
+     p.outline_w = 300.0;
+     p.outline_h = 300.0;
+     p.blocks = {
+-        Block{"EDGE", 500.0, 50.0, 10.0, 1.0, 1.0, BlockType::Edge, {"TM", "TR"}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
++        Block{"EDGE", 500.0, 500.0, 50.0, 10.0, 1.0, 1.0, BlockType::Edge, {"TM", "TR"}, {0.2, 0.4, 0.8, 1.0}, 0, {}},
+     };
+     p.block_index["EDGE"] = 0;
+ 
+     Placement bad;
+     bad.rects = {Rect{0.0, 290.0, 50.0, 10.0}};
+     bad.aspect = {1.0};
+     if (validateSolution(p, bad, RoutingResult{}).ok) {
+         return fail("TM,TR edge block at TL-only segment should be illegal");
+     }
+ 
+@@ -108,22 +108,22 @@ int testParallelLocationRequiresSegmentOverlap() {
+         return fail("TM,TR edge block touching TM segment should be legal");
+     }
+     return 0;
+ }
+ 
+ int testParallelEdgeBlocksPackWithoutOverlap() {
+     Problem p;
+     p.outline_w = 6344.0;
+     p.outline_h = 3691.0;
+     p.blocks = {
+-        Block{"BLK05", 616160.0, 3851.0, 160.0, 1.0, 1.0, BlockType::Edge, {"TL", "TM", "TR"}, {0.2, 0.4, 0.8, 1.0}, 4, {}},
+-        Block{"BLK06", 111520.0, 340.0, 328.0, 1.0, 1.0, BlockType::Edge, {"TR", "RT"}, {0.2, 0.4, 0.8, 1.0}, 4, {}},
++        Block{"BLK05", 616160.0, 616160.0, 3851.0, 160.0, 1.0, 1.0, BlockType::Edge, {"TL", "TM", "TR"}, {0.2, 0.4, 0.8, 1.0}, 4, {}},
++        Block{"BLK06", 111520.0, 111520.0, 340.0, 328.0, 1.0, 1.0, BlockType::Edge, {"TR", "RT"}, {0.2, 0.4, 0.8, 1.0}, 4, {}},
+     };
+     p.block_index["BLK05"] = 0;
+     p.block_index["BLK06"] = 1;
+ 
+     std::mt19937 rng(1);
+     std::unique_ptr<PlacementEngine> engine = makePlacementEngine("bstar");
+     PlacementState state = engine->initialState(p, rng);
+     state.edge_location_choice[0] = 2;
+     state.edge_location_choice[1] = 0;
+     Placement placement = engine->decode(p, state);
+diff --git a/test/regression_p0_20260706.cpp b/test/regression_p0_20260706.cpp
+index 99e2712..7c2d5f8 100644
+--- a/test/regression_p0_20260706.cpp
++++ b/test/regression_p0_20260706.cpp
+@@ -1,15 +1,16 @@
+ #include <cassert>
+ #include <cmath>
+ #include <iostream>
+ 
+ #include "../src/ft.hpp"
++#include "../src/routing.hpp"
+ 
+ namespace {
+ using namespace efgr;
+ 
+ bool near(double a, double b, double tol = 1e-6) { return std::abs(a - b) <= tol; }
+ 
+ Block softBlockWithRates() {
+     Block b;
+     b.type = BlockType::Soft;
+     b.ft_rates = {0.2, 0.4, 0.8, 1.0};
+@@ -27,17 +28,66 @@ void testFtMathOfficialExamples() {
+     assert(near(ftExtend(3500.0, 0.4), 28.0));
+     assert(near(ftExtend(6711.0, 0.8), 108.0));   // 107.376 -> ceil
+     assert(near(ftExtend(12013.0, 1.0), 241.0));  // 240.26 -> ceil
+ 
+     assert(near(ftRequiredArea(87500.0, 4.0), 89882.43));
+     assert(near(ftRequiredArea(87500.0, 28.0), 104849.02));
+     assert(near(ftRequiredArea(87500.0, 108.0), 163057.66));
+     assert(near(ftRequiredArea(87500.0, 241.0), 288158.52));
+     std::cout << "testFtMathOfficialExamples ok\n";
+ }
++
++Problem forcedFtProblem() {
++    Problem p;
++    auto addBlock = [&](const std::string& name, double area, double w, double h, BlockType type) {
++        Block b;
++        b.name = name;
++        b.area = area;
++        b.width = w;
++        b.height = h;
++        b.type = type;
++        b.ar_min = 0.25;
++        b.ar_max = 4.0;
++        b.ft_rates = {0.2, 0.4, 0.8, 1.0};
++        p.block_index[name] = static_cast<int>(p.blocks.size());
++        p.blocks.push_back(b);
++    };
++    addBlock("BLK01", 30000.0, 100.0, 300.0, BlockType::Macro);
++    addBlock("BLK02", 90000.0, 300.0, 300.0, BlockType::Soft);
++    addBlock("BLK03", 30000.0, 100.0, 300.0, BlockType::Macro);
++    p.outline_w = 500.0;  // exactly the row bbox: no channels anywhere
++    p.outline_h = 300.0;
++    p.alpha = 1.0;
++    Bundle bd;
++    bd.source = 0;
++    bd.target = 2;
++    bd.nets = 900;  // single chunk, tier 1
++    p.bundles.push_back(bd);
++    return p;
++}
++
++Placement rowPlacement() {
++    Placement pl;
++    pl.rects = {Rect{0.0, 0.0, 100.0, 300.0}, Rect{100.0, 0.0, 300.0, 300.0}, Rect{400.0, 0.0, 100.0, 300.0}};
++    pl.aspect = {1.0, 1.0, 1.0};
++    return pl;
++}
++
++void testRoutingMismatchUsesCeiledMath() {
++    Problem p = forcedFtProblem();
++    Placement pl = rowPlacement();
++    RoutingResult r = routeProblem(p, pl);
++    assert(r.open_routes == 0);
++    assert(r.soft_feedthrough_nets[1] > 0.0);  // FT through BLK02 was forced
++    double required = ftRequiredArea(90000.0, ftExtend(900.0, 0.2));  // extend = ceil(3.6) = 4 -> (300+4)^2 = 92416.00
++    assert(near(required, 92416.00));
++    assert(near(r.feedthrough_mismatch, required - 90000.0, 1e-3));
++    std::cout << "testRoutingMismatchUsesCeiledMath ok\n";
++}
+ }  // namespace
+ 
+ int main() {
+     testFtMathOfficialExamples();
++    testRoutingMismatchUsesCeiledMath();
+     std::cout << "p0 regressions passed\n";
+     return 0;
+ }

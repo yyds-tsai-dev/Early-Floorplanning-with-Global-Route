@@ -1,0 +1,245 @@
+== commits ==
+15ad8ec feat: feedthrough finalize pass writes required FT area back into output dims
+
+== stat ==
+ src/search.cpp                  | 36 +++++++++++++++++++++
+ src/search.hpp                  |  1 +
+ test/regression_p0_20260706.cpp | 69 +++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 106 insertions(+)
+
+== diff ==
+diff --git a/src/search.cpp b/src/search.cpp
+index 52cf216..bfa2af8 100644
+--- a/src/search.cpp
++++ b/src/search.cpp
+@@ -1,19 +1,20 @@
+ #include "search.hpp"
+ 
+ #include <cmath>
+ #include <random>
+ #include <sstream>
+ #include <unordered_map>
+ #include <utility>
+ 
+ #include "eval.hpp"
++#include "ft.hpp"
+ 
+ namespace efgr {
+ namespace {
+ 
+ bool axisOverlap(double a0, double a1, double b0, double b1) {
+     return std::min(a1, b1) - std::max(a0, b0) > kEps;
+ }
+ 
+ Placement compactTowardOrigin(const Problem& problem, Placement placement) {
+     std::vector<int> order;
+@@ -60,20 +61,54 @@ std::string placementKey(const Placement& placement) {
+     std::ostringstream out;
+     for (const auto& r : placement.rects) {
+         out << std::llround(r.x * 1000.0) << ','
+             << std::llround(r.y * 1000.0) << ','
+             << std::llround(r.w * 1000.0) << ','
+             << std::llround(r.h * 1000.0) << ';';
+     }
+     return out.str();
+ }
+ 
++void finalizeFeedthrough(const Problem& problem, const PlacementEngine& engine, SearchResult& result) {
++    if (result.best_routing.feedthrough_mismatch <= kEps) return;
++    Problem inflated = problem;
++    Placement placement = result.best_placement;
++    RoutingResult routing = result.best_routing;
++    std::mt19937 rng(0x9e3779b9u);
++    for (int pass = 0; pass < 3; ++pass) {
++        bool grew = false;
++        for (std::size_t i = 0; i < inflated.blocks.size(); ++i) {
++            if (!isSoft(inflated.blocks[i].type)) continue;
++            double nets = i < routing.soft_feedthrough_nets.size() ? routing.soft_feedthrough_nets[i] : 0.0;
++            if (nets <= 0.0) continue;
++            double base = problem.blocks[i].ft_base_area > 0.0 ? problem.blocks[i].ft_base_area : problem.blocks[i].area;
++            double required = ftRequiredArea(base, ftExtend(nets, ftTierRate(problem.blocks[i], nets)));
++            if (required > inflated.blocks[i].area + kEps) {
++                inflated.blocks[i].area = required;
++                grew = true;
++            }
++        }
++        if (!grew) break;
++        PlacementState state = engine.seedFromPlacement(inflated, placement, rng);
++        placement = engine.decode(inflated, state);
++        RoutingResult new_routing;
++        Score exact = exactScore(inflated, placement, &new_routing);
++        routing = new_routing;
++        if (new_routing.feedthrough_mismatch <= kEps && new_routing.open_routes == 0 &&
++            exact.value < result.best_score.value) {
++            result.best_score = exact;
++            result.best_placement = placement;
++            result.best_routing = new_routing;
++        }
++    }
++}
++
+ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& engine, const SearchOptions& options) {
+     std::mt19937 rng(options.seed);
+     PlacementState initial = engine.initialState(problem, rng);
+     return runPlacementSearch(problem, engine, options, initial);
+ }
+ 
+ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& engine, const SearchOptions& options,
+                                 const PlacementState& initial_state) {
+     SearchResult result;
+     result.engine_name = engine.name();
+@@ -168,20 +203,21 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
+         Score compact_exact = exactCached(compacted, &routing);
+         if (compact_exact.value < result.best_score.value) {
+             result.best_score = compact_exact;
+             result.best_placement = compacted;
+             result.best_routing = routing;
+         }
+     }
+ 
+     (void)best_state;
+     (void)current_place;
++    finalizeFeedthrough(problem, engine, result);
+     return result;
+ }
+ 
+ SearchResult runHybridPlacementSearch(const Problem& problem, const SearchOptions& options) {
+     std::unique_ptr<PlacementEngine> sp = makePlacementEngine("sp");
+     std::unique_ptr<PlacementEngine> bstar = makePlacementEngine("bstar");
+ 
+     SearchOptions sp_options = options;
+     SearchOptions bstar_options = options;
+     sp_options.iters = std::max(1, options.iters / 2);
+diff --git a/src/search.hpp b/src/search.hpp
+index 728a359..cb52cd4 100644
+--- a/src/search.hpp
++++ b/src/search.hpp
+@@ -22,12 +22,13 @@ struct SearchResult {
+     Score best_score;
+     Placement best_placement;
+     RoutingResult best_routing;
+ };
+ 
+ std::string placementKey(const Placement& placement);
+ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& engine, const SearchOptions& options);
+ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& engine, const SearchOptions& options,
+                                 const PlacementState& initial_state);
+ SearchResult runHybridPlacementSearch(const Problem& problem, const SearchOptions& options);
++void finalizeFeedthrough(const Problem& problem, const PlacementEngine& engine, SearchResult& result);
+ 
+ }  // namespace efgr
+diff --git a/test/regression_p0_20260706.cpp b/test/regression_p0_20260706.cpp
+index 4362aee..e549341 100644
+--- a/test/regression_p0_20260706.cpp
++++ b/test/regression_p0_20260706.cpp
+@@ -1,20 +1,24 @@
+ #include <cassert>
+ #include <cmath>
+ #include <cstdio>
+ #include <fstream>
+ #include <iostream>
++#include <memory>
+ 
+ #include "../src/eval.hpp"
+ #include "../src/ft.hpp"
+ #include "../src/io.hpp"
++#include "../src/placement_engine.hpp"
+ #include "../src/routing.hpp"
++#include "../src/search.hpp"
++#include "../src/validate.hpp"
+ 
+ namespace {
+ using namespace efgr;
+ 
+ bool near(double a, double b, double tol = 1e-6) { return std::abs(a - b) <= tol; }
+ 
+ Block softBlockWithRates() {
+     Block b;
+     b.type = BlockType::Soft;
+     b.ft_rates = {0.2, 0.4, 0.8, 1.0};
+@@ -143,20 +147,85 @@ void testOutlineConsistencyEvalVsCfg() {
+         if (tok == "Outline" || tok == "OUTLINE") {
+             in >> cfg_w >> cfg_h;
+             break;
+         }
+     }
+     std::remove(tmp.c_str());
+     assert(near(cfg_w * cfg_h, exact.outline_area, 1e-6));
+     std::cout << "testOutlineConsistencyEvalVsCfg ok\n";
+ }
+ 
++void testFeedthroughFinalizeWritesBackArea() {
++    Problem p = forcedFtProblem();
++    p.outline_w = 620.0;  // headroom so the inflated decode still fits
++    p.outline_h = 340.0;
++
++    std::unique_ptr<PlacementEngine> engine = makePlacementEngine("bstar");
++    SearchOptions options;
++    options.iters = 200;
++    options.seed = 1;
++    options.exact_interval = 20;
++    SearchResult result = runPlacementSearch(p, *engine, options);
++
++    // After the finalize hook, the emitted solution must not owe FT area.
++    assert(result.best_routing.feedthrough_mismatch <= 1e-6);
++    // And if FT was used, the soft block's dims must cover the ceil'd required area.
++    double nets = result.best_routing.soft_feedthrough_nets.size() > 1 ? result.best_routing.soft_feedthrough_nets[1] : 0.0;
++    if (nets > 0.0) {
++        double required = ftRequiredArea(90000.0, ftExtend(nets, ftTierRate(p.blocks[1], nets)));
++        const Rect& r = result.best_placement.rects[1];
++        assert(r.w * r.h + 1e-6 >= required);
++    }
++    auto validation = validateSolution(p, result.best_placement, result.best_routing);
++    assert(validation.ok);
++    std::cout << "testFeedthroughFinalizeWritesBackArea ok\n";
++}
++
++void testFinalizeFeedthroughDirect() {
++    Problem p = forcedFtProblem();  // 500x300, FT forced
++    p.outline_w = 620.0;
++    // Extra headroom above the wall: BStarEngine::seedFromPlacement/decode does not
++    // preserve row layout on re-seed -- it re-derives geometry from a fresh
++    // contour-packed tree (sorted by original x,y), which can restack the inflated
++    // soft block above the wall rather than widening it in place. With outline_h
++    // == wall-top (340) there is zero headroom for that restack and the inflated
++    // candidate is rejected as out-of-outline. 700 gives enough headroom for the
++    // restacked decode to still fit, while the wall (y=300..340) still blocks
++    // channel routing over the top, forcing FT as required by the fixture.
++    p.outline_h = 700.0;
++    Placement pl = rowPlacement();
++    // Wall off the top so channel routing cannot connect BLK01->BLK03 (forces FT):
++    Block wall;
++    wall.name = "BLK04";
++    wall.area = 620.0 * 40.0;
++    wall.width = 620.0;
++    wall.height = 40.0;
++    wall.type = BlockType::Macro;
++    wall.ft_rates = {0.2, 0.4, 0.8, 1.0};
++    p.block_index[wall.name] = static_cast<int>(p.blocks.size());
++    p.blocks.push_back(wall);
++    pl.rects.push_back(Rect{0.0, 300.0, 620.0, 40.0});
++    pl.aspect.push_back(1.0);
++
++    SearchResult result;
++    result.best_placement = pl;
++    result.best_score = exactScore(p, pl, &result.best_routing);
++    assert(result.best_routing.feedthrough_mismatch > 0.0);  // precondition: FT happened, under-provisioned
++
++    std::unique_ptr<PlacementEngine> engine = makePlacementEngine("bstar");
++    finalizeFeedthrough(p, *engine, result);
++    assert(result.best_routing.feedthrough_mismatch <= 1e-6);
++    std::cout << "testFinalizeFeedthroughDirect ok\n";
++}
++
+ }  // namespace
+ 
+ int main() {
+     testFtMathOfficialExamples();
+     testRoutingMismatchUsesCeiledMath();
+     testDirectAbutmentZeroWirelength();
+     testOutlineConsistencyEvalVsCfg();
++    testFeedthroughFinalizeWritesBackArea();
++    testFinalizeFeedthroughDirect();
+     std::cout << "p0 regressions passed\n";
+     return 0;
+ }

@@ -1,0 +1,135 @@
+== commits ==
+3a04376 feat: add spec-exact FT area math helpers with official-example tests
+
+== stat ==
+ .gitignore                      |  1 +
+ src/ft.hpp                      | 31 +++++++++++++++++++++++++++++
+ test/regression_p0_20260706.cpp | 43 +++++++++++++++++++++++++++++++++++++++++
+ test/run_p0_regressions.sh      | 14 ++++++++++++++
+ 4 files changed, 89 insertions(+)
+
+== diff ==
+diff --git a/.gitignore b/.gitignore
+index d86ca8a..07164bd 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -1,12 +1,13 @@
+ # Build outputs
+ bin/
++test/p0_regression_bin
+ 
+ # Object files
+ *.o
+ 
+ # Python virtual environments
+ .venv/
+ 
+ # Local worktrees
+ .worktrees/
+ 
+diff --git a/src/ft.hpp b/src/ft.hpp
+new file mode 100644
+index 0000000..7b6b019
+--- /dev/null
++++ b/src/ft.hpp
+@@ -0,0 +1,31 @@
++#pragma once
++
++#include <cmath>
++
++#include "model.hpp"
++
++namespace efgr {
++
++// Official FT tiers (20260608 spec): <=3000, <=6000, <=9000, >9000.
++inline double ftTierRate(const Block& block, double nets) {
++    if (block.ft_rates.empty()) return 0.0;
++    if (nets <= 3000.0) return block.ft_rates[0];
++    if (nets <= 6000.0) return block.ft_rates.size() > 1 ? block.ft_rates[1] : block.ft_rates.back();
++    if (nets <= 9000.0) return block.ft_rates.size() > 2 ? block.ft_rates[2] : block.ft_rates.back();
++    return block.ft_rates.size() > 3 ? block.ft_rates[3] : block.ft_rates.back();
++}
++
++// Per-side extend, rounded up unconditionally (QA A34 / spec p.8).
++inline double ftExtend(double nets, double rate) {
++    return std::ceil((nets / 25.0) * rate * 0.5);
++}
++
++inline double round2(double v) { return std::round(v * 100.0) / 100.0; }
++
++// New required area from the block's ORIGINAL input area (QA A32), 2-decimal rounded.
++inline double ftRequiredArea(double base_area, double extend) {
++    double side = std::sqrt(std::max(1.0, base_area)) + extend;
++    return round2(side * side);
++}
++
++}  // namespace efgr
+diff --git a/test/regression_p0_20260706.cpp b/test/regression_p0_20260706.cpp
+new file mode 100644
+index 0000000..99e2712
+--- /dev/null
++++ b/test/regression_p0_20260706.cpp
+@@ -0,0 +1,43 @@
++#include <cassert>
++#include <cmath>
++#include <iostream>
++
++#include "../src/ft.hpp"
++
++namespace {
++using namespace efgr;
++
++bool near(double a, double b, double tol = 1e-6) { return std::abs(a - b) <= tol; }
++
++Block softBlockWithRates() {
++    Block b;
++    b.type = BlockType::Soft;
++    b.ft_rates = {0.2, 0.4, 0.8, 1.0};
++    return b;
++}
++
++void testFtMathOfficialExamples() {
++    Block b = softBlockWithRates();
++    assert(near(ftTierRate(b, 1000.0), 0.2));
++    assert(near(ftTierRate(b, 3500.0), 0.4));
++    assert(near(ftTierRate(b, 6711.0), 0.8));
++    assert(near(ftTierRate(b, 12013.0), 1.0));
++
++    assert(near(ftExtend(1000.0, 0.2), 4.0));
++    assert(near(ftExtend(3500.0, 0.4), 28.0));
++    assert(near(ftExtend(6711.0, 0.8), 108.0));   // 107.376 -> ceil
++    assert(near(ftExtend(12013.0, 1.0), 241.0));  // 240.26 -> ceil
++
++    assert(near(ftRequiredArea(87500.0, 4.0), 89882.43));
++    assert(near(ftRequiredArea(87500.0, 28.0), 104849.02));
++    assert(near(ftRequiredArea(87500.0, 108.0), 163057.66));
++    assert(near(ftRequiredArea(87500.0, 241.0), 288158.52));
++    std::cout << "testFtMathOfficialExamples ok\n";
++}
++}  // namespace
++
++int main() {
++    testFtMathOfficialExamples();
++    std::cout << "p0 regressions passed\n";
++    return 0;
++}
+diff --git a/test/run_p0_regressions.sh b/test/run_p0_regressions.sh
+new file mode 100755
+index 0000000..13e260f
+--- /dev/null
++++ b/test/run_p0_regressions.sh
+@@ -0,0 +1,14 @@
++#!/usr/bin/env bash
++set -euo pipefail
++cd "$(dirname "$0")/.."
++
++make >/dev/null
++
++g++ -std=c++17 -O2 -Wall -Wextra -pedantic \
++    test/regression_p0_20260706.cpp \
++    src/routing.cpp src/eval.cpp src/io.cpp src/validate.cpp \
++    src/placement_engine.cpp src/search.cpp src/floorplan.cpp \
++    -o test/p0_regression_bin
++
++./test/p0_regression_bin
++echo "P0 regressions passed"

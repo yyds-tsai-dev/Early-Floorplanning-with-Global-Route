@@ -1,0 +1,241 @@
+== commits ==
+10d7615 fix: single shared usedOutline for scoring and cfg output
+
+== stat ==
+ src/eval.cpp                     | 20 +++++++++++++++++++-
+ src/eval.hpp                     |  4 ++++
+ src/io.cpp                       | 19 ++-----------------
+ test/regression_p0_20260706.cpp  | 30 ++++++++++++++++++++++++++++++
+ test/run_20260608_regressions.sh |  2 +-
+ 5 files changed, 56 insertions(+), 19 deletions(-)
+
+== diff ==
+diff --git a/src/eval.cpp b/src/eval.cpp
+index 4024d87..48810e2 100644
+--- a/src/eval.cpp
++++ b/src/eval.cpp
+@@ -1,29 +1,47 @@
+ #include "eval.hpp"
+ 
+ #include "ft.hpp"
+ 
+ namespace efgr {
+-namespace {
+ 
+ std::pair<double, double> usedOutline(const Problem& problem, const Placement& placement) {
+     double w = 0.0;
+     double h = 0.0;
+     for (const auto& r : placement.rects) {
+         w = std::max(w, r.right());
+         h = std::max(h, r.top());
+     }
+     w = std::max(1.0, std::min(problem.outline_w, w));
+     h = std::max(1.0, std::min(problem.outline_h, h));
+     return {w, h};
+ }
+ 
++std::pair<double, double> usedOutline(const Problem& problem, const Placement& placement,
++                                       const RoutingResult& routing) {
++    double w = 0.0;
++    double h = 0.0;
++    for (const auto& r : placement.rects) {
++        w = std::max(w, r.right());
++        h = std::max(h, r.top());
++    }
++    for (const auto& ch : routing.channels) {
++        w = std::max(w, ch.rect.right());
++        h = std::max(h, ch.rect.top());
++    }
++    w = std::max(1.0, std::min(problem.outline_w, w));
++    h = std::max(1.0, std::min(problem.outline_h, h));
++    return {w, h};
++}
++
++namespace {
++
+ bool intersectsOpen(const Rect& a, const Rect& b) {
+     return a.x + kEps < b.right() && b.x + kEps < a.right() &&
+            a.y + kEps < b.top() && b.y + kEps < a.top();
+ }
+ 
+ double routeAwareProxyPenalty(const Problem& problem, const Placement& placement) {
+     double penalty = 0.0;
+     for (const auto& bundle : problem.bundles) {
+         const auto& a = placement.rects[bundle.source];
+         const auto& b = placement.rects[bundle.target];
+diff --git a/src/eval.hpp b/src/eval.hpp
+index 20c9e3e..ef50dca 100644
+--- a/src/eval.hpp
++++ b/src/eval.hpp
+@@ -1,11 +1,15 @@
+ #pragma once
+ 
+ #include "model.hpp"
+ #include "routing.hpp"
+ 
+ namespace efgr {
+ 
++std::pair<double, double> usedOutline(const Problem& problem, const Placement& placement);
++std::pair<double, double> usedOutline(const Problem& problem, const Placement& placement,
++                                       const RoutingResult& routing);
++
+ Score cheapScore(const Problem& problem, const Placement& placement);
+ Score exactScore(const Problem& problem, const Placement& placement, RoutingResult* routing_out);
+ 
+ }  // namespace efgr
+diff --git a/src/io.cpp b/src/io.cpp
+index e1476d6..cef2e7a 100644
+--- a/src/io.cpp
++++ b/src/io.cpp
+@@ -1,17 +1,19 @@
+ #include "io.hpp"
+ 
+ #include <fstream>
+ #include <iomanip>
+ #include <sstream>
+ #include <stdexcept>
+ 
++#include "eval.hpp"
++
+ namespace efgr {
+ namespace {
+ 
+ std::vector<std::vector<std::string>> readCsv(const std::string& path) {
+     std::ifstream in(path);
+     if (!in) throw std::runtime_error("cannot open input CSV: " + path);
+ 
+     std::vector<std::vector<std::string>> rows;
+     std::vector<std::string> row;
+     std::string field;
+@@ -110,37 +112,20 @@ void parseAspect(Block& b, const std::string& value) {
+ }
+ 
+ BlockType parseType(const std::string& s) {
+     std::string t = s;
+     std::transform(t.begin(), t.end(), t.begin(), [](unsigned char c) { return std::toupper(c); });
+     if (t.find("EDGE") != std::string::npos) return BlockType::Edge;
+     if (t.find("MACRO") != std::string::npos || t.find("HARD") != std::string::npos) return BlockType::Macro;
+     return BlockType::Soft;
+ }
+ 
+-std::pair<double, double> usedOutline(const Problem& problem, const Placement& placement,
+-                                      const RoutingResult& routing) {
+-    double w = 0.0;
+-    double h = 0.0;
+-    for (const auto& r : placement.rects) {
+-        w = std::max(w, r.right());
+-        h = std::max(h, r.top());
+-    }
+-    for (const auto& ch : routing.channels) {
+-        w = std::max(w, ch.rect.right());
+-        h = std::max(h, ch.rect.top());
+-    }
+-    w = std::max(1.0, std::min(problem.outline_w, w));
+-    h = std::max(1.0, std::min(problem.outline_h, h));
+-    return {w, h};
+-}
+-
+ }  // namespace
+ 
+ Problem parseProblem(const std::string& path) {
+     auto rows = readCsv(path);
+     Problem p;
+ 
+     bool in_block_table = false;
+     for (const auto& row : rows) {
+         if (row.empty()) continue;
+         if (row[0] == "BLOCK") {
+diff --git a/test/regression_p0_20260706.cpp b/test/regression_p0_20260706.cpp
+index 6e29a45..4362aee 100644
+--- a/test/regression_p0_20260706.cpp
++++ b/test/regression_p0_20260706.cpp
+@@ -1,15 +1,19 @@
+ #include <cassert>
+ #include <cmath>
++#include <cstdio>
++#include <fstream>
+ #include <iostream>
+ 
++#include "../src/eval.hpp"
+ #include "../src/ft.hpp"
++#include "../src/io.hpp"
+ #include "../src/routing.hpp"
+ 
+ namespace {
+ using namespace efgr;
+ 
+ bool near(double a, double b, double tol = 1e-6) { return std::abs(a - b) <= tol; }
+ 
+ Block softBlockWithRates() {
+     Block b;
+     b.type = BlockType::Soft;
+@@ -114,19 +118,45 @@ void testDirectAbutmentZeroWirelength() {
+     pl.aspect = {1.0, 1.0};
+ 
+     RoutingResult r = routeProblem(p, pl);
+     assert(r.open_routes == 0);
+     assert(r.routes.size() == 1);
+     assert(r.routes[0].node_path.size() == 2);  // direct block->block, no channel
+     assert(near(r.routes[0].wirelength, 0.0));  // 1 guiding point -> empty HPWL sum
+     assert(near(r.total_wirelength, 0.0));
+     std::cout << "testDirectAbutmentZeroWirelength ok\n";
+ }
++void testOutlineConsistencyEvalVsCfg() {
++    Problem p = forcedFtProblem();
++    Placement pl = rowPlacement();
++    RoutingResult routing;
++    Score exact = exactScore(p, pl, &routing);
++    auto [w, h] = usedOutline(p, pl, routing);
++    assert(near(exact.outline_area, w * h, 1e-6));
++
++    const std::string tmp = "test/p0_outline_tmp.cfg";
++    writeCfg(tmp, p, pl, routing);
++    std::ifstream in(tmp);
++    assert(in.good());
++    std::string tok;
++    double cfg_w = -1.0, cfg_h = -1.0;
++    while (in >> tok) {
++        if (tok == "Outline" || tok == "OUTLINE") {
++            in >> cfg_w >> cfg_h;
++            break;
++        }
++    }
++    std::remove(tmp.c_str());
++    assert(near(cfg_w * cfg_h, exact.outline_area, 1e-6));
++    std::cout << "testOutlineConsistencyEvalVsCfg ok\n";
++}
++
+ }  // namespace
+ 
+ int main() {
+     testFtMathOfficialExamples();
+     testRoutingMismatchUsesCeiledMath();
+     testDirectAbutmentZeroWirelength();
++    testOutlineConsistencyEvalVsCfg();
+     std::cout << "p0 regressions passed\n";
+     return 0;
+ }
+diff --git a/test/run_20260608_regressions.sh b/test/run_20260608_regressions.sh
+index f0a3437..6d170c1 100644
+--- a/test/run_20260608_regressions.sh
++++ b/test/run_20260608_regressions.sh
+@@ -1,18 +1,18 @@
+ #!/usr/bin/env bash
+ set -euo pipefail
+ 
+ make clean
+ make
+ g++ -std=c++17 -O2 -Wall -Wextra -pedantic \
+   -I. \
+   test/regression_20260608.cpp \
+-  src/io.cpp src/floorplan.cpp src/routing.cpp \
++  src/io.cpp src/floorplan.cpp src/routing.cpp src/eval.cpp \
+   -o /tmp/regression_20260608
+ /tmp/regression_20260608
+ 
+ bin/efgr "test/E_testcase_20260608_port.csv" /tmp/case_20260608.cfg --iters 50 --seed 1 --exact-interval 10
+ test -s /tmp/case_20260608.cfg
+ grep -q '^OUTLINE' /tmp/case_20260608.cfg
+ grep -q '^BLOCK' /tmp/case_20260608.cfg
+ grep -q '^CHANNEL' /tmp/case_20260608.cfg
+ grep -q '^PATH' /tmp/case_20260608.cfg
