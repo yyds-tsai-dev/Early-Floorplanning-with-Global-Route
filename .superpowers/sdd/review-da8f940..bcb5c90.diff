@@ -1,0 +1,810 @@
+# Review package: da8f940..bcb5c90
+
+## Commits
+bcb5c90 fix(eval): return corrective-grow effective placement to callers
+
+## Files changed
+ src/eval.cpp                    |  10 +++-
+ src/eval.hpp                    |  11 +++-
+ src/respace.cpp                 |  17 +++++-
+ src/search.cpp                  |  93 +++++++++++++++++++++---------
+ src/search.hpp                  |  10 +++-
+ test/regression_p1_20260706.cpp | 125 +++++++++++++++++++++++++++++++++++++---
+ test/regression_p3_20260707.cpp |   8 +--
+ 7 files changed, 230 insertions(+), 44 deletions(-)
+
+## Diff
+diff --git a/src/eval.cpp b/src/eval.cpp
+index 4e18bb5..24f53e0 100644
+--- a/src/eval.cpp
++++ b/src/eval.cpp
+@@ -180,21 +180,22 @@ Score routeAndScoreAt(const Problem& problem, const Placement& placement, double
+     score.penalty += kBetaLin * score.outline_area * R
+                    + kBetaTail * score.outline_area * std::max(0.0, R - kOverflowRateThreshold);
+     score.penalty += kBetaFt * routing.feedthrough_mismatch;
+     score.value = score.outline_area + problem.alpha * score.wirelength + score.penalty;
+     if (routing_out) *routing_out = routing;
+     return score;
+ }
+ 
+ }  // namespace
+ 
+-Score exactScore(const Problem& problem, const Placement& placement, RoutingResult* routing_out) {
++Score exactScore(const Problem& problem, const Placement& placement, RoutingResult* routing_out,
++                 Placement* placement_out) {
+     // Scope routing to the placement's STAMPED declared outline (design §1.4) -- not a bbox
+     // recomputed from usedOutline, which ignores the shrink-wrap entirely. When unset (0,0; e.g.
+     // a hand-built placement, or one whose stamp went stale -- see compactTowardOrigin's reset),
+     // recompute via the exact shrinkWrapOutline on a LOCAL copy: exactScore takes `placement` by
+     // const&, and shrinkWrapOutline mutates (re-anchors edge rects to the shrunk border), so it
+     // must never touch the caller's placement. Route/score the local copy's rects, since edge
+     // re-anchoring changes which rects touch which channels.
+     Placement local = placement;
+     double w = local.outline_w;
+     double h = local.outline_h;
+@@ -243,14 +244,21 @@ Score exactScore(const Problem& problem, const Placement& placement, RoutingResu
+             }
+             if (prefer_grown) {
+                 local = regrow;
+                 score = grown_score;
+                 routing = grown_routing;
+             }
+         }
+     }
+ 
+     if (routing_out) *routing_out = routing;
++    // Surface the placement actually scored/routed (design §1.4 consistency fix): `local` is the
++    // input when the grow never fired, or the grown+re-anchored geometry when it did. Its outline
++    // stamp is integral in the grow path -- anchorAtOutline stamps EXACTLY grown_w/grown_h, and both
++    // are ceil'd integers above (Part D). Callers that keep the returned score/routing for emission
++    // or comparison store THIS placement, never the raw input, so channels/paths never reference
++    // geometry outside the emitted BLOCK rects' outline.
++    if (placement_out) *placement_out = local;
+     return score;
+ }
+ 
+ }  // namespace efgr
+diff --git a/src/eval.hpp b/src/eval.hpp
+index ef50dca..47f4b39 100644
+--- a/src/eval.hpp
++++ b/src/eval.hpp
+@@ -3,13 +3,22 @@
+ #include "model.hpp"
+ #include "routing.hpp"
+ 
+ namespace efgr {
+ 
+ std::pair<double, double> usedOutline(const Problem& problem, const Placement& placement);
+ std::pair<double, double> usedOutline(const Problem& problem, const Placement& placement,
+                                        const RoutingResult& routing);
+ 
+ Score cheapScore(const Problem& problem, const Placement& placement);
+-Score exactScore(const Problem& problem, const Placement& placement, RoutingResult* routing_out);
++// Scores `placement` with real routing. When the tight declared outline is too congested to route
++// (open_routes>0), exactScore may perform a one-step corrective grow that RE-ANCHORS edge blocks at
++// a larger outline and re-routes -- so the score/routing it returns can describe a DIFFERENT
++// placement than the one passed in. `placement_out`, when non-null, receives that effective
++// placement (the geometry actually scored/routed -- grown or not), so callers that keep the returned
++// score/routing for later emission/comparison can store a mutually-consistent (placement, routing)
++// pair instead of pairing the original rects with channels/paths extracted from grown geometry. When
++// the grow does not fire, *placement_out equals the input placement (byte-identical outputs).
++Score exactScore(const Problem& problem, const Placement& placement, RoutingResult* routing_out,
++                 Placement* placement_out = nullptr);
+ 
+ }  // namespace efgr
+diff --git a/src/respace.cpp b/src/respace.cpp
+index de6e1ae..4a4f91a 100644
+--- a/src/respace.cpp
++++ b/src/respace.cpp
+@@ -410,42 +410,53 @@ bool respaceToDemand(const Problem& problem, Placement& placement, const Routing
+     if (candidate.outline_w > problem.outline_w + kEps || candidate.outline_h > problem.outline_h + kEps) {
+         return false;
+     }
+ 
+     placement = candidate;
+     return true;
+ }
+ 
+ RespaceResult respaceFixedPoint(const Problem& problem, const Placement& base, const ExactCachedFn& exactCached) {
+     RespaceResult best;
++    // best.placement receives the EFFECTIVE placement exactCached scored/routed: exactScore's
++    // corrective grow may re-anchor edge blocks at a larger outline, so best.routing can describe
++    // different geometry than `base`. Seed with `base`, then let exactCached overwrite it with the
++    // geometry actually paired with best.routing -- byte-identical to `base` when the grow does not
++    // fire. (base and best.placement are distinct objects, so passing &best.placement while `base` is
++    // read as the input arg is safe: exactScore copies its input before writing placement_out.)
+     best.placement = base;
+-    best.score = exactCached(base, &best.routing);
++    best.score = exactCached(base, &best.routing, &best.placement);
+     best.improved = false;
+ 
+     // Early exit (design §3.5): already overflow-free and legal -- nothing for the loop to do.
+     if (best.routing.channel_overflow <= kEps && best.routing.open_routes == 0) return best;
+ 
+     Placement current = base;
+     RoutingResult current_routing = best.routing;
+ 
+     constexpr int kMaxIters = 3;
+     for (int iter = 0; iter < kMaxIters; ++iter) {
+         Placement candidate = current;
+         bool changed = respaceToDemand(problem, candidate, current_routing);
+         if (!changed) break;  // no demand left, or infeasible/illegal -- stop (monotone-widen halt)
+         if (rectsUnchanged(candidate, current)) break;  // geometric no-op -- further iters can't help
+ 
+         RoutingResult candidate_routing;
+-        Score candidate_score = exactCached(candidate, &candidate_routing);
++        // Store the effective placement (grow may re-anchor at a larger outline), not the raw
++        // `candidate`, so best.placement stays consistent with best.routing. `current` (advanced
++        // below) intentionally stays the un-grown `candidate` -- it is the next relax seed, and when
++        // the grow does not fire candidate_effective == candidate anyway.
++        Placement candidate_effective;
++        Score candidate_score = exactCached(candidate, &candidate_routing, &candidate_effective);
+ 
+         if (respaceCandidateBetter(candidate_routing, candidate_score.value, best.routing, best.score.value)) {
+-            best.placement = candidate;
++            best.placement = candidate_effective;
+             best.routing = candidate_routing;
+             best.score = candidate_score;
+             best.improved = true;
+         }
+ 
+         // Advance the loop's own "current" regardless of whether this iteration became the new
+         // best -- each pass must relax from the freshly re-routed geometry (monotone-widen keeps
+         // this safe: coordinates only ever grow), so the next iteration's demand reflects the
+         // latest routing, not a stale one from a worse-scoring earlier candidate.
+         current = candidate;
+diff --git a/src/search.cpp b/src/search.cpp
+index 4a58250..ba4f78f 100644
+--- a/src/search.cpp
++++ b/src/search.cpp
+@@ -12,20 +12,31 @@
+ #include "respace.hpp"
+ #include "validate.hpp"
+ 
+ namespace efgr {
+ namespace {
+ 
+ bool axisOverlap(double a0, double a1, double b0, double b1) {
+     return std::min(a1, b1) - std::max(a0, b0) > kEps;
+ }
+ 
++// Value stored by the exact-eval caches (runPlacementSearch's `exact_cache`,
++// finalizeFeedthrough's `inflated_exact_cache`), keyed by placementKey(INPUT placement). Carries the
++// EFFECTIVE placement (exactScore's grow may re-anchor edge blocks at a larger outline) alongside
++// score/routing so a cache hit reproduces the exact same triple and every stored best/committed
++// placement stays consistent with its stored routing.
++struct ExactEvalEntry {
++    Score score;
++    RoutingResult routing;
++    Placement placement;
++};
++
+ }  // namespace
+ 
+ Placement compactTowardOrigin(const Problem& problem, Placement placement) {
+     std::vector<int> order;
+     for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
+         if (!isEdge(problem.blocks[i].type)) order.push_back(static_cast<int>(i));
+     }
+     std::sort(order.begin(), order.end(), [&](int a, int b) {
+         double ka = placement.rects[a].x + placement.rects[a].y;
+         double kb = placement.rects[b].x + placement.rects[b].y;
+@@ -199,42 +210,47 @@ OutlineSweepResult outlineSweep(const Problem& problem, const Placement& base, c
+         if (margin == 0.0) {
+             OutlineFit tight_variant_fit = shrinkWrapOutline(ceiling, variant);
+             anchored = tight_variant_fit.legal;
+         } else {
+             OutlineFit fit = anchorAtOutline(ceiling, variant);
+             anchored = fit.legal;
+         }
+         if (!anchored) continue;
+ 
+         RoutingResult routing;
+-        Score score = exactCached(variant, &routing);
++        // The effective placement (exactScore's grow may re-anchor edge blocks at a larger outline)
++        // is what must land in OutlineSweepResult.placement, not `variant` -- otherwise the returned
++        // routing's channels could reference geometry outside `variant`'s stamped outline.
++        Placement effective;
++        Score score = exactCached(variant, &routing, &effective);
+         if (!have_best || outlineSweepBetter(routing, score.value, best.routing, best.score.value)) {
+-            best = OutlineSweepResult{score, variant, routing};
++            best = OutlineSweepResult{score, effective, routing};
+             have_best = true;
+         }
+     }
+ 
+     // P1 final-review fix: if every rung above failed its `anchored` check (all `continue`d), the
+     // loop never assigns `best`, and a default-constructed OutlineSweepResult{} would be returned
+     // instead -- an empty placement (no rects) with score.value == 0.0 (its default) and
+     // routing.open_routes == 0 (its default), which outlineSweepBetter can then PREFER over a
+     // legitimate incumbent with open_routes>0, silently committing an empty placement. Guarantee a
+     // real fallback: base's own outline reset + shrinkWrapOutline, which the MAX-fallback contract
+     // (shrinkWrapOutline's doc comment above) guarantees is always legal.
+     if (!have_best) {
+         Placement fallback = base;
+         fallback.outline_w = 0.0;
+         fallback.outline_h = 0.0;
+         shrinkWrapOutline(problem, fallback);
+         RoutingResult routing;
+-        Score score = exactCached(fallback, &routing);
+-        best = OutlineSweepResult{score, fallback, routing};
++        Placement effective;
++        Score score = exactCached(fallback, &routing, &effective);
++        best = OutlineSweepResult{score, effective, routing};
+         have_best = true;
+     }
+     return best;
+ }
+ 
+ void finalizeFeedthrough(const Problem& problem, const PlacementEngine& engine, SearchResult& result) {
+     if (result.best_routing.feedthrough_mismatch <= kEps) return;
+     Problem inflated = problem;
+     Placement placement = result.best_placement;
+     RoutingResult routing = result.best_routing;
+@@ -263,83 +279,94 @@ void finalizeFeedthrough(const Problem& problem, const PlacementEngine& engine,
+         }
+         if (!grew) break;
+         PlacementState state = engine.seedFromPlacement(inflated, placement, rng);
+         placement = engine.decode(inflated, state);
+         // Defensive symmetry with the compacted path below: decode stamps the declared outline
+         // today, but future engines may not -- guard against committing an unstamped placement.
+         if (placement.outline_w <= 0.0 || placement.outline_h <= 0.0) {
+             shrinkWrapOutline(inflated, placement);
+         }
+         RoutingResult new_routing;
+-        Score exact = exactScore(inflated, placement, &new_routing);
++        // Capture the effective placement (exactScore's grow may re-anchor edge blocks at a larger
++        // outline) so the tryCommit below stores geometry consistent with new_routing, never the raw
++        // pre-grow `placement`. `placement` itself is reused unchanged below (respaceFixedPoint /
++        // compactTowardOrigin), so a separate variable is required.
++        Placement decode_effective;
++        Score exact = exactScore(inflated, placement, &new_routing, &decode_effective);
+         routing = new_routing;
+         // T6 (design p3-design.md §3.4/§5, plan Task 6): respace the inflated re-decode against
+         // its own routed channel demand BEFORE tryCommit -- FT inflation grows a soft block in
+         // place, which can push a neighboring strip into overflow; respacing here widens exactly
+         // that strip on the SAME inflated problem the candidate was decoded against. The commit
+         // gate itself is untouched: tryCommit still scores/validates against the ORIGINAL
+         // `problem` (not `inflated`), so respacing only ever supplies a possibly-better candidate
+         // to the same paydown + validateSolution funnel, never changes what gets accepted.
+         // Memoized the same way runPlacementSearch's `exactCached` is (placementKey-keyed cache):
+         // respaceFixedPoint's first internal call scores `placement` itself, which is the exact
+         // same candidate `tryCommit(placement, exact, new_routing)` a few lines below already
+         // scored via `exact` above -- without a cache that duplicates a real exactScore/routeProblem
+         // call per pass per variant (this function calls respaceFixedPoint up to twice per pass,
+         // across up to 3 passes).
+-        std::unordered_map<std::string, std::pair<Score, RoutingResult>> inflated_exact_cache;
+-        ExactCachedFn inflatedExact = [&](const Placement& cand, RoutingResult* routing_out) {
++        std::unordered_map<std::string, ExactEvalEntry> inflated_exact_cache;
++        ExactCachedFn inflatedExact = [&](const Placement& cand, RoutingResult* routing_out,
++                                          Placement* placement_out) {
+             std::string key = placementKey(cand);
+             auto it = inflated_exact_cache.find(key);
+             if (it != inflated_exact_cache.end()) {
+-                if (routing_out) *routing_out = it->second.second;
+-                return it->second.first;
++                if (routing_out) *routing_out = it->second.routing;
++                if (placement_out) *placement_out = it->second.placement;
++                return it->second.score;
+             }
+             RoutingResult routing;
+-            Score score = exactScore(inflated, cand, &routing);
+-            inflated_exact_cache.emplace(std::move(key), std::make_pair(score, routing));
++            Placement effective;
++            Score score = exactScore(inflated, cand, &routing, &effective);
++            inflated_exact_cache.emplace(std::move(key), ExactEvalEntry{score, routing, effective});
+             if (routing_out) *routing_out = routing;
++            if (placement_out) *placement_out = effective;
+             return score;
+         };
+         RespaceResult respaced = respaceFixedPoint(inflated, placement, inflatedExact);
+-        tryCommit(placement, exact, new_routing);
++        tryCommit(decode_effective, exact, new_routing);
+         tryCommit(respaced.placement, respaced.score, respaced.routing);
+         // Reclaim outline/overflow lost to the inflated re-decode: same dims, tighter packing.
+         Placement compacted = compactTowardOrigin(inflated, placement);
+         if (fitsOutlineWithoutOverlap(inflated, compacted)) {
+             // compactTowardOrigin resets outline_w/h to 0 (moved core rects invalidate any prior
+             // stamp). Re-stamp immediately so `compacted`, once committed as best_placement, is
+             // internally consistent with its OWN rects/outline for later validateSolution/writeCfg
+             // calls -- exactScore below would otherwise recompute the shrink-wrap on an internal
+             // copy for scoring only, leaving this stored `compacted` stale (edges not re-anchored,
+             // stamp 0 -> falls back to MAX) even though it was scored/routed at a smaller outline.
+             shrinkWrapOutline(inflated, compacted);
+             RoutingResult compacted_routing;
+-            Score compacted_exact = exactScore(inflated, compacted, &compacted_routing);
+-            tryCommit(compacted, compacted_exact, compacted_routing);
++            Placement compacted_effective;
++            Score compacted_exact = exactScore(inflated, compacted, &compacted_routing, &compacted_effective);
++            tryCommit(compacted_effective, compacted_exact, compacted_routing);
+             // Same T6 respace, applied to the compacted variant before ITS tryCommit.
+             RespaceResult compacted_respaced = respaceFixedPoint(inflated, compacted, inflatedExact);
+             tryCommit(compacted_respaced.placement, compacted_respaced.score, compacted_respaced.routing);
+         }
+         // A single re-decode of the inflated problem often spills past MAX (a legal
+         // arrangement may still exist -- other engines find one). Jiggle the inflated
+         // topology a bounded number of times; only geometrically legal candidates pay
+         // for exact routing, and all commits go through the same paydown gate.
+         constexpr int kFinalizeRepairAttempts = 32;
+         PlacementState repair = state;
+         for (int attempt = 0; attempt < kFinalizeRepairAttempts; ++attempt) {
+             engine.mutate(inflated, repair, rng);
+             if (!engine.isValidState(inflated, repair)) continue;
+             Placement cand = engine.decode(inflated, repair);
+             if (!fitsOutlineWithoutOverlap(inflated, cand)) continue;
+             RoutingResult cand_routing;
+-            Score cand_exact = exactScore(inflated, cand, &cand_routing);
+-            tryCommit(cand, cand_exact, cand_routing);
++            Placement cand_effective;
++            Score cand_exact = exactScore(inflated, cand, &cand_routing, &cand_effective);
++            tryCommit(cand_effective, cand_exact, cand_routing);
+         }
+     }
+ }
+ 
+ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& engine, const SearchOptions& options) {
+     std::mt19937 rng(options.seed);
+     PlacementState initial = engine.initialState(problem, rng);
+     return runPlacementSearch(problem, engine, options, initial);
+ }
+ 
+@@ -350,56 +377,69 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
+     result.iterations = std::max(0, options.iters);
+ 
+     std::mt19937 rng(options.seed);
+     PlacementState current = initial_state;
+     if (!engine.isValidState(problem, current)) current = engine.initialState(problem, rng);
+     Placement current_place = engine.decode(problem, current);
+     Score current_score = cheapScore(problem, current_place);
+ 
+     PlacementState best_state = current;
+     result.best_placement = current_place;
+-    std::unordered_map<std::string, std::pair<Score, RoutingResult>> exact_cache;
+-    auto exactCached = [&](const Placement& placement, RoutingResult* routing_out) {
++    std::unordered_map<std::string, ExactEvalEntry> exact_cache;
++    auto exactCached = [&](const Placement& placement, RoutingResult* routing_out, Placement* placement_out) {
+         std::string key = placementKey(placement);
+         auto it = exact_cache.find(key);
+         if (it != exact_cache.end()) {
+-            if (routing_out) *routing_out = it->second.second;
+-            return it->second.first;
++            if (routing_out) *routing_out = it->second.routing;
++            if (placement_out) *placement_out = it->second.placement;
++            return it->second.score;
+         }
+         RoutingResult routing;
+-        Score score = exactScore(problem, placement, &routing);
+-        exact_cache.emplace(std::move(key), std::make_pair(score, routing));
++        Placement effective;
++        Score score = exactScore(problem, placement, &routing, &effective);
++        exact_cache.emplace(std::move(key), ExactEvalEntry{score, routing, effective});
+         ++result.exact_evaluations;
+         if (routing_out) *routing_out = routing;
++        if (placement_out) *placement_out = effective;
+         return score;
+     };
+-    result.best_score = exactCached(result.best_placement, &result.best_routing);
++    {
++        // Seed best from the effective placement, so best_placement/best_routing start consistent
++        // even if this initial candidate's tight outline triggered the corrective grow.
++        Placement effective;
++        result.best_score = exactCached(result.best_placement, &result.best_routing, &effective);
++        result.best_placement = effective;
++    }
+ 
+     struct CheapCandidate {
+         double value;
+         Placement placement;
+         std::string key;
+     };
+     std::vector<CheapCandidate> top_candidates;
+     auto rememberCandidate = [&](const Placement& placement, const Score& score) {
+         std::string key = placementKey(placement);
+         for (const auto& candidate : top_candidates) {
+             if (candidate.key == key) return;
+         }
+         top_candidates.push_back(CheapCandidate{score.value, placement, key});
+         std::sort(top_candidates.begin(), top_candidates.end(), [](const CheapCandidate& a, const CheapCandidate& b) {
+             return a.value < b.value;
+         });
+         constexpr std::size_t kTopCheapCandidates = 16;
+         if (top_candidates.size() > kTopCheapCandidates) top_candidates.resize(kTopCheapCandidates);
+     };
+-    rememberCandidate(result.best_placement, current_score);
++    // Seed the cheap-candidate pool with `current_place` (the placement `current_score` was actually
++    // computed on), NOT result.best_placement -- the latter may now be the grown effective placement
++    // from the seed exact-eval above, which would mis-pair a grown placement with the ungrown cheap
++    // score. When the grow does not fire these are byte-identical (effective == current_place).
++    rememberCandidate(current_place, current_score);
+ 
+     double temp = std::max(1.0, options.initial_temperature);
+     int exact_interval = std::max(1, options.exact_interval);
+     // Beta Task 5: wall-clock budget. When enabled, time (not the iter default) is the binding
+     // stop -- raise the iteration ceiling so the steady_clock check below is what ends the loop.
+     // Budget off (== 0) leaves the bound and reported iteration count byte-identical to the
+     // pre-budget path (result.iterations stays the value stamped from options.iters above).
+     const int iter_bound = options.time_budget_sec > 0.0 ? std::max(options.iters, 2000000)
+                                                          : std::max(0, options.iters);
+     const auto budget_start = std::chrono::steady_clock::now();
+@@ -421,25 +461,26 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
+         double delta = cand_score.value - current_score.value;
+         std::uniform_real_distribution<double> unit(0.0, 1.0);
+         if (delta <= 0.0 || std::exp(-delta / std::max(1.0, temp)) > unit(rng)) {
+             current = candidate;
+             current_place = cand_place;
+             current_score = cand_score;
+         }
+ 
+         if (iter % exact_interval == 0 || cand_score.value < result.best_score.value) {
+             RoutingResult routing;
+-            Score exact = exactCached(cand_place, &routing);
++            Placement effective;
++            Score exact = exactCached(cand_place, &routing, &effective);
+             if (exact.value < result.best_score.value) {
+                 result.best_score = exact;
+                 best_state = candidate;
+-                result.best_placement = cand_place;
++                result.best_placement = effective;
+                 result.best_routing = routing;
+             }
+         }
+         temp *= options.cooling;
+     }
+     // Report the iterations actually executed when time bounded the run; budget off keeps the
+     // options.iters value stamped above, preserving the existing --iters summary line verbatim.
+     if (options.time_budget_sec > 0.0) result.iterations = iters_run;
+ 
+     for (const auto& candidate : top_candidates) {
+diff --git a/src/search.hpp b/src/search.hpp
+index 6ac39bc..01eeca9 100644
+--- a/src/search.hpp
++++ b/src/search.hpp
+@@ -21,21 +21,29 @@ struct SearchResult {
+     std::string engine_name;
+     int iterations = 0;
+     int exact_evaluations = 0;
+     Score best_score;
+     Placement best_placement;
+     RoutingResult best_routing;
+ };
+ 
+ // Exact-scoring callback shape used by the elite pass's exact_cache (search.cpp's `exactCached`
+ // lambda) and injected into outlineSweep below so the sweep shares the same cache/dedupe path.
+-using ExactCachedFn = std::function<Score(const Placement&, RoutingResult*)>;
++// Third arg (Placement*, may be null) receives the EFFECTIVE placement exactScore actually
++// scored/routed -- when exactScore's corrective grow fires it re-anchors edge blocks at a larger
++// outline, so the returned routing describes different geometry than the input. Consumers
++// (outlineSweep, respaceFixedPoint) store this effective placement, not the raw input, so the
++// placement they hand back is mutually consistent with the routing they hand back. The cache stores
++// the (score, routing, effective placement) triple keyed by the INPUT placementKey, so cache hits
++// reproduce the same triple (dedupe semantics unchanged; the mapping input -> triple is deterministic
++// because exactScore is deterministic).
++using ExactCachedFn = std::function<Score(const Placement&, RoutingResult*, Placement*)>;
+ 
+ struct OutlineSweepResult {
+     Score score;
+     Placement placement;
+     RoutingResult routing;
+ };
+ 
+ // Elite-pass outline sweep (design p1-design.md §1.4 elite path): for a fixed set of rects
+ // (`base`, its own outline_w/h ignored -- always re-shrink-wrapped), tries a deterministic ladder
+ // of declared-outline margins between the tight shrink-wrap and MAX, exact-scores each via the
+diff --git a/test/regression_p1_20260706.cpp b/test/regression_p1_20260706.cpp
+index c3bdc46..a29f651 100644
+--- a/test/regression_p1_20260706.cpp
++++ b/test/regression_p1_20260706.cpp
+@@ -1,18 +1,19 @@
+ #include <cassert>
+ #include <cmath>
+ #include <cstdio>
+ #include <fstream>
+ #include <iostream>
+ #include <memory>
+ #include <random>
+ #include <sstream>
++#include <tuple>
+ #include <unordered_map>
+ #include <utility>
+ 
+ #include "../src/eval.hpp"
+ #include "../src/ft.hpp"
+ #include "../src/io.hpp"
+ #include "../src/model.hpp"
+ #include "../src/placement_engine.hpp"
+ #include "../src/route_cost.hpp"
+ #include "../src/routing.hpp"
+@@ -614,30 +615,32 @@ void testOutlineSweepPrefersLowerScoreOverTighterArea() {
+     // penalty threshold is anchored to real geometry, not a guessed constant.
+     Placement tight_probe = base;
+     OutlineFit tight_fit = shrinkWrapOutline(problem, tight_probe);
+     assert(tight_fit.legal);
+     double tight_area = tight_fit.w * tight_fit.h;
+ 
+     // Mock exactCached: any candidate whose stamped area is within 0.1% of the tight area (i.e.
+     // margin 0.0's own rung, and only that rung) is "too tight to route" -- large synthetic
+     // overflow penalty. Everything strictly bigger (any later rung that actually grew) is clean.
+     // This directly encodes the R1 trade: tight wins on raw area, loses once overflow is charged.
+-    auto mockExactCached = [&](const Placement& placement, RoutingResult* routing_out) {
++    auto mockExactCached = [&](const Placement& placement, RoutingResult* routing_out,
++                               Placement* placement_out = nullptr) {
+         RoutingResult routing;
+         Score score;
+         score.outline_area = placement.outline_w * placement.outline_h;
+         bool too_tight = score.outline_area < tight_area * 1.001;
+         score.penalty = too_tight ? 1.0e7 : 0.0;
+         score.wirelength = 0.0;
+         score.value = score.outline_area + score.penalty;
+         routing.open_routes = 0;
+         if (routing_out) *routing_out = routing;
++        if (placement_out) *placement_out = placement;  // mock never grows: effective == input
+         return score;
+     };
+ 
+     OutlineSweepResult result = outlineSweep(problem, base, mockExactCached);
+ 
+     assert(result.routing.open_routes == 0);
+     // The winner must NOT be the tight (margin 0.0) rung -- it is penalized in the mock -- and its
+     // total score must be strictly better than the tight rung's own mocked score.
+     Score tight_mock_score = mockExactCached(tight_probe, nullptr);
+     assert(result.score.value < tight_mock_score.value - kEps);
+@@ -797,24 +800,25 @@ void testAnchorAtOutlineStampsExactTargetNotTightCase0() {
+ // generation, independent of which one it ultimately picks).
+ void testOutlineSweepProbesDistinctOutlinesCase0() {
+     Problem problem = parseProblem("test/2026 ICCAD_case.case0.csv");
+     std::unique_ptr<PlacementEngine> engine = makePlacementEngine("bstar");
+     std::mt19937 rng(1);
+     PlacementState state = engine->initialState(problem, rng);
+     Placement placement = engine->decode(problem, state);
+ 
+     std::vector<double> probed_areas;
+     double first_area = -1.0;
+-    ExactCachedFn probe = [&](const Placement& p, RoutingResult* routing_out) {
++    ExactCachedFn probe = [&](const Placement& p, RoutingResult* routing_out, Placement* placement_out) {
+         double area = p.outline_w * p.outline_h;
+         probed_areas.push_back(area);
+         if (first_area < 0.0) first_area = area;
++        if (placement_out) *placement_out = p;  // probe never grows: effective == input
+         RoutingResult routing;
+         routing.open_routes = 0;
+         Score score;
+         score.outline_area = area;
+         // Always prefer the FIRST probed rung (m=0.0, the tight rung) regardless of area, so the
+         // sweep's own selection logic cannot be mistaken for what this test is checking (which
+         // rungs get GENERATED/probed, not which one wins).
+         score.value = (std::abs(area - first_area) < kEps) ? 0.0 : 1.0;
+         score.wirelength = 0.0;
+         score.penalty = 0.0;
+@@ -841,32 +845,35 @@ void testOutlineSweepProbesDistinctOutlinesCase0() {
+ // it locks in the STRUCTURAL guarantee the fix restores on an ordinary case0 decode: the returned
+ // placement always has a positive outline and one rect per problem block, which would fail
+ // immediately if outlineSweep ever fell through to OutlineSweepResult{}.
+ void testOutlineSweepNeverReturnsEmptyPlacement() {
+     Problem problem = parseProblem("test/2026 ICCAD_case.case0.csv");
+     std::unique_ptr<PlacementEngine> engine = makePlacementEngine("bstar");
+     std::mt19937 rng(1);
+     PlacementState state = engine->initialState(problem, rng);
+     Placement placement = engine->decode(problem, state);
+ 
+-    std::unordered_map<std::string, std::pair<Score, RoutingResult>> exact_cache;
+-    ExactCachedFn exactCached = [&](const Placement& p, RoutingResult* routing_out) {
++    std::unordered_map<std::string, std::tuple<Score, RoutingResult, Placement>> exact_cache;
++    ExactCachedFn exactCached = [&](const Placement& p, RoutingResult* routing_out, Placement* placement_out) {
+         std::string key = placementKey(p);
+         auto it = exact_cache.find(key);
+         if (it != exact_cache.end()) {
+-            if (routing_out) *routing_out = it->second.second;
+-            return it->second.first;
++            if (routing_out) *routing_out = std::get<1>(it->second);
++            if (placement_out) *placement_out = std::get<2>(it->second);
++            return std::get<0>(it->second);
+         }
+         RoutingResult routing;
+-        Score score = exactScore(problem, p, &routing);
+-        exact_cache.emplace(key, std::make_pair(score, routing));
++        Placement effective;
++        Score score = exactScore(problem, p, &routing, &effective);
++        exact_cache.emplace(key, std::make_tuple(score, routing, effective));
+         if (routing_out) *routing_out = routing;
++        if (placement_out) *placement_out = effective;
+         return score;
+     };
+ 
+     OutlineSweepResult result = outlineSweep(problem, placement, exactCached);
+ 
+     assert(result.placement.outline_w > 0.0);
+     assert(result.placement.outline_h > 0.0);
+     assert(result.placement.rects.size() == problem.blocks.size());
+     std::cout << "testOutlineSweepNeverReturnsEmptyPlacement ok\n";
+ }
+@@ -939,20 +946,121 @@ void runHybridAcceptance(const std::string& csv_path, const char* label, bool ex
+ void testFinalizeFeedthroughAcceptanceCase1Hybrid() {
+     runHybridAcceptance("test/2026 ICCAD_case.case1.csv", "testFinalizeFeedthroughAcceptanceCase1Hybrid",
+                          /*expect_exact_ft_parity=*/false);
+ }
+ 
+ void testFinalizeFeedthroughAcceptanceCase3Hybrid() {
+     runHybridAcceptance("test/2026 ICCAD_case.case3.csv", "testFinalizeFeedthroughAcceptanceCase3Hybrid",
+                          /*expect_exact_ft_parity=*/true);
+ }
+ 
++// beta Codex-fix (corrective-grow consistency): exactScore's one-step corrective grow (eval.cpp
++// §1.4) re-anchors edge blocks at a LARGER outline and re-routes when the tight declared outline is
++// too congested to route, so the score/routing it returns can describe DIFFERENT geometry than the
++// input placement. Before the fix exactScore returned only Score + *routing_out, so callers kept
++// their original (tight) rects while storing the grown routing -- emitting a cfg whose CHANNEL/PATH
++// geometry lay OUTSIDE the BLOCK rects' outline, an internal inconsistency validateSolution cannot
++// catch yet the official checker would. The new Placement* placement_out surfaces the EFFECTIVE
++// placement so a caller-stored (placement, routing) pair stays mutually consistent.
++//
++// Non-vacuous fixture: three stacked CORE (Macro) blocks tile a 300x300 tight bbox. S (source,
++// bottom) and T (target, top) are separated by Macro B (middle) -- a Macro is never allowed as a
++// routing intermediate -- and at the tight outline S/B/T cover every x-strip, so there is NO channel
++// between S and T and S->T is an OPEN route. The one-step grow to 315x315 (+5% floor) opens a
++// full-height right-edge channel that both S and T abut (S -> CH_right -> T), clearing the open
++// route, so the grow fires and is adopted (open 1 -> 0). No edge blocks means the grow moves nothing
++// but the outline stamp; the assertions below hold on the returned effective placement.
++void testCorrectiveGrowPlacementConsistency() {
++    Problem problem;
++    auto addMacro = [&](const std::string& name, double x, double y, double w, double h) {
++        Block b;
++        b.name = name;
++        b.width = w;
++        b.height = h;
++        b.area = w * h;
++        b.ft_base_area = w * h;
++        b.ar_min = 1.0;
++        b.ar_max = 1.0;
++        b.type = BlockType::Macro;
++        problem.block_index[name] = static_cast<int>(problem.blocks.size());
++        problem.blocks.push_back(b);
++        return Rect{x, y, w, h};
++    };
++    problem.outline_w = 1000.0;
++    problem.outline_h = 1000.0;
++    problem.alpha = 0.2;
++
++    Placement pl;
++    pl.rects.push_back(addMacro("S", 0.0, 0.0, 300.0, 100.0));    // index 0: source (bottom)
++    pl.rects.push_back(addMacro("B", 0.0, 100.0, 300.0, 100.0));  // index 1: Macro blocker (middle)
++    pl.rects.push_back(addMacro("T", 0.0, 200.0, 300.0, 100.0));  // index 2: target (top)
++    pl.aspect.assign(problem.blocks.size(), 1.0);
++
++    Bundle bun;
++    bun.source = 0;  // S
++    bun.target = 2;  // T
++    bun.nets = 100;
++    problem.bundles = {bun};
++
++    // Stamp the tight bbox (300x300): S/B/T tile it exactly, so exactScore routes there first.
++    pl.outline_w = 300.0;
++    pl.outline_h = 300.0;
++
++    // Precondition (non-vacuous): the tight placement genuinely has an open route.
++    Problem tight_scoped = scopedAtDeclaredOutline(problem, 300.0, 300.0);
++    RoutingResult tight_routing = routeProblem(tight_scoped, pl);
++    assert(tight_routing.open_routes > 0);
++
++    RoutingResult routing;
++    Placement effective;
++    Score score = exactScore(problem, pl, &routing, &effective);
++
++    // The grow fired and cleared the open route.
++    assert(routing.open_routes == 0);
++    // Effective placement grew strictly past the tight 300x300 stamp, and its stamp is INTEGRAL
++    // (Part D: anchorAtOutline stamps the ceil'd grown target exactly).
++    assert(effective.outline_w > 300.0 + kEps || effective.outline_h > 300.0 + kEps);
++    assert(effective.outline_w == std::floor(effective.outline_w));
++    assert(effective.outline_h == std::floor(effective.outline_h));
++    // Core rects are never moved by the grow (only edge blocks re-anchor; there are none here).
++    for (std::size_t i = 0; i < pl.rects.size(); ++i) {
++        assert(rectsByteEqual(pl.rects[i], effective.rects[i]));
++    }
++
++    // Consistency 1: every channel in the returned routing lies within the EFFECTIVE outline. This
++    // is exactly what fails against the INPUT's 300x300 stamp (the grown right/top channels sit
++    // outside it) -- the inconsistency this fix removes.
++    for (const auto& ch : routing.channels) {
++        assert(ch.rect.x >= -kEps);
++        assert(ch.rect.y >= -kEps);
++        assert(ch.rect.right() <= effective.outline_w + kEps);
++        assert(ch.rect.top() <= effective.outline_h + kEps);
++    }
++
++    // Consistency 2: re-routing the effective placement at ITS stamped outline reproduces the
++    // returned routing's open_routes==0 (the stored routing is the one this geometry produces).
++    Problem eff_scoped = scopedAtDeclaredOutline(problem, effective.outline_w, effective.outline_h);
++    RoutingResult recomputed = routeProblem(eff_scoped, effective);
++    assert(recomputed.open_routes == 0);
++
++    // Consistency 3: the effective placement validates against the returned routing (the pair a
++    // caller would emit is internally legal). validateSolution reads effective's stamped outline.
++    ValidationResult vr = validateSolution(problem, effective, routing);
++    if (!vr.ok) {
++        for (const auto& m : vr.messages) std::cerr << "validate: " << m << "\n";
++    }
++    assert(vr.ok);
++
++    (void)score;
++    std::cout << "testCorrectiveGrowPlacementConsistency ok\n";
++}
++
+ }  // namespace
+ 
+ int main() {
+     testPlacementKeyDiffersWithOutline();
+     testPlacementKeyUnsetMatchesTodaysFormat();
+     testShrinkWrapEstimateCase0BStarSeed1();
+     testShrinkWrapEstimateCornerBlocksForceMaxHeightOnly();
+     testShrinkWrapEstimateNoEdgeBlocksEqualsCoreBbox();
+     testShrinkWrapOutlineAllCasesBStarSeed1();
+     testShrinkWrapOutlineCase0FuzzSeeds();
+@@ -965,13 +1073,14 @@ int main() {
+     testExactScoreRoutesInsideStampedDeclaredOutlineCase0();
+     testCompactTowardOriginResetsStampedOutline();
+     testOutlineSweepPrefersLowerScoreOverTighterArea();
+     testOutlineSweepEndToEndCase1BStarSeed1OpenRoutesZero();
+     testCompactedCandidateRestampValidatesEndToEnd();
+     testAnchorAtOutlineStampsExactTargetNotTightCase0();
+     testOutlineSweepProbesDistinctOutlinesCase0();
+     testOutlineSweepNeverReturnsEmptyPlacement();
+     testFinalizeFeedthroughAcceptanceCase1Hybrid();
+     testFinalizeFeedthroughAcceptanceCase3Hybrid();
++    testCorrectiveGrowPlacementConsistency();
+     std::cout << "p1 regressions passed\n";
+     return 0;
+ }
+diff --git a/test/regression_p3_20260707.cpp b/test/regression_p3_20260707.cpp
+index 899d968..12b01d2 100644
+--- a/test/regression_p3_20260707.cpp
++++ b/test/regression_p3_20260707.cpp
+@@ -698,22 +698,22 @@ void testRespaceToDemandNoDemandIsNoOp() {
+ // overflow-reduction proof lives in the synthetic two-axis-slack fixture below.
+ void testRespaceFixedPointCase1BStarSeed1NeverRegresses() {
+     Problem problem = parseProblem("test/2026 ICCAD_case.case1.csv");
+     std::unique_ptr<PlacementEngine> engine = makePlacementEngine("bstar");
+     std::mt19937 rng(1);
+     PlacementState state = engine->initialState(problem, rng);
+     Placement placement = engine->decode(problem, state);
+ 
+     // Plain (non-caching) exactCached lambda: respaceFixedPoint must work with any conforming
+     // ExactCachedFn, not just the SA's memoizing one.
+-    ExactCachedFn exactCached = [&](const Placement& p, RoutingResult* routing_out) {
+-        return exactScore(problem, p, routing_out);
++    ExactCachedFn exactCached = [&](const Placement& p, RoutingResult* routing_out, Placement* placement_out) {
++        return exactScore(problem, p, routing_out, placement_out);
+     };
+ 
+     RoutingResult baseline_routing;
+     Score baseline_score = exactScore(problem, placement, &baseline_routing);
+     // case1 is overflow-prone -- pin the baseline so this remains a meaningful, non-vacuous fixture.
+     assert(baseline_routing.channel_overflow > kEps);
+ 
+     RespaceResult result = respaceFixedPoint(problem, placement, exactCached);
+ 
+     // Non-regression per the design contract (same preference rule the loop's own best-tracking
+@@ -775,22 +775,22 @@ void testRespaceFixedPointSyntheticTwoAxisSlackReducesOverflow() {
+     Bundle bun;
+     bun.source = 0;  // Left
+     bun.target = 1;  // Right
+     bun.nets = 3000;
+     p.bundles = {bun};
+ 
+     Placement pl;
+     pl.rects = {Rect{0, 55, 100, 100}, Rect{200, 55, 100, 100}, Rect{0, 165, 300, 50}, Rect{0, 0, 300, 50}};
+     pl.aspect = {1.0, 1.0, 1.0, 1.0};
+ 
+-    ExactCachedFn exactCached = [&](const Placement& cand, RoutingResult* routing_out) {
+-        return exactScore(p, cand, routing_out);
++    ExactCachedFn exactCached = [&](const Placement& cand, RoutingResult* routing_out, Placement* placement_out) {
++        return exactScore(p, cand, routing_out, placement_out);
+     };
+ 
+     RoutingResult baseline_routing;
+     Score baseline_score = exactScore(p, pl, &baseline_routing);
+     assert(baseline_routing.channel_overflow > kEps);
+ 
+     // Sanity: channelDemands actually derives a feasible need_h on the (below,above) pair from
+     // this fixture, confirming the axis-crossing invariant applies as expected before asserting
+     // the fixed point exploits it.
+     std::vector<StripDemand> demands = channelDemands(p, pl, baseline_routing);

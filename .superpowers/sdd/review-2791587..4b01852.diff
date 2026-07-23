@@ -1,0 +1,324 @@
+# Review package: 2791587..4b01852
+
+## Commits
+4b01852 test(eval): restore comparison-gate legacy coverage + tighten FT/overflow assertions
+
+## Files changed
+ test/regression_20260608.cpp    |  8 +++++
+ test/regression_p1_20260706.cpp | 63 ++++++++++++++++++++++++++------------
+ test/regression_p2_20260707.cpp | 67 ++++++++++++++++++++++++++++++++++++++---
+ 3 files changed, 114 insertions(+), 24 deletions(-)
+
+## Diff
+diff --git a/test/regression_20260608.cpp b/test/regression_20260608.cpp
+index b7c89c7..bacbcd1 100644
+--- a/test/regression_20260608.cpp
++++ b/test/regression_20260608.cpp
+@@ -109,20 +109,28 @@ int testLargeBundleSplitsAcrossParallelChannels() {
+ 
+     RoutingResult r = routeProblem(p, placement);
+     if (r.open_routes != 0) return fail("parallel channel route should not be open");
+     if (r.routes.size() < 2) return fail("large bundle should be split into multiple PATH records");
+     // Per-edge channel demand + entry-axis chunk-sizing (deferred gap) overshoot the 40um parallel
+     // channels here, so this fixture no longer asserts zero overflow; it verifies the SPLIT + net-
+     // conservation, which is its title's intent.
+     int total_nets = 0;
+     for (const auto& route : r.routes) total_nets += route.nets;
+     if (total_nets != 1800) return fail("split routes must preserve total net demand");
++    // Beta Task 3 review Finding 3: Task 3 dropped the overflow assertion entirely when it stopped
++    // being exactly zero (see comment above), leaving a future overflow blow-up invisible here. Pin
++    // the CURRENT observed value with a tight tolerance, same pattern as regression_p2_20260707.cpp's
++    // testAdaptiveChunkingSplitsAtBottleneck (pins 4800 +/- 1e-3): confirmed deterministic (re-run
++    // twice, bit-identical at setprecision(17)) rather than derived by hand.
++    if (std::abs(r.channel_overflow - 8120.0) >= 1e-3) {
++        return fail("channel_overflow drifted from the pinned 8120 um^2 -- re-measure and update the pin, don't widen blindly");
++    }
+     return 0;
+ }
+ 
+ }  // namespace
+ 
+ int main() {
+     if (int rc = testParsePortAndFtRates()) return rc;
+     if (int rc = testHorizontalChannelCapacityUsesHeight()) return rc;
+     if (int rc = testFeedthroughMismatchIsMeasured()) return rc;
+     if (int rc = testLargeBundleSplitsAcrossParallelChannels()) return rc;
+diff --git a/test/regression_p1_20260706.cpp b/test/regression_p1_20260706.cpp
+index 861d843..c3bdc46 100644
+--- a/test/regression_p1_20260706.cpp
++++ b/test/regression_p1_20260706.cpp
+@@ -868,64 +868,89 @@ void testOutlineSweepNeverReturnsEmptyPlacement() {
+     assert(result.placement.outline_w > 0.0);
+     assert(result.placement.outline_h > 0.0);
+     assert(result.placement.rects.size() == problem.blocks.size());
+     std::cout << "testOutlineSweepNeverReturnsEmptyPlacement ok\n";
+ }
+ 
+ // T8 (P1 acceptance criteria, plan design §1.5): finalizeFeedthrough must grow the declared outline
+ // toward MAX to absorb FT inflation on the two cases that previously showed a residual mismatch
+ // (case1/hybrid, case3/hybrid). Runs the full hybrid search at the acceptance parameters (iters
+ // 2000, seed 1) and asserts open_routes==0 and validateSolution ok, plus -- Beta Task 3 realignment
+-// to the official objective -- that the FT-mismatch PENALTY stays a negligible (<1%) fraction of the
+-// official cost (was: mismatch==0, which per-edge channel demand makes infeasible on case1/hybrid;
+-// see runHybridAcceptance). Both cases finish in single-digit seconds, so this lives in the permanent
+-// regression file rather than a separate opt-in script.
+-void runHybridAcceptance(const std::string& csv_path, const char* label) {
++// to the official objective -- that any FT-mismatch PENALTY stays negligible (was: mismatch==0, which
++// per-edge channel demand makes infeasible on case1/hybrid; see runHybridAcceptance). Both cases
++// finish in single-digit seconds, so this lives in the permanent regression file rather than a
++// separate opt-in script.
++//
++// Beta Task 3 review Finding 2: the original fix used a single uniform <1% band for BOTH cases, but
++// case3/hybrid still reaches EXACT FT parity (mismatch==0) and case1/hybrid's observed residual was a
++// small fraction of score -- a 1% band was far looser than needed and would not catch a real
++// regression until it was already large. Split per case (`expect_exact_ft_parity`): case3 keeps the
++// hard ratchet (feedthrough_mismatch <= kEps, i.e. still exactly 0 -- no loosening at all, reconfirmed
++// by this fix); case1 gets a tight band (ft_penalty <= 0.002*score, 0.2%). This band is a TRIPWIRE,
++// not a target: the official objective (route_cost.hpp kBetaFt) makes FT required-area shortfall a
++// small LINEAR penalty, not a hard-zero constraint, and with per-edge channel demand (channels
++// saturate ~2x faster) the cost-driven router legitimately diverts more nets through soft-block
++// feedthrough on case1 -- the solver accepts a tiny residual FT mismatch there when eliminating it
++// (growing soft blocks) would cost more area than the FT penalty saves. The overall official cost
++// improved on both cases (benchmark), so accepting case1's small penalty is the correct trade, not a
++// regression; the band just means a FUTURE change that blows this residual up much further gets
++// caught early.
++//
++// Numeric note (deviates from the review's literal "0.1%/6496 um^2" recommendation, on measurement,
++// not on intent): re-run against current HEAD (2791587, an unrelated placement-decode change that
++// landed after the review was written) measures feedthrough_mismatch=6150.1 um^2, ratio=0.1158%, not
++// the review's cited 6496 um^2/0.066% -- the SA search's outcome shifted with the intervening decode
++// change, as heuristic search results generally can. 0.1% would therefore fail on current HEAD; 0.2%
++// keeps ~1.7x headroom over the freshly-measured 0.1158% while staying 5x tighter than the original
++// 1% band this finding was about. If this value drifts again, re-measure (this function already
++// prints the ratio on every near-fail) rather than widen blindly.
++void runHybridAcceptance(const std::string& csv_path, const char* label, bool expect_exact_ft_parity) {
+     Problem problem = parseProblem(csv_path);
+     SearchOptions options;
+     options.iters = 2000;
+     options.seed = 1;
+     SearchResult result = runHybridPlacementSearch(problem, options);
+ 
+-    // Beta Task 3 realignment: the official objective (route_cost.hpp kBetaFt) makes FT required-area
+-    // shortfall a small LINEAR penalty, not a hard-zero constraint. With per-edge channel demand,
+-    // channels saturate ~2x faster, so the cost-driven router legitimately diverts more nets through
+-    // soft-block feedthrough; the solver then accepts a tiny residual FT mismatch when eliminating it
+-    // (growing soft blocks) would cost more area than the FT penalty saves. So this no longer asserts
+-    // mismatch==0 (case1/hybrid leaves ~6.5e3 um^2; case3/hybrid still reaches exactly 0) -- it asserts
+-    // the FT PENALTY stays a negligible fraction (<1%) of the official cost, plus the HARD legality
+-    // gates (open_routes==0 and validateSolution below) which are unchanged. The overall official cost
+-    // improved on both cases (benchmark), so accepting this penalty is the correct trade, not a regression.
+     double ft_penalty = result.best_routing.feedthrough_mismatch * kBetaFt;
+-    if (ft_penalty >= 0.01 * result.best_score.value || result.best_routing.open_routes != 0) {
++    double ratio = result.best_score.value > 0.0 ? ft_penalty / result.best_score.value : 0.0;
++    bool near_fail = expect_exact_ft_parity ? result.best_routing.feedthrough_mismatch > kEps
++                                             : ft_penalty >= 0.002 * result.best_score.value;
++    if (near_fail || result.best_routing.open_routes != 0) {
+         std::cerr << label << ": feedthrough_mismatch=" << result.best_routing.feedthrough_mismatch
+                    << " ft_penalty=" << ft_penalty << " score=" << result.best_score.value
+-                   << " open_routes=" << result.best_routing.open_routes << "\n";
++                   << " ratio=" << ratio << " open_routes=" << result.best_routing.open_routes << "\n";
++    }
++    if (expect_exact_ft_parity) {
++        assert(result.best_routing.feedthrough_mismatch <= kEps);  // case3: unchanged hard ratchet
++    } else {
++        assert(ft_penalty <= 0.002 * result.best_score.value);  // case1: tight 0.2% tripwire (see note above)
+     }
+-    assert(ft_penalty < 0.01 * result.best_score.value);
+     assert(result.best_routing.open_routes == 0);
+ 
+     ValidationResult vr = validateSolution(problem, result.best_placement, result.best_routing);
+     if (!vr.ok) {
+         for (const auto& msg : vr.messages) std::cerr << label << " validate: " << msg << "\n";
+     }
+     assert(vr.ok);
+     std::cout << label << " ok (mismatch=" << result.best_routing.feedthrough_mismatch
++               << " ft_penalty_ratio=" << ratio
+                << " open_routes=" << result.best_routing.open_routes << ")\n";
+ }
+ 
+ void testFinalizeFeedthroughAcceptanceCase1Hybrid() {
+-    runHybridAcceptance("test/2026 ICCAD_case.case1.csv", "testFinalizeFeedthroughAcceptanceCase1Hybrid");
++    runHybridAcceptance("test/2026 ICCAD_case.case1.csv", "testFinalizeFeedthroughAcceptanceCase1Hybrid",
++                         /*expect_exact_ft_parity=*/false);
+ }
+ 
+ void testFinalizeFeedthroughAcceptanceCase3Hybrid() {
+-    runHybridAcceptance("test/2026 ICCAD_case.case3.csv", "testFinalizeFeedthroughAcceptanceCase3Hybrid");
++    runHybridAcceptance("test/2026 ICCAD_case.case3.csv", "testFinalizeFeedthroughAcceptanceCase3Hybrid",
++                         /*expect_exact_ft_parity=*/true);
+ }
+ 
+ }  // namespace
+ 
+ int main() {
+     testPlacementKeyDiffersWithOutline();
+     testPlacementKeyUnsetMatchesTodaysFormat();
+     testShrinkWrapEstimateCase0BStarSeed1();
+     testShrinkWrapEstimateCornerBlocksForceMaxHeightOnly();
+     testShrinkWrapEstimateNoEdgeBlocksEqualsCoreBbox();
+diff --git a/test/regression_p2_20260707.cpp b/test/regression_p2_20260707.cpp
+index 7e7892f..8cecebb 100644
+--- a/test/regression_p2_20260707.cpp
++++ b/test/regression_p2_20260707.cpp
+@@ -919,21 +919,30 @@ void testFeasibilityFallbackNeverWorseThanLegacyOnGenuineDeadEnd() {
+ //     key = alpha*wl + kOverflowAreaWeight*overflow = 0.001*648000 + 1e6*4880 = 4,880,000,648
+ //   legacy: wl=646,500; overflow=0; mismatch=0 -> key = 0.001*646500 = 646.5
+ // Legacy's key is smaller by more than 7 orders of magnitude (the 1e6-weighted overflow term
+ // dominates), so the gate MUST return legacy's result wholesale with used_fallback=true, despite
+ // cost-driven having found a fully-routed solution -- exactly the amendment's target gap.
+ struct ElbowMispricingFixture {
+     Problem problem;
+     Placement placement;
+ };
+ 
+-ElbowMispricingFixture makeElbowMispricingFixture() {
++// `elbow_nets` (Beta Task 3 review Finding 1 fix, default 300 = this fixture's original value used
++// by testComparisonGateKeepsCostDrivenWhenItWins/testComparisonGateDeterministic below): scaling the
++// elbow bundle's own net count scales cost-driven's blind self-overflow on CH1 (its exit hop into
++// TGT1 is never priced, see routing.cpp:231-239) roughly linearly, while legacy's overflow stays
++// pinned at 19,520 um^2 (legacy always detours the elbow via CH4 entirely, so only the filler's own
++// unavoidable pass-through ever touches CH1). Swept empirically against the compiled router: cost-
++// driven still narrowly self-wins at elbow_nets=850 (self-overflow 18,300 < legacy's 19,520); by 900
++// the two cross and used_fallback flips true. testComparisonGateSwitchesToLegacyWhenCostDrivenFully
++// RoutedButWorse below uses elbow_nets=1000, comfortably past that crossover.
++ElbowMispricingFixture makeElbowMispricingFixture(int elbow_nets = 300) {
+     ElbowMispricingFixture f;
+     Problem& p = f.problem;
+     p.outline_w = 200.0;
+     p.outline_h = 650.0;
+     p.alpha = 0.001;  // small but nonzero (matches T4's fixture): WL differences must not drown the
+                        // 1e6-scale area terms, but must still be large enough to be hand-traceable.
+ 
+     Block src1 = makeChannelBlock("SRC1", 40.0, 10.0);
+     Block tgt1 = makeChannelBlock("TGT1", 40.0, 10.0);
+     Block src2 = makeChannelBlock("SRC2", 40.0, 20.0);
+@@ -942,34 +951,40 @@ ElbowMispricingFixture makeElbowMispricingFixture() {
+     p.block_index = {{"SRC1", 0}, {"TGT1", 1}, {"SRC2", 2}};
+ 
+     Bundle filler;  // straight vertical: fills CH1's vertical_usage to 900 (< vcap=1000, no overflow
+                      // alone), entering/exiting CH1 on the vertical axis both ends (correctly priced).
+     filler.source = 0;
+     filler.target = 1;
+     filler.nets = 900;
+     Bundle elbow;  // SRC2 -> TGT1: cost-driven takes the mispriced CH1 elbow; legacy detours via CH4.
+     elbow.source = 2;
+     elbow.target = 1;
+-    elbow.nets = 300;
++    elbow.nets = elbow_nets;
+     p.bundles = {filler, elbow};
+ 
+     Placement& pl = f.placement;
+     pl.rects = {
+         Rect{0.0, 0.0, 40.0, 10.0},      // SRC1: x=[0,40) y=[0,10)
+         Rect{0.0, 620.0, 40.0, 10.0},    // TGT1: x=[0,40) y=[620,630)
+         Rect{40.0, 300.0, 40.0, 20.0},   // SRC2: x=[40,80) y=[300,320)
+     };
+     pl.aspect.assign(pl.rects.size(), 1.0);
+     return f;
+ }
+ 
+-void testComparisonGatePrefersLegacyWhenCostDrivenFullyRoutedButWorse() {
++// Beta Task 3 review renamed this from testComparisonGatePrefersLegacyWhenCostDrivenFullyRoutedBut
++// Worse: per-edge accounting inverted the fixture's outcome (see makeElbowMispricingFixture's comment
++// above) so it now asserts cost-driven WINS, not legacy -- the name must describe what the test
++// actually checks. testComparisonGateSwitchesToLegacyWhenCostDrivenFullyRoutedButWorse below (new)
++// restores coverage of the used_fallback=true branch this test's old name promised but no longer
++// exercised.
++void testComparisonGateKeepsCostDrivenWhenItWins() {
+     ElbowMispricingFixture f = makeElbowMispricingFixture();
+ 
+     RoutingResult r = routeProblem(f.problem, f.placement, /*cost_driven=*/true);
+     // Both sides are FULLY ROUTED -- the original T5 open-routes-only fallback would never have
+     // engaged here (nothing was open). This fixture's whole point is that the amendment's full
+     // AREA-cost comparison must still catch and correct this case.
+     assert(r.open_routes == 0);
+     assert(!r.used_fallback);  // per-edge INVERTS this fixture: cost-driven now wins (see below), so the gate keeps cost-driven's own result
+ 
+     // Non-substitution proof (Beta Task 3, replacing the pre-per-edge "wholesale substitution" check).
+@@ -993,25 +1008,66 @@ void testComparisonGatePrefersLegacyWhenCostDrivenFullyRoutedButWorse() {
+     // Cross-check the LOSING side's own numbers directly (without the gate) to confirm the fixture
+     // actually exercises the per-edge-driven inversion described above, not some other divergence.
+     // area_cost_legacy = alpha*wl + kOverflowAreaWeight*overflow = 0.001*625500 + 1e6*19520
+     //                   = 625.5 + 1.952e10 = 19,520,000,625.5
+     double area_cost_legacy = f.problem.alpha * legacy.total_wirelength +
+                                kOverflowAreaWeight * legacy.channel_overflow +
+                                kFtMismatchWeight * legacy.feedthrough_mismatch;
+     assert(std::abs(area_cost_legacy - 19520000625.5) < 100.0);
+     assert(std::abs(r.channel_overflow - 4880.0) < 1.0);
+ 
+-    std::cout << "testComparisonGatePrefersLegacyWhenCostDrivenFullyRoutedButWorse ok (cd_overflow="
++    std::cout << "testComparisonGateKeepsCostDrivenWhenItWins ok (cd_overflow="
+               << r.channel_overflow << ", legacy_wl=" << legacy.total_wirelength
+               << ", legacy_overflow=" << legacy.channel_overflow << ")\n";
+ }
+ 
++// P2 Task 5.1 legacy-switch coverage (Beta Task 3 review Finding 1): the fixture's DEFAULT elbow_nets
++// (300, above) no longer exercises the used_fallback=true branch under per-edge accounting -- see
++// testComparisonGateKeepsCostDrivenWhenItWins. This is the branch's ONLY remaining coverage: reusing
++// the identical geometry/filler, only elbow_nets changes (300 -> 1000, see makeElbowMispricingFixture's
++// comment for the empirical crossover sweep). Confirmed via a scratch probe against the compiled
++// router (same discipline as the fixture's own "confirmed... before being transcribed here" comment).
++void testComparisonGateSwitchesToLegacyWhenCostDrivenFullyRoutedButWorse() {
++    ElbowMispricingFixture f = makeElbowMispricingFixture(/*elbow_nets=*/1000);
++
++    RoutingResult r = routeProblem(f.problem, f.placement, /*cost_driven=*/true);
++    RoutingResult legacy = routeProblem(f.problem, f.placement, /*cost_driven=*/false);
++
++    // Both sides fully routed -- this exercises the FULL area-cost comparison, not the older T5
++    // open-routes-only fallback (which would never engage here since nothing is open on either side).
++    assert(r.open_routes == 0);
++    assert(legacy.open_routes == 0);
++    assert(r.used_fallback);  // the branch this test exists to cover
++
++    // The gate must return the legacy pass's result WHOLESALE (not a blend): decisive metrics are
++    // bit-identical to a direct legacy call on the same (problem, placement) -- probe-confirmed values
++    // total_wirelength=804000, channel_overflow=19520, feedthrough_mismatch=0, routes.size()=2.
++    assert(r.open_routes == legacy.open_routes);
++    assert(std::abs(r.total_wirelength - legacy.total_wirelength) < kEps);
++    assert(std::abs(r.channel_overflow - legacy.channel_overflow) < kEps);
++    assert(std::abs(r.feedthrough_mismatch - legacy.feedthrough_mismatch) < kEps);
++    assert(r.routes.size() == legacy.routes.size());
++    assert(std::abs(r.total_wirelength - 804000.0) < 1.0);
++    assert(std::abs(r.channel_overflow - 19520.0) < 1.0);
++
++    // Determinism (same discipline as testComparisonGateDeterministic below): two cost_driven=true
++    // calls on the identical (problem, placement) must be bit-identical, including used_fallback.
++    RoutingResult r2 = routeProblem(f.problem, f.placement, /*cost_driven=*/true);
++    assert(r2.used_fallback == r.used_fallback);
++    assert(std::abs(r2.total_wirelength - r.total_wirelength) < kEps);
++    assert(std::abs(r2.channel_overflow - r.channel_overflow) < kEps);
++
++    std::cout << "testComparisonGateSwitchesToLegacyWhenCostDrivenFullyRoutedButWorse ok (wl="
++              << r.total_wirelength << ", overflow=" << r.channel_overflow
++              << ", used_fallback=" << r.used_fallback << ")\n";
++}
++
+ // Determinism of the comparison gate itself (GC6 purity, same invariant every other P2 fixture
+ // asserts): two calls on the identical (problem, placement) must be bit-identical, including the
+ // NEW `used_fallback` telemetry field.
+ void testComparisonGateDeterministic() {
+     ElbowMispricingFixture f = makeElbowMispricingFixture();
+ 
+     RoutingResult r1 = routeProblem(f.problem, f.placement, /*cost_driven=*/true);
+     RoutingResult r2 = routeProblem(f.problem, f.placement, /*cost_driven=*/true);
+ 
+     assert(r1.used_fallback == r2.used_fallback);
+@@ -1150,16 +1206,17 @@ int main() {
+     testCostDrivenPrefersFtOverSaturatedChannel();
+     testCostDrivenZeroWlDirectAbutUnchanged();
+     testCostDrivenDeterministic();
+     testFixedSplitUnchangedForCostDrivenFalse();
+     testAdaptiveChunkingSplitsAtBottleneck();
+     testAdaptiveChunkingRespectsMaxChunksWithNoAlternative();
+     testAdaptiveChunkingDeterministic();
+     testNegotiationClearsRoundZeroOverflow();
+     testNegotiatedRoutingDeterministic();
+     testFeasibilityFallbackNeverWorseThanLegacyOnGenuineDeadEnd();
+-    testComparisonGatePrefersLegacyWhenCostDrivenFullyRoutedButWorse();
++    testComparisonGateKeepsCostDrivenWhenItWins();
++    testComparisonGateSwitchesToLegacyWhenCostDrivenFullyRoutedButWorse();
+     testComparisonGateDeterministic();
+     testRoundConsistencyOfSoftFeedthroughFields();
+     std::cout << "P2 T0+T1+T2+T3+T4+T5+T5.1+T6 regressions passed\n";
+     return 0;
+ }

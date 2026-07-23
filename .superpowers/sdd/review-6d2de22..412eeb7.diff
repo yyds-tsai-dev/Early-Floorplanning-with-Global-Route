@@ -1,0 +1,155 @@
+# Review package: 6d2de22..412eeb7
+
+## Commits
+412eeb7 chore(test): refresh testcases to 20260712 upload + diagonal-entry guard
+
+## Files changed
+ src/io.cpp                            |  1 +
+ test/2026 ICCAD_case.case0.csv        |  4 ++--
+ test/2026 ICCAD_case.case1.csv        |  2 +-
+ test/regression_testdata_20260712.cpp | 29 +++++++++++++++++++++++++++++
+ test/run_testdata_regressions.sh      | 14 ++++++++++++++
+ 5 files changed, 47 insertions(+), 3 deletions(-)
+
+## Diff
+diff --git a/src/io.cpp b/src/io.cpp
+index fea0cbd..a27fe07 100644
+--- a/src/io.cpp
++++ b/src/io.cpp
+@@ -175,20 +175,21 @@ Problem parseProblem(const std::string& path) {
+             auto header = rows[i + 1];
+             for (std::size_t r = i + 2; r < rows.size(); ++r) {
+                 if (rows[r].empty() || rows[r][0].rfind("BLK", 0) != 0) break;
+                 auto src_it = p.block_index.find(rows[r][0]);
+                 if (src_it == p.block_index.end()) continue;
+                 for (std::size_t c = 1; c < rows[r].size() && c < header.size(); ++c) {
+                     auto dst_name = trim(header[c]);
+                     auto dst_it = p.block_index.find(dst_name);
+                     int nets = static_cast<int>(std::llround(parseDouble(rows[r][c])));
+                     if (dst_it != p.block_index.end() && nets > 0) {
++                        if (src_it->second == dst_it->second) continue;  // QA A44: diagonal entries are data errata
+                         p.bundles.push_back(Bundle{src_it->second, dst_it->second, nets});
+                     }
+                 }
+             }
+         }
+     }
+ 
+     if (p.blocks.empty()) throw std::runtime_error("no blocks parsed from " + path);
+     if (p.outline_w <= 0.0 || p.outline_h <= 0.0) throw std::runtime_error("outline MAX missing or invalid");
+     return p;
+diff --git a/test/2026 ICCAD_case.case0.csv b/test/2026 ICCAD_case.case0.csv
+index 48b11be..9bc024c 100644
+--- a/test/2026 ICCAD_case.case0.csv	
++++ b/test/2026 ICCAD_case.case0.csv	
+@@ -1,26 +1,26 @@
+ ﻿BLOCK,AREA,WIDTH,HEIGHT,"ASPECT RATIO
+ RANGE","EDGE
+ HARD MACRO
+ SOFT",LOCATION,PORT EDGE,FT CONVERSION,,,
+ ,,,,,,,,<=3000,">3000, <=6000",">6000, <= 9000",>9000
+-BLK01,353638.5,419.5,843,1,EDGE,"TL,LT",3,20%,40%,80%,100%
++BLK01,354060,420,843,1,EDGE,"TL,LT",3,20%,40%,80%,100%
+ BLK02,409985,,,"0.5,2",SOFT,,,20%,40%,80%,100%
+ BLK03,920640,959,960,1,MACRO,,0,20%,40%,80%,100%
+ BLK04,399000,665,600,1,EDGE,"RB,BR",1,20%,40%,80%,100%
+ BLK05,431211,,,"0.5,2",SOFT,,,20%,40%,80%,100%
+ BLK06,709216,592,1198,1,MACRO,,0,20%,40%,80%,100%
+ BLK07,372949,,,"0.5,2",SOFT,,,20%,40%,80%,100%
+ ,,,,,,,,,,,
+ ,,,,,,,,,,,
+ OUTLINE,WIDTH,HEIGHT,,,,,,,,,
+-MAX,2916,2220,,,,,,,,,
++MAX,2917,2220,,,,,,,,,
+ ,,,,,,,,,,,
+  α,0.2,,,,,,,,,,
+ ,,,,,,,,,,,
+ CONN MATRIX,,,,,,,,,,,
+ ON CHIP INTERFACE CONNECTION (1-1) MATRIX,,,,,,,,,,,
+ ,BLK01,BLK02,BLK03,BLK04,BLK05,BLK06,BLK07,,,,
+ BLK01,0,0,0,0,0,0,0,,,,
+ BLK02,0,0,900,800,500,400,200,,,,
+ BLK03,1200,300,0,1500,0,700,0,,,,
+ BLK04,0,0,0,0,0,0,0,,,,
+diff --git a/test/2026 ICCAD_case.case1.csv b/test/2026 ICCAD_case.case1.csv
+index 5f7fadd..c272b46 100644
+--- a/test/2026 ICCAD_case.case1.csv	
++++ b/test/2026 ICCAD_case.case1.csv	
+@@ -6,21 +6,21 @@ SOFT",LOCATION,PORT EDGE,FT CONVERSION,,,,,,
+ BLK01,352968,,,"0.5,2",SOFT,,,20%,40%,80%,100%,,,
+ BLK02,241366,,,"0.5,2",SOFT,,,20%,40%,80%,100%,,,
+ BLK03,407515,,,"0.5,2",SOFT,,,20%,40%,80%,100%,,,
+ BLK04,411763,,,"0.33,3",SOFT,,,20%,40%,80%,100%,,,
+ BLK05,327929,,,"0.5,2",SOFT,,,20%,40%,80%,100%,,,
+ BLK06,184868,,,"0.5,2",SOFT,,,20%,40%,80%,100%,,,
+ BLK07,342860,,,"0.33,3",SOFT,,,20%,40%,80%,100%,,,
+ BLK08,475150,,,"0.33,3",SOFT,,,20%,40%,80%,100%,,,
+ BLK09,75591,,,"0.5,2",SOFT,,,20%,40%,80%,100%,,,
+ BLK10,239030,,,"0.5,2",SOFT,,,20%,40%,80%,100%,,,
+-BLK11,267200,334,800,,EDGE,"LB,BL",,20%,40%,80%,100%,,,
++BLK11,267200,334,800,,EDGE,"LB,BL",3,20%,40%,80%,100%,,,
+ BLK12,696994,,,"0.33,3",SOFT,,,20%,40%,80%,100%,,,
+ BLK13,408852,,,"0.5,2",SOFT,,,20%,40%,80%,100%,,,
+ BLK14,683802,,,"0.33,3",SOFT,,,20%,40%,80%,100%,,,
+ ,,,,,,,,,,,,,,
+ ,,,,,,,,,,,,,,
+ OUTLINE,WIDTH,HEIGHT,,,,,,,,,,,,
+ MAX,3600,2200,,,,,,,,,,,,
+ ,,,,,,,,,,,,,,
+  α,0.2,,,,,,,,,,,,,
+ ,,,,,,,,,,,,,,
+diff --git a/test/regression_testdata_20260712.cpp b/test/regression_testdata_20260712.cpp
+new file mode 100644
+index 0000000..ea94eaa
+--- /dev/null
++++ b/test/regression_testdata_20260712.cpp
+@@ -0,0 +1,29 @@
++#include <cassert>
++#include <cstdio>
++#include <cmath>
++#include "../src/io.hpp"
++
++using namespace efgr;
++
++int main() {
++    // (a) case0: BLK01 fixed dims + MAX outline per 20260712 upload (QA A39)
++    Problem p0 = parseProblem("test/2026 ICCAD_case.case0.csv");
++    assert(std::abs(p0.outline_w - 2917.0) < 1e-9);
++    assert(std::abs(p0.outline_h - 2220.0) < 1e-9);
++    const Block& blk01 = p0.blocks.at(p0.block_index.at("BLK01"));
++    assert(std::abs(blk01.width - 420.0) < 1e-9);
++    assert(std::abs(blk01.height - 843.0) < 1e-9);
++    assert(std::abs(blk01.area - 354060.0) < 1e-9);
++
++    // (b) case1: BLK11 PORT EDGE now 3 (QA A36 — blank was erroneous)
++    Problem p1 = parseProblem("test/2026 ICCAD_case.case1.csv");
++    const Block& blk11 = p1.blocks.at(p1.block_index.at("BLK11"));
++    assert(blk11.port_edge == 3 || (!blk11.port_edges.empty() && blk11.port_edges[0] == 3));
++
++    // (c) case3: diagonal matrix entries must NOT become self-bundles (QA A44 errata)
++    Problem p3 = parseProblem("test/2026 ICCAD_case.case3.csv");
++    for (const Bundle& b : p3.bundles) assert(b.source != b.target);
++
++    std::puts("testdata 20260712 regressions passed");
++    return 0;
++}
+diff --git a/test/run_testdata_regressions.sh b/test/run_testdata_regressions.sh
+new file mode 100644
+index 0000000..3ecf1a0
+--- /dev/null
++++ b/test/run_testdata_regressions.sh
+@@ -0,0 +1,14 @@
++#!/usr/bin/env bash
++set -euo pipefail
++cd "$(dirname "$0")/.."
++
++make >/dev/null
++
++g++ -std=c++17 -O2 -Wall -Wextra -pedantic \
++    -I. \
++    test/regression_testdata_20260712.cpp \
++    src/eval.cpp src/io.cpp src/placement_engine.cpp src/respace.cpp src/routing.cpp src/search.cpp src/validate.cpp \
++    -o test/testdata_regression_bin
++
++./test/testdata_regression_bin
++echo "testdata regressions passed"

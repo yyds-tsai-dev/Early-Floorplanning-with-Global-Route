@@ -1,0 +1,378 @@
+# Review package: 4b01852..2e51620
+
+## Commits
+2e51620 feat(search): wall-clock time budget + sweep-selected beta defaults
+
+## Files changed
+ scripts/sweep.sh | 63 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ src/eval.cpp     |  9 ++++++--
+ src/main.cpp     | 30 +++++++++++++++++++++++++--
+ src/search.cpp   | 36 +++++++++++++++++++++++++++++---
+ src/search.hpp   |  1 +
+ 5 files changed, 132 insertions(+), 7 deletions(-)
+
+## Diff
+diff --git a/scripts/sweep.sh b/scripts/sweep.sh
+new file mode 100644
+index 0000000..22e4844
+--- /dev/null
++++ b/scripts/sweep.sh
+@@ -0,0 +1,63 @@
++#!/usr/bin/env bash
++# scripts/sweep.sh -- Beta Task 5 default-selection sweep. Reuses scripts/benchmark.sh's rescore +
++# dual-cost machinery, adding budget/seed loops. Appends one CSV row per (seed,budget,engine,case)
++# to $OUT live, then prints a seed-averaged aggregate (Sigma checker_cost / rank_cost / runtime and
++# an OPEN flag if any run left open routes, per engine,budget). Knobs via env:
++#   ENGINES BUDGETS SEEDS CASES REF_ITERS OUT
++#   budget 0 == the --iters REF_ITERS reference (budget off); budget N>0 == --time-budget N.
++set -uo pipefail
++cd "$(dirname "$0")/.."
++make >/dev/null || exit 1
++g++ -std=c++17 -O2 -Wall -Wextra -pedantic -I. \
++    tools/rescore.cpp \
++    src/cfg_score.cpp src/eval.cpp src/io.cpp src/placement_engine.cpp src/respace.cpp \
++    src/routing.cpp src/search.cpp src/validate.cpp \
++    -o bin/efgr_rescore >/dev/null || exit 1
++
++ENGINES="${ENGINES:-bstar hybrid}"
++BUDGETS="${BUDGETS:-0 15 45 90}"
++SEEDS="${SEEDS:-1}"
++CASES="${CASES:-0 1 2 3 4}"
++REF_ITERS="${REF_ITERS:-1000}"
++OUT="${OUT:-/tmp/sweep_results.csv}"
++RANK_ALPHA=(0.3 0.15 0.1 0.1 0.1)   # alpha-test scoreboard values (benchmark-only), mirrors benchmark.sh
++
++echo "seed,budget,engine,case,checker_cost,rank_cost,overflow,wl,runtime,open_routes,validation,iters" > "$OUT"
++printf "%-4s %-6s %-6s %-5s %14s %14s %8s %5s %7s\n" seed budget engine case checker_cost rank_cost runtime open iters
++for seed in $SEEDS; do
++  for budget in $BUDGETS; do
++    for engine in $ENGINES; do
++      for i in $CASES; do
++        csv="test/2026 ICCAD_case.case$i.csv"; out="/tmp/sweep_${engine}_b${budget}_s${seed}_c$i.cfg"
++        if [ "$budget" = "0" ]; then flag="--iters $REF_ITERS"; else flag="--time-budget $budget"; fi
++        start=$(date +%s.%N)
++        log=$(bin/efgr "$csv" "$out" --engine "$engine" --seed "$seed" $flag 2>&1 >/dev/null) || true
++        rt=$(awk -v e="$(date +%s.%N)" -v s="$start" 'BEGIN{printf "%.2f", e-s}')
++        opn=$(printf '%s' "$log" | grep -oE 'open_routes=[0-9]+' | cut -d= -f2); opn=${opn:-NA}
++        val=$(printf '%s' "$log" | grep -oE 'validation=[a-z]+' | cut -d= -f2); val=${val:-NA}
++        itr=$(printf '%s' "$log" | grep -oE 'iters=[0-9]+' | head -1 | cut -d= -f2); itr=${itr:-NA}
++        B_area=0 B_wl=0 B_overflow=0 B_overflow_penalty=0 B_checker_cost=0
++        eval "$(bin/efgr_rescore "$csv" "$out" 2>/dev/null | tr ' ' '\n' | sed 's/^/B_/')" || true
++        rank=$(awk -v a="$B_area" -v w="$B_wl" -v al="${RANK_ALPHA[$i]}" -v op="$B_overflow_penalty" \
++                   -v rt="$rt" 'BEGIN{printf "%.3f", a + al*w + op + 0.5*rt*sqrt(a)}')
++        echo "$seed,$budget,$engine,case$i,$B_checker_cost,$rank,$B_overflow,$B_wl,$rt,$opn,$val,$itr" >> "$OUT"
++        printf "%-4s %-6s %-6s %-5s %14.0f %14.0f %7.2fs %5s %7s\n" \
++               "$seed" "$budget" "$engine" "case$i" "$B_checker_cost" "$rank" "$rt" "$opn" "$itr"
++      done
++    done
++  done
++done
++
++echo
++echo "=== aggregate: seed-averaged Sigma over cases per (engine,budget) ==="
++printf "%-14s %16s %16s %10s %6s\n" engine_budget sum_checker sum_rank sum_rt open
++awk -F, 'NR>1{
++  k=$3" "$2;
++  chk[k]+=$5; rnk[k]+=$6; rt[k]+=$9;
++  if (!((k SUBSEP $1) in ss)) { ss[k SUBSEP $1]=1; nseed[k]++ }
++  if ($10!="0" && $10!="NA") bad[k]=1;
++}
++END{
++  for (k in chk){ ns=nseed[k]; if(ns<1)ns=1;
++    printf "%-14s %16.0f %16.0f %9.1fs %6s\n", k, chk[k]/ns, rnk[k]/ns, rt[k]/ns, (k in bad)?"OPEN":"ok" }
++}' "$OUT" | sort
+diff --git a/src/eval.cpp b/src/eval.cpp
+index 283155c..327870f 100644
+--- a/src/eval.cpp
++++ b/src/eval.cpp
+@@ -1,13 +1,14 @@
+ #include "eval.hpp"
+ 
+ #include <algorithm>
++#include <cmath>
+ #include <tuple>
+ 
+ #include "ft.hpp"
+ #include "placement_engine.hpp"
+ #include "route_cost.hpp"
+ 
+ namespace efgr {
+ 
+ std::pair<double, double> usedOutline(const Problem& problem, const Placement& placement) {
+     double w = 0.0;
+@@ -210,22 +211,26 @@ Score exactScore(const Problem& problem, const Placement& placement, RoutingResu
+     // grow once and re-route. Target size scales toward MAX by the worse of a flat +5% floor or a
+     // margin sized to the observed channel_overflow (overflow/25, matching channelMarginProxy's
+     // nets-per-25 capacity unit), clamped to MAX.
+     // T7.1 bugfix: this used to scope a Problem whose ceiling equals the grown target and call
+     // shrinkWrapOutline -- but shrinkWrapOutline is a minimizer that bisects back DOWN to the tight
+     // legal frontier regardless of the ceiling given, so `regrow` was silently re-stamped at ~the
+     // SAME tight outline every time, never actually growing (this open-route relief path was dead
+     // code). anchorAtOutline anchors directly at the grown target (no bisection) instead.
+     if (routing.open_routes > 0) {
+         double margin = std::max(0.05, routing.channel_overflow / 25.0 / std::max(w, h));
+-        double grown_w = std::min(problem.outline_w, w * (1.0 + margin));
+-        double grown_h = std::min(problem.outline_h, h * (1.0 + margin));
++        // Part D (T5 integer-leak rider): the grown target feeds anchorAtOutline, which stamps it
++        // exactly -- ceil to integers (MAX is integer) so a winning grown outline stays integral in
++        // the emitted cfg and the score stays self-consistent with the golden rescorer's
++        // integer-outline recompute. Clamp to MAX, matching the fractional form this replaces.
++        double grown_w = std::min(problem.outline_w, std::ceil(w * (1.0 + margin) - kEps));
++        double grown_h = std::min(problem.outline_h, std::ceil(h * (1.0 + margin) - kEps));
+ 
+         Problem ceiling = problem;
+         ceiling.outline_w = grown_w;
+         ceiling.outline_h = grown_h;
+         Placement regrow = local;
+         OutlineFit grown_fit = anchorAtOutline(ceiling, regrow);
+ 
+         if (grown_fit.legal) {
+             RoutingResult grown_routing;
+             Score grown_score = routeAndScoreAt(problem, regrow, grown_fit.w, grown_fit.h, &grown_routing);
+diff --git a/src/main.cpp b/src/main.cpp
+index 95539e2..4309080 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -28,51 +28,77 @@ double argDouble(int argc, char** argv, const std::string& name, double fallback
+     return fallback;
+ }
+ 
+ std::string argString(int argc, char** argv, const std::string& name, const std::string& fallback) {
+     for (int i = 0; i + 1 < argc; ++i) {
+         if (argv[i] == name) return argv[i + 1];
+     }
+     return fallback;
+ }
+ 
++bool hasFlag(int argc, char** argv, const std::string& name) {
++    for (int i = 1; i < argc; ++i) {
++        if (argv[i] == name) return true;
++    }
++    return false;
++}
++
+ std::string defaultOutputPath(const std::string& input_path) {
+     const std::size_t slash = input_path.find_last_of("/\\");
+     const std::size_t dot = input_path.find_last_of('.');
+     if (dot != std::string::npos && (slash == std::string::npos || dot > slash)) {
+         return input_path.substr(0, dot) + ".cfg";
+     }
+     return input_path + ".cfg";
+ }
+ 
+ }  // namespace
+ 
+ int main(int argc, char** argv) {
+     if (argc < 2) {
+         std::cerr << "usage: " << argv[0]
+                   << " input.csv [output.cfg] [--engine sp|bstar|hybrid] [--iters N] [--seed N] [--alpha X]"
+-                  << " [--exact-interval N]\n";
++                  << " [--exact-interval N] [--time-budget S]\n";
+         return 2;
+     }
+ 
+     try {
+         const std::string input_path = argv[1];
+         const bool has_output_arg = argc >= 3 && std::string(argv[2]).rfind("--", 0) != 0;
+         const std::string output_path = has_output_arg ? argv[2] : defaultOutputPath(input_path);
+         Problem problem = parseProblem(argv[1]);
+         SearchOptions options;
+         options.iters = argInt(argc, argv, "--iters", 1000);
+         options.seed = argInt(argc, argv, "--seed", 1);
+         options.exact_interval = std::max(1, argInt(argc, argv, "--exact-interval", 50));
++        // Beta Task 5: baked sweep-selected beta defaults. A no-flag run uses the chosen wall-clock
++        // budget (time is the binding stop); an explicit --iters WITHOUT --time-budget selects
++        // deterministic iteration-bounded search (budget OFF) so every regression suite stays
++        // byte-reproducible. An explicit --time-budget always wins. kDefaultTimeBudgetSec and the
++        // --engine fallback below are the two sweep-selected knobs.
++        //
++        // scripts/sweep.sh over the 5 official cases: the iters=1000 reference (budget 0) minimizes
++        // checker_cost for BOTH engines. A wall-clock budget raises the iteration count, but the
++        // elite-pass cheap-score selection mis-ranks candidates under integer geometry (Task 4 known
++        // issue), so more iters inflate routed overflow and REGRESS checker_cost (e.g. hybrid case4
++        // 113.98M -> 162.87M at budget 15; bstar Sigma 273.5M -> ~325M). Best measured cell:
++        // engine=hybrid, budget 0 (Sigma checker_cost 252.7M vs bstar 273.5M). So the budget defaults
++        // OFF; --time-budget stays available for when that search interaction is fixed post-beta.
++        constexpr double kDefaultTimeBudgetSec = 0.0;
++        const bool has_iters = hasFlag(argc, argv, "--iters");
++        const bool has_budget = hasFlag(argc, argv, "--time-budget");
++        options.time_budget_sec = (has_iters && !has_budget)
++                                      ? 0.0
++                                      : argDouble(argc, argv, "--time-budget", kDefaultTimeBudgetSec);
+         double alpha = argDouble(argc, argv, "--alpha", problem.alpha);
+         problem.alpha = alpha;
+-        std::string engine_name = argString(argc, argv, "--engine", "bstar");
++        std::string engine_name = argString(argc, argv, "--engine", "hybrid");
+ 
+         SearchResult result;
+         if (engine_name == "hybrid") {
+             result = runHybridPlacementSearch(problem, options);
+         } else {
+             std::unique_ptr<PlacementEngine> engine = makePlacementEngine(engine_name);
+             result = runPlacementSearch(problem, *engine, options);
+         }
+ 
+         auto validation = validateSolution(problem, result.best_placement, result.best_routing);
+diff --git a/src/search.cpp b/src/search.cpp
+index a60a3a1..4a58250 100644
+--- a/src/search.cpp
++++ b/src/search.cpp
+@@ -1,12 +1,13 @@
+ #include "search.hpp"
+ 
++#include <chrono>
+ #include <cmath>
+ #include <random>
+ #include <sstream>
+ #include <unordered_map>
+ #include <utility>
+ 
+ #include "eval.hpp"
+ #include "ft.hpp"
+ #include "respace.hpp"
+ #include "validate.hpp"
+@@ -154,22 +155,30 @@ OutlineSweepResult outlineSweep(const Problem& problem, const Placement& base, c
+     tight.outline_h = 0.0;
+     OutlineFit tight_fit = shrinkWrapOutline(problem, tight);
+     double tight_w = tight_fit.legal ? tight_fit.w : problem.outline_w;
+     double tight_h = tight_fit.legal ? tight_fit.h : problem.outline_h;
+ 
+     OutlineSweepResult best;
+     bool have_best = false;
+     double last_target_w = -1.0;
+     double last_target_h = -1.0;
+     for (double margin : kMargins) {
+-        double target_w = tight_w + margin * (problem.outline_w - tight_w);
+-        double target_h = tight_h + margin * (problem.outline_h - tight_h);
++        // Part D (T5 integer-leak rider): anchorAtOutline preserves the caller's EXACT target
++        // (T7.1 contract), so a fractional margin-rung target would leak into
++        // result.best_placement's outline stamp AND its re-anchored edge x/y. MAX
++        // (problem.outline_w/h) is integer, so ceil-then-clamp keeps every rung's target integral
++        // and <= MAX. m=0.0 targets tight_w/h, already integer from shrinkWrapOutline's rule-5
++        // ceiling, so this is a no-op there -- the strictly-Pareto-safe m=0.0 rung is unchanged.
++        double target_w =
++            std::min(problem.outline_w, std::ceil(tight_w + margin * (problem.outline_w - tight_w) - kEps));
++        double target_h =
++            std::min(problem.outline_h, std::ceil(tight_h + margin * (problem.outline_h - tight_h) - kEps));
+         // Skip a duplicate rung (e.g. tight == MAX already, so every larger margin's target is
+         // identical to m=0.0's) -- avoids a redundant exact-score call; the cache would dedupe it
+         // anyway via placementKey, but skipping keeps the sweep's trial count honest.
+         if (have_best && std::abs(target_w - last_target_w) < kEps && std::abs(target_h - last_target_h) < kEps) {
+             continue;
+         }
+         last_target_w = target_w;
+         last_target_h = target_h;
+ 
+         Placement variant = base;
+@@ -380,21 +389,35 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
+         std::sort(top_candidates.begin(), top_candidates.end(), [](const CheapCandidate& a, const CheapCandidate& b) {
+             return a.value < b.value;
+         });
+         constexpr std::size_t kTopCheapCandidates = 16;
+         if (top_candidates.size() > kTopCheapCandidates) top_candidates.resize(kTopCheapCandidates);
+     };
+     rememberCandidate(result.best_placement, current_score);
+ 
+     double temp = std::max(1.0, options.initial_temperature);
+     int exact_interval = std::max(1, options.exact_interval);
+-    for (int iter = 1; iter <= options.iters; ++iter) {
++    // Beta Task 5: wall-clock budget. When enabled, time (not the iter default) is the binding
++    // stop -- raise the iteration ceiling so the steady_clock check below is what ends the loop.
++    // Budget off (== 0) leaves the bound and reported iteration count byte-identical to the
++    // pre-budget path (result.iterations stays the value stamped from options.iters above).
++    const int iter_bound = options.time_budget_sec > 0.0 ? std::max(options.iters, 2000000)
++                                                         : std::max(0, options.iters);
++    const auto budget_start = std::chrono::steady_clock::now();
++    int iters_run = 0;
++    for (int iter = 1; iter <= iter_bound; ++iter) {
++        if (options.time_budget_sec > 0.0 && (iter & 63) == 0) {
++            double elapsed =
++                std::chrono::duration<double>(std::chrono::steady_clock::now() - budget_start).count();
++            if (elapsed >= options.time_budget_sec) break;
++        }
++        iters_run = iter;
+         PlacementState candidate = current;
+         engine.mutate(problem, candidate, rng);
+         if (!engine.isValidState(problem, candidate)) continue;
+ 
+         Placement cand_place = engine.decode(problem, candidate);
+         Score cand_score = cheapScore(problem, cand_place);
+         rememberCandidate(cand_place, cand_score);
+         double delta = cand_score.value - current_score.value;
+         std::uniform_real_distribution<double> unit(0.0, 1.0);
+         if (delta <= 0.0 || std::exp(-delta / std::max(1.0, temp)) > unit(rng)) {
+@@ -408,20 +431,23 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
+             Score exact = exactCached(cand_place, &routing);
+             if (exact.value < result.best_score.value) {
+                 result.best_score = exact;
+                 best_state = candidate;
+                 result.best_placement = cand_place;
+                 result.best_routing = routing;
+             }
+         }
+         temp *= options.cooling;
+     }
++    // Report the iterations actually executed when time bounded the run; budget off keeps the
++    // options.iters value stamped above, preserving the existing --iters summary line verbatim.
++    if (options.time_budget_sec > 0.0) result.iterations = iters_run;
+ 
+     for (const auto& candidate : top_candidates) {
+         // T7 (design §1.4 elite path): replaces the single tight-stamp exactCached call with a
+         // deterministic outline-margin sweep -- m=0.0 reproduces the exact prior single-eval
+         // behavior, so this can only match or beat it (strictly Pareto-safe). Preference mirrors
+         // outlineSweep's own internal rule (open_routes==0 strictly first, then lower value) so
+         // the elite loop never regresses legality chasing a lower score.
+         OutlineSweepResult swept = outlineSweep(problem, candidate.placement, exactCached);
+         if (outlineSweepBetter(swept.routing, swept.score.value, result.best_routing, result.best_score.value)) {
+             result.best_score = swept.score;
+@@ -457,20 +483,24 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
+ 
+ SearchResult runHybridPlacementSearch(const Problem& problem, const SearchOptions& options) {
+     std::unique_ptr<PlacementEngine> sp = makePlacementEngine("sp");
+     std::unique_ptr<PlacementEngine> bstar = makePlacementEngine("bstar");
+ 
+     SearchOptions sp_options = options;
+     SearchOptions bstar_options = options;
+     sp_options.iters = std::max(1, options.iters / 2);
+     bstar_options.iters = std::max(1, options.iters - sp_options.iters);
+     bstar_options.seed = options.seed + 1;
++    // Beta Task 5: split any wall-clock budget evenly across the two legs (the copies already carry
++    // options.time_budget_sec; halve it here). Budget off (0) halves to 0 -> both legs iter-bounded.
++    sp_options.time_budget_sec = options.time_budget_sec * 0.5;
++    bstar_options.time_budget_sec = options.time_budget_sec * 0.5;
+ 
+     SearchResult sp_result = runPlacementSearch(problem, *sp, sp_options);
+     std::mt19937 rng(bstar_options.seed);
+     // Re-decode derives soft dims from the ORIGINAL problem areas, so any FT inflation accepted by the sp leg's
+     // finalize is intentionally discarded here; each leg finalizes independently and the better full result wins.
+     PlacementState bstar_seed = bstar->seedFromPlacement(problem, sp_result.best_placement, rng);
+     SearchResult bstar_result = runPlacementSearch(problem, *bstar, bstar_options, bstar_seed);
+ 
+     SearchResult result = paydownBetter(bstar_result.best_routing, bstar_result.best_score.value,
+                                         sp_result.best_routing, sp_result.best_score.value)
+diff --git a/src/search.hpp b/src/search.hpp
+index 5349f26..6ac39bc 100644
+--- a/src/search.hpp
++++ b/src/search.hpp
+@@ -7,20 +7,21 @@
+ #include "placement_engine.hpp"
+ 
+ namespace efgr {
+ 
+ struct SearchOptions {
+     int iters = 1000;
+     int seed = 1;
+     int exact_interval = 50;
+     double initial_temperature = 1000000.0;
+     double cooling = 0.995;
++    double time_budget_sec = 0.0;  // 0 = disabled; wall-clock stop, checked every 64 iters
+ };
+ 
+ struct SearchResult {
+     std::string engine_name;
+     int iterations = 0;
+     int exact_evaluations = 0;
+     Score best_score;
+     Placement best_placement;
+     RoutingResult best_routing;
+ };

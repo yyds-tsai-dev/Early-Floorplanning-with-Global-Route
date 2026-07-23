@@ -1,0 +1,374 @@
+# Review package: 1b2e214..2791587
+
+## Commits
+2791587 feat(placement): integer-quantized decode per QA A43
+
+## Files changed
+ src/placement_engine.cpp               | 160 +++++++++++++++++++++++++++++++--
+ test/regression_integer_output.cpp     |  51 +++++++++++
+ test/run_integer_output_regressions.sh |  14 +++
+ 3 files changed, 218 insertions(+), 7 deletions(-)
+
+## Diff
+diff --git a/src/placement_engine.cpp b/src/placement_engine.cpp
+index 02afece..e188aad 100644
+--- a/src/placement_engine.cpp
++++ b/src/placement_engine.cpp
+@@ -1,39 +1,136 @@
+ #include "placement_engine.hpp"
+ 
+ #include <algorithm>
++#include <cassert>
+ #include <cmath>
+ #include <stdexcept>
+ 
+ namespace efgr {
+ namespace {
+ 
++bool isIntegral(double v) { return std::abs(v - static_cast<double>(std::llround(v))) < kEps; }
++
++// Rule 1 (QA A43.3): integer (w,h) maximizing w*h <= area with ar_min <= w/h <= ar_max, searching
++// h in a window around h0 = sqrt(area/ar) and taking the area-optimal w = floor(area/h) for each
++// candidate h, clamped into the AR range (undersizing w*h when the clamp forces it -- A43.3's
++// "undersize when equality impossible"). Ties on w*h break on |w/h - ar|, closest to the clamped
++// target aspect. Widens the window (half-width 3 -> 8) if the base window has no AR-feasible h;
++// asserts rather than silently falling back to a fractional or out-of-AR-range result.
++Rect integerDimsMaxProduct(double area, double ar, double ar_min, double ar_max) {
++    double h0 = std::sqrt(std::max(1.0, area / ar));
++    bool have = false;
++    long long best_w = 1;
++    long long best_h = 1;
++    for (int half = 3; half <= 8 && !have; ++half) {
++        long long h_lo = std::max<long long>(1, static_cast<long long>(std::floor(h0)) - half);
++        long long h_hi = static_cast<long long>(std::ceil(h0)) + half;
++        for (long long h = h_lo; h <= h_hi; ++h) {
++            double hd = static_cast<double>(h);
++            long long w_area = static_cast<long long>(std::floor(area / hd));
++            long long w_ar_hi = static_cast<long long>(std::floor(ar_max * hd));
++            long long w_ar_lo = static_cast<long long>(std::ceil(ar_min * hd));
++            long long w = std::min(w_area, w_ar_hi);
++            if (w < std::max<long long>(1, w_ar_lo)) continue;  // no legal w for this h
++            if (!have) {
++                have = true;
++                best_w = w;
++                best_h = h;
++                continue;
++            }
++            double product = static_cast<double>(w) * hd;
++            double best_product = static_cast<double>(best_w) * static_cast<double>(best_h);
++            double ar_diff = std::abs(static_cast<double>(w) / hd - ar);
++            double best_ar_diff = std::abs(static_cast<double>(best_w) / static_cast<double>(best_h) - ar);
++            if (product > best_product + kEps ||
++                (std::abs(product - best_product) <= kEps && ar_diff < best_ar_diff)) {
++                best_w = w;
++                best_h = h;
++            }
++        }
++    }
++    assert(have && "rule 1: integer window search found no (w,h) within [ar_min, ar_max]");
++    return Rect{0.0, 0.0, static_cast<double>(best_w), static_cast<double>(best_h)};
++}
++
++// Rule 2 (QA A43.3, FT-inflated re-decode): mirrors integerDimsMaxProduct but sizes UP -- minimal
++// integer w*h >= required_area within [ar_min, ar_max], so a feedthrough-required area is never
++// undershot by integer rounding (which would otherwise charge a spurious feedthrough-mismatch
++// penalty). Same widening/assert discipline as integerDimsMaxProduct.
++Rect integerDimsMinProduct(double required_area, double ar, double ar_min, double ar_max) {
++    double h0 = std::sqrt(std::max(1.0, required_area / ar));
++    bool have = false;
++    long long best_w = 1;
++    long long best_h = 1;
++    for (int half = 3; half <= 8 && !have; ++half) {
++        long long h_lo = std::max<long long>(1, static_cast<long long>(std::floor(h0)) - half);
++        long long h_hi = static_cast<long long>(std::ceil(h0)) + half;
++        for (long long h = h_lo; h <= h_hi; ++h) {
++            double hd = static_cast<double>(h);
++            long long w_area = static_cast<long long>(std::ceil(required_area / hd));
++            long long w_ar_lo = static_cast<long long>(std::ceil(ar_min * hd));
++            long long w_ar_hi = static_cast<long long>(std::floor(ar_max * hd));
++            long long w = std::max<long long>({1, w_area, w_ar_lo});
++            if (w > w_ar_hi) continue;  // no legal w for this h
++            if (!have) {
++                have = true;
++                best_w = w;
++                best_h = h;
++                continue;
++            }
++            double product = static_cast<double>(w) * hd;
++            double best_product = static_cast<double>(best_w) * static_cast<double>(best_h);
++            double ar_diff = std::abs(static_cast<double>(w) / hd - ar);
++            double best_ar_diff = std::abs(static_cast<double>(best_w) / static_cast<double>(best_h) - ar);
++            if (product < best_product - kEps ||
++                (std::abs(product - best_product) <= kEps && ar_diff < best_ar_diff)) {
++                best_w = w;
++                best_h = h;
++            }
++        }
++    }
++    assert(have && "rule 2: integer window search found no (w,h) within [ar_min, ar_max]");
++    return Rect{0.0, 0.0, static_cast<double>(best_w), static_cast<double>(best_h)};
++}
++
+ Rect dimensionFor(const Block& block, double aspect) {
++    // Rule 3 (QA A43): macro/edge dims come straight from the CSV's WIDTH/HEIGHT columns, which
++    // the current (20260712) test data already provides as integers -- left byte-for-byte
++    // unchanged (no rounding). NOTE: NOT asserted-integer here (unlike rules 1/2's window-search
++    // asserts) because test/E_testcase_20260414.xlsx - case00.csv (predates the 20260712 refresh,
++    // still exercised by the required test/run_case00.sh smoke test) has a fractional EDGE width
++    // (BLK01 = 419.5) -- an assert here would abort that regression. See task report for detail.
+     if (!isSoft(block.type)) return Rect{0.0, 0.0, block.width, block.height};
+     double ar = std::max(block.ar_min, std::min(block.ar_max, aspect));
+-    double w = std::sqrt(std::max(1.0, block.area * ar));
+-    double h = block.area / w;
+-    return Rect{0.0, 0.0, w, h};
++    // Rule 2 trigger (QA A43): finalizeFeedthrough (search.cpp) is the only place that mutates a
++    // parsed block's `area` after parseProblem, and it does so precisely to signal "re-decode this
++    // soft block at (at least) this required area" -- growing `area` past the parser's own
++    // `ft_base_area` baseline (set once, at parse time, and never touched again; see model.hpp).
++    // That comparison is exactly the FT-inflated-redecode/base-sizing distinction rules 1 vs 2 need.
++    bool ft_inflated = block.ft_base_area > 0.0 && block.area > block.ft_base_area + kEps;
++    if (ft_inflated) return integerDimsMinProduct(block.area, ar, block.ar_min, block.ar_max);
++    return integerDimsMaxProduct(block.area, ar, block.ar_min, block.ar_max);
+ }
+ 
+ bool locHasTop(const std::string& loc) { return !loc.empty() && loc[0] == 'T'; }
+ bool locHasBottom(const std::string& loc) { return !loc.empty() && loc[0] == 'B'; }
+ bool locHasLeft(const std::string& loc) { return !loc.empty() && loc[0] == 'L'; }
+ bool locHasRight(const std::string& loc) { return !loc.empty() && loc[0] == 'R'; }
+ 
+ bool locInTopBand(const std::string& loc) { return loc.find('T') != std::string::npos; }
+ bool locInBottomBand(const std::string& loc) { return loc.find('B') != std::string::npos; }
+ bool locInLeftBand(const std::string& loc) { return loc.find('L') != std::string::npos; }
+ bool locInRightBand(const std::string& loc) { return loc.find('R') != std::string::npos; }
+ 
+ bool collidesWithPlaced(const std::vector<Rect>& rects, const std::vector<bool>& placed, int self,
+                         const Rect& candidate);
++bool edgeRectLegal(const Problem& problem, const Block& block, const Rect& rect);
+ 
+ Rect placeEdge(const Problem& problem, const Block& block, const std::vector<std::string>& locs) {
+     Rect r = dimensionFor(block, 1.0);
+     double third_w = problem.outline_w / 3.0;
+     double third_h = problem.outline_h / 3.0;
+     bool top = false, bottom = false, left = false, right = false;
+     bool mid_x = false, mid_y = false;
+     for (const auto& loc : locs) {
+         top = top || locHasTop(loc);
+         bottom = bottom || locHasBottom(loc);
+@@ -51,20 +148,39 @@ Rect placeEdge(const Problem& problem, const Block& block, const std::vector<std
+     if (bottom) r.y = 0.0;
+     if (left) r.x = 0.0;
+     if (right) r.x = problem.outline_w - r.w;
+     if (!left && !right && mid_x) r.x = std::max(0.0, (problem.outline_w - r.w) * 0.5);
+     if (!top && !bottom && mid_y) r.y = std::max(0.0, (problem.outline_h - r.h) * 0.5);
+ 
+     if (!left && !right && mid_x) r.x = std::min(std::max(r.x, third_w), 2.0 * third_w - r.w);
+     if (!top && !bottom && mid_y) r.y = std::min(std::max(r.y, third_h), 2.0 * third_h - r.h);
+     r.x = std::max(0.0, std::min(r.x, problem.outline_w - r.w));
+     r.y = std::max(0.0, std::min(r.y, problem.outline_h - r.h));
++    // Rule 4 (QA A43): only round/assert once the REFERENCE outline is itself integer. This same
++    // formula also runs mid-bisection (shrinkWrapOutline's `feasible` lambda, edgeBlocksFeasibleAt)
++    // against deliberately FRACTIONAL trial outlines -- there, r.y = outline_h - r.h (the
++    // border-flush axis) cancels EXACTLY against that fractional outline_h; rounding just that axis
++    // would introduce a mismatch that was never present and break the border-touch check on a mere
++    // probe. Once outline_w/h are integers (the real committed size, or MAX itself), the
++    // border-flush axis is already exactly integer (integer - integer) so rounding it is a no-op;
++    // only the thirds/mid-centering axis actually moves, by at most 0.5 units.
++    if (isIntegral(problem.outline_w) && isIntegral(problem.outline_h)) {
++        r.x = static_cast<double>(std::llround(r.x));
++        r.y = static_cast<double>(std::llround(r.y));
++        r.x = std::max(0.0, std::min(r.x, problem.outline_w - r.w));
++        r.y = std::max(0.0, std::min(r.y, problem.outline_h - r.h));
++        // QA A20 (1D check): a <1um rounding shift cannot turn a location-segment overlap that was
++        // already >= kEps before rounding into a non-positive one, unless that segment was already
++        // pathologically tight against the block's own width/height -- assert rather than silently
++        // emit a rect that no longer satisfies its LOCATION requirement.
++        assert(edgeRectLegal(problem, block, r));
++    }
+     return r;
+ }
+ 
+ char locSide(const std::string& loc) {
+     return loc.empty() ? '\0' : loc[0];
+ }
+ 
+ std::pair<double, double> locSegment(const Problem& problem, const std::string& loc) {
+     double third_w = problem.outline_w / 3.0;
+     double third_h = problem.outline_h / 3.0;
+@@ -172,20 +288,28 @@ Rect firstLegalEdgeSlot(const Problem& problem, const Block& block, const std::v
+         } else if (side == 'B') {
+             candidate.x = coord;
+             candidate.y = 0.0;
+         } else if (side == 'L') {
+             candidate.x = 0.0;
+             candidate.y = coord;
+         } else if (side == 'R') {
+             candidate.x = problem.outline_w - candidate.w;
+             candidate.y = coord;
+         }
++        // Rule 4 (QA A43): coord is drawn from locSegment's thirds-of-outline boundaries, which are
++        // fractional even when outline_w/h and base.w/h are integers -- round before the legality
++        // check (same integer-outline guard as placeEdge's tail, for the same probe-context reason)
++        // so it is evaluated -- and, if accepted, returned -- at the actual integer position.
++        if (isIntegral(problem.outline_w) && isIntegral(problem.outline_h)) {
++            candidate.x = static_cast<double>(std::llround(candidate.x));
++            candidate.y = static_cast<double>(std::llround(candidate.y));
++        }
+         if (!edgeRectLegal(problem, block, candidate)) continue;
+         if (!collidesWithPlaced(rects, placed, idx, candidate)) return candidate;
+     }
+     return placeEdge(problem, block, locs);
+ }
+ 
+ void legalizeEdgeBlocks(const Problem& problem, Placement& placement) {
+     std::vector<int> edges;
+     for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
+         if (isEdge(problem.blocks[i].type)) edges.push_back(static_cast<int>(i));
+@@ -772,20 +896,29 @@ bool placementLegalAt(const Problem& problem, const Placement& placement, double
+ // anchorAtOutline (called directly at a caller-chosen (w,h), no bisection): resets edge rects via
+ // dimensionFor, re-legalizes them against a Problem scoped to (w,h) via legalizeEdgeBlocks, and
+ // gates on placementLegalAt (containment + no overlap + edge-location rules). Pure function of
+ // (problem, placement's current rects, w, h) -- no bisection/search of its own. Always writes the
+ // re-legalized edge rects + declared outline into `placement` and reports the gate result via
+ // OutlineFit.legal, matching shrinkWrapOutline's pre-existing "always stamp, report legal
+ // separately" behavior -- callers that must NOT mutate on failure (e.g. anchorAtOutline) check
+ // `.legal` and discard/restore `placement` themselves rather than relying on this helper to skip
+ // the write.
+ OutlineFit commitOutlineAt(const Problem& problem, Placement& placement, double w, double h) {
++    // NOTE (rule 5, QA A43): deliberately NOT ceiled here. This helper is shared by shrinkWrapOutline
++    // (which DOES ceil its own (w,h) before calling in -- see below) and anchorAtOutline, whose
++    // documented T7.1 contract is to stamp EXACTLY the caller's target (no bisection, no rounding):
++    // test/regression_p1_20260706.cpp's testAnchorAtOutlineStampsExactTargetNotTightCase0 asserts
++    // `fit.w == target_w` for a deliberately fractional target and further asserts edge blocks sit
++    // flush at that exact fractional border. Rounding here would break that pre-existing, still-
++    // required contract. Net effect: shrinkWrapOutline's result is integer; anchorAtOutline's is
++    // whatever its caller asked for (search.cpp's outlineSweep margin>0 rungs, eval.cpp's corrective
++    // grow) -- see the task report for the residual gap this leaves.
+     Problem scoped = problem;
+     scoped.outline_w = w;
+     scoped.outline_h = h;
+     Placement trial = placement;
+     for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
+         if (isEdge(problem.blocks[i].type)) trial.rects[i] = dimensionFor(problem.blocks[i], 1.0);
+     }
+     legalizeEdgeBlocks(scoped, trial);
+     bool legal = placementLegalAt(scoped, trial, w, h);
+     for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
+@@ -920,24 +1053,37 @@ OutlineFit shrinkWrapOutline(const Problem& problem, Placement& placement, int m
+             if (isEdge(problem.blocks[i].type)) trial.rects[i] = dimensionFor(problem.blocks[i], 1.0);
+         }
+         legalizeEdgeBlocks(scoped, trial);
+         return placementLegalAt(scoped, trial, w, h);
+     };
+ 
+     OutlineFit fit = bisectShrinkWrap(w_lb, h_lb, problem.outline_w, problem.outline_h, max_grow_steps, feasible);
+     double w = fit.legal ? fit.w : problem.outline_w;
+     double h = fit.legal ? fit.h : problem.outline_h;
+ 
+-    // Commit: re-run the legalization once more at the winning (w,h) -- the FEASIBLE trial -- and
+-    // stamp its edge rects + declared outline into `placement`. Never commits from an infeasible
+-    // midpoint (design §1.2.4): `feasible` already re-verified `(w,h)` above (or it is the MAX
+-    // fallback, always legal since it reproduces decode's own legalization).
++    // Rule 5 (QA A43): shrinkWrapOutline's own result is integer-quantized. Round UP (never down --
++    // shrinking could turn an already-feasible (w,h) illegal) and clamp to problem.outline_w/h, the
++    // TRUE contest MAX in THIS function's scope (unlike commitOutlineAt's shared `problem` parameter,
++    // which anchorAtOutline reuses for an already-scoped/fractional caller target -- see
++    // commitOutlineAt's own comment for why the ceiling can't live there for both callers).
++    // Feasibility is monotone increasing in (W,H) (bisectShrinkWrap's doc comment above), so
++    // ceiling a feasible (w,h) up preserves legality; MAX is itself integer (contest input) so
++    // clamping never re-fractionalizes. The `-kEps` fuzz guards against ceil-ing a value fp
++    // arithmetic nudged a hair above its true integer (e.g. 2000.0000000003 -> 2000, not 2001).
++    w = std::min(problem.outline_w, std::ceil(w - kEps));
++    h = std::min(problem.outline_h, std::ceil(h - kEps));
++
++    // Commit: re-run the legalization once more at the winning, now-integer (w,h) -- and stamp its
++    // edge rects + declared outline into `placement`. Never commits from an infeasible midpoint
++    // (design §1.2.4): ceiling only ever grows (w,h) from a value `feasible` already verified above
++    // (or the MAX fallback, always legal since it reproduces decode's own legalization), and
++    // commitOutlineAt independently re-verifies at the exact (w,h) it is given regardless.
+     return commitOutlineAt(problem, placement, w, h);
+ }
+ 
+ OutlineFit anchorAtOutline(const Problem& scoped, Placement& placement) {
+     Placement trial = placement;
+     OutlineFit fit = commitOutlineAt(scoped, trial, scoped.outline_w, scoped.outline_h);
+     if (!fit.legal) return OutlineFit{scoped.outline_w, scoped.outline_h, false};
+     placement = trial;
+     return fit;
+ }
+diff --git a/test/regression_integer_output.cpp b/test/regression_integer_output.cpp
+new file mode 100644
+index 0000000..5ded634
+--- /dev/null
++++ b/test/regression_integer_output.cpp
+@@ -0,0 +1,51 @@
++#include <cassert>
++#include <cmath>
++#include <cstdio>
++#include <memory>
++#include "../src/io.hpp"
++#include "../src/placement_engine.hpp"
++#include "../src/search.hpp"
++
++using namespace efgr;
++
++static bool isInt(double v) { return std::abs(v - std::llround(v)) < 1e-9; }
++
++int main() {
++    for (int c = 0; c < 5; ++c) {
++        Problem problem = parseProblem("test/2026 ICCAD_case.case" + std::to_string(c) + ".csv");
++        SearchOptions opt; opt.iters = 200; opt.seed = 1;
++        std::unique_ptr<PlacementEngine> engine = makePlacementEngine("bstar");
++        SearchResult r = runPlacementSearch(problem, *engine, opt);
++        assert(r.best_routing.open_routes == 0);
++        for (const Rect& rect : r.best_placement.rects) {
++            assert(isInt(rect.x) && isInt(rect.y) && isInt(rect.w) && isInt(rect.h));
++        }
++        if (r.best_placement.outline_w > 0.0) {
++            assert(isInt(r.best_placement.outline_w) && isInt(r.best_placement.outline_h));
++        }
++        // Soft blocks: verify integer dims stay within [ar_min, ar_max] (rules 1/2's window-search
++        // contract). Deliberately NOT gated on r.best_routing.soft_feedthrough_nets[i] == 0 implying
++        // "placed <= b.area": finalizeFeedthrough (search.cpp) grows a block's decode area once
++        // feedthrough is observed and NEVER shrinks it back down across later passes, so a block can
++        // legitimately end up sized above its base area even though the FINAL committed routing no
++        // longer routes feedthrough through it -- confirmed present on unmodified HEAD too (e.g.
++        // case0 BLK02, case1 BLK01 both already show placed > area with ft_nets == 0 before this
++        // task's changes), so it is pre-existing search behavior, not a rule 1/2 defect. Rule 1
++        // (integerDimsMaxProduct) mathematically guarantees w*h <= area by construction (floor-
++        // based), so any block ever sized above its base area was necessarily sized via rule 2 (FT
++        // re-decode) at some point in the search -- the AR-bounds check below is what rules 1/2
++        // actually promise and is unconditionally true.
++        for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
++            const Block& b = problem.blocks[i];
++            if (!isSoft(b.type)) continue;
++            double w = r.best_placement.rects[i].w;
++            double h = r.best_placement.rects[i].h;
++            assert(h > 0.0);
++            double ratio = w / h;
++            assert(ratio >= b.ar_min - 1e-6 && ratio <= b.ar_max + 1e-6);
++        }
++        std::printf("case%d integer decode ok\n", c);
++    }
++    std::puts("integer output regressions passed");
++    return 0;
++}
+diff --git a/test/run_integer_output_regressions.sh b/test/run_integer_output_regressions.sh
+new file mode 100755
+index 0000000..998aa5b
+--- /dev/null
++++ b/test/run_integer_output_regressions.sh
+@@ -0,0 +1,14 @@
++#!/usr/bin/env bash
++set -euo pipefail
++cd "$(dirname "$0")/.."
++
++make >/dev/null
++
++g++ -std=c++17 -O2 -Wall -Wextra -pedantic \
++    test/regression_integer_output.cpp \
++    src/routing.cpp src/eval.cpp src/io.cpp src/validate.cpp \
++    src/placement_engine.cpp src/search.cpp src/floorplan.cpp src/respace.cpp \
++    -o test/integer_output_regression_bin
++
++./test/integer_output_regression_bin
++echo "Integer output regressions passed"

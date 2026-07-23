@@ -1,0 +1,463 @@
+# Review package: daa0797..5931567
+
+## Commits
+5931567 feat(eval): golden cfg rescorer locked to alpha-test official reports
+
+## Files changed
+ scripts/benchmark.sh              |  36 ++++++++
+ src/cfg_score.cpp                 | 178 ++++++++++++++++++++++++++++++++++++++
+ src/cfg_score.hpp                 |  66 ++++++++++++++
+ test/regression_cfg_score.cpp     |  95 ++++++++++++++++++++
+ test/run_cfg_score_regressions.sh |  17 ++++
+ tools/rescore.cpp                 |  20 +++++
+ 6 files changed, 412 insertions(+)
+
+## Diff
+diff --git a/scripts/benchmark.sh b/scripts/benchmark.sh
+new file mode 100755
+index 0000000..e287ea6
+--- /dev/null
++++ b/scripts/benchmark.sh
+@@ -0,0 +1,36 @@
++#!/usr/bin/env bash
++# usage: scripts/benchmark.sh [extra solver args...]   e.g. scripts/benchmark.sh --iters 2000
++# Dual-cost matrix: checker_cost (official alpha=0.2 model, from efgr_rescore) vs rank_cost (the
++# alpha-test scoreboard's per-case ranking alpha + delta=0.5 runtime penalty). The ranking alpha
++# table and runtime penalty live ONLY here -- the checker cost model lives in src/cfg_score.cpp.
++set -euo pipefail
++cd "$(dirname "$0")/.."
++make >/dev/null
++
++# rescore links the same proven sibling set as the regression (parseProblem -> usedOutline).
++g++ -std=c++17 -O2 -Wall -Wextra -pedantic -I. \
++    tools/rescore.cpp \
++    src/cfg_score.cpp src/eval.cpp src/io.cpp src/placement_engine.cpp src/respace.cpp \
++    src/routing.cpp src/search.cpp src/validate.cpp \
++    -o bin/efgr_rescore
++
++RANK_ALPHA=(0.3 0.15 0.1 0.1 0.1)   # alpha-test scoreboard values (benchmark-only)
++printf "%-6s %-8s %14s %14s %14s %14s %8s\n" case engine checker_cost rank_cost overflow wl runtime
++for engine in bstar hybrid; do
++  total_checker=0; total_rank=0
++  for i in 0 1 2 3 4; do
++    csv="test/2026 ICCAD_case.case$i.csv"; out="/tmp/bench_${engine}_case$i.cfg"
++    start=$(date +%s.%N)
++    bin/efgr "$csv" "$out" --engine "$engine" "$@" 2>/dev/null
++    rt=$(awk -v e="$(date +%s.%N)" -v s="$start" 'BEGIN{printf "%.2f", e-s}')
++    line=$(bin/efgr_rescore "$csv" "$out")
++    eval "$(echo "$line" | tr ' ' '\n' | sed 's/^/B_/')"   # B_area= B_wl= ...
++    rank=$(awk -v a="$B_area" -v w="$B_wl" -v al="${RANK_ALPHA[$i]}" -v op="$B_overflow_penalty" \
++               -v rt="$rt" 'BEGIN{printf "%.3f", a + al*w + op + 0.5*rt*sqrt(a)}')
++    printf "%-6s %-8s %14.0f %14.0f %14.3f %14.0f %7.2fs\n" \
++           "case$i" "$engine" "$B_checker_cost" "$rank" "$B_overflow" "$B_wl" "$rt"
++    total_checker=$(awk -v t="$total_checker" -v c="$B_checker_cost" 'BEGIN{printf "%.3f", t+c}')
++    total_rank=$(awk -v t="$total_rank" -v r="$rank" 'BEGIN{printf "%.3f", t+r}')
++  done
++  printf "%-6s %-8s %14.0f %14.0f\n" TOTAL "$engine" "$total_checker" "$total_rank"
++done
+diff --git a/src/cfg_score.cpp b/src/cfg_score.cpp
+new file mode 100644
+index 0000000..f5d9611
+--- /dev/null
++++ b/src/cfg_score.cpp
+@@ -0,0 +1,178 @@
++#include "cfg_score.hpp"
++
++#include <algorithm>
++#include <cmath>
++#include <cstddef>
++#include <fstream>
++#include <sstream>
++#include <string>
++#include <unordered_map>
++
++namespace efgr {
++
++namespace {
++
++// Official overflow-penalty parameters, read byte-verified from every alpha report.json's
++// `cost_breakdown` block (beta-task-2-report.md, Section 1).
++constexpr double kBetaLin = 20.0;    // linear term coefficient
++constexpr double kBetaTail = 1.5;    // tail term coefficient (R > threshold)
++constexpr double kThreshold = 0.05;  // overflow-rate threshold
++constexpr double kCapPerUm = 25.0;   // wire density limit: 25 nets / um
++
++// Checker guiding point for the wirelength CHAIN (NOT guidePoint's overlap midpoint).
++// The point sits on the shared border between `a` and `b`; the border is picked by MINIMUM gap so
++// the classification is robust to the .cfg's 3-decimal rounding (abutting edges can differ by up to
++// ~0.001 um -- report.json flags these as "borderline"). Along the border the coordinate is the
++// average of the two rectangles' centers (equivalently, the midpoint of the two facing-edge
++// midpoints); across the border it is the midpoint of the two near edges. Verified to reproduce
++// total_wirelength to <=1e-6 rel on all 5 alpha cases.
++std::pair<double, double> guidingPoint(const Rect& a, const Rect& b) {
++    const double g_ar_bx = std::abs(a.right() - b.x);  // a.right meets b.left  (vertical border)
++    const double g_br_ax = std::abs(b.right() - a.x);  // b.right meets a.left  (vertical border)
++    const double g_at_by = std::abs(a.top() - b.y);    // a.top   meets b.bottom(horizontal border)
++    const double g_bt_ay = std::abs(b.top() - a.y);    // b.top   meets a.bottom(horizontal border)
++    const double min_vertical = std::min(g_ar_bx, g_br_ax);
++    const double min_horizontal = std::min(g_at_by, g_bt_ay);
++    if (min_vertical <= min_horizontal) {
++        const double x = (g_ar_bx <= g_br_ax) ? 0.5 * (a.right() + b.x) : 0.5 * (b.right() + a.x);
++        return {x, 0.5 * (a.cy() + b.cy())};
++    }
++    const double y = (g_at_by <= g_bt_ay) ? 0.5 * (a.top() + b.y) : 0.5 * (b.top() + a.y);
++    return {0.5 * (a.cx() + b.cx()), y};
++}
++
++}  // namespace
++
++CfgSolution parseCfg(const std::string& path) {
++    CfgSolution cfg;
++    std::ifstream in(path);
++    std::string line;
++    std::string section;
++    while (std::getline(in, line)) {
++        line = trim(line);  // strips CR and surrounding whitespace
++        if (line.empty()) continue;
++        std::istringstream ss(line);
++        std::string tok;
++        ss >> tok;
++        tok = trim(tok);
++        if (tok == "OUTLINE") {
++            ss >> cfg.outline_w >> cfg.outline_h;
++            section.clear();
++            continue;
++        }
++        if (tok == "BLOCK" || tok == "CHANNEL") {
++            section = tok;
++            continue;
++        }
++        if (tok == "PATH") {
++            std::string rest;
++            std::getline(ss, rest);
++            rest = trim(rest);
++            if (rest.empty()) {          // section header "PATH"
++                section = "PATH";
++                continue;
++            }
++            std::istringstream ps(rest);  // data line "PATH <nets> <obj> <edge> ..."
++            CfgSolution::Path p;
++            ps >> p.nets;
++            std::string obj;
++            int edge = 0;
++            while (ps >> obj >> edge) p.steps.push_back({trim(obj), edge});
++            cfg.paths.push_back(std::move(p));
++            section = "PATH";
++            continue;
++        }
++        if (tok == "END") {
++            section.clear();
++            continue;
++        }
++        if (section == "BLOCK") {
++            Rect r;
++            ss >> r.x >> r.y >> r.w >> r.h;
++            cfg.blocks[tok] = r;
++        } else if (section == "CHANNEL") {
++            Channel ch;
++            ch.name = tok;
++            ss >> ch.rect.x >> ch.rect.y >> ch.rect.w >> ch.rect.h;
++            cfg.channels.push_back(ch);
++        }
++    }
++    return cfg;
++}
++
++OfficialBreakdown officialScoreCfg(const Problem& problem, const CfgSolution& cfg) {
++    OfficialBreakdown out;
++    out.outline_area = cfg.outline_w * cfg.outline_h;
++
++    // Name lookups. Channels own mutable H/V demand accumulators (per-edge model).
++    std::unordered_map<std::string, int> chan_index;
++    std::vector<double> hu(cfg.channels.size(), 0.0);
++    std::vector<double> vu(cfg.channels.size(), 0.0);
++    for (std::size_t k = 0; k < cfg.channels.size(); ++k) chan_index[cfg.channels[k].name] = static_cast<int>(k);
++
++    auto rect_of = [&](const std::string& name, Rect& out_rect) -> bool {
++        auto b = cfg.blocks.find(name);
++        if (b != cfg.blocks.end()) { out_rect = b->second; return true; }
++        auto c = chan_index.find(name);
++        if (c != chan_index.end()) { out_rect = cfg.channels[c->second].rect; return true; }
++        return false;  // unknown object -> skip (defensive; legal .cfg never hits this)
++    };
++
++    double wirelength = 0.0;
++    for (const CfgSolution::Path& p : cfg.paths) {
++        // (1) Per-edge channel demand from the RAW step list (each entry/exit edge charges nets).
++        for (const auto& step : p.steps) {
++            auto it = chan_index.find(step.first);
++            if (it == chan_index.end()) continue;  // block step
++            if (step.second == 1 || step.second == 3) hu[it->second] += p.nets;  // left/right
++            else                                      vu[it->second] += p.nets;  // top/bottom
++        }
++        // (2) Wirelength: dedupe consecutive identical objects -> node sequence, chain guiding pts.
++        std::vector<Rect> nodes;
++        std::string prev;
++        for (const auto& step : p.steps) {
++            if (step.first == prev) continue;
++            Rect r;
++            if (!rect_of(step.first, r)) { prev = step.first; continue; }
++            nodes.push_back(r);
++            prev = step.first;
++        }
++        if (nodes.size() < 2) continue;  // direct abutment (1 node after collapse) -> 0 WL
++        std::vector<std::pair<double, double>> guides;
++        guides.reserve(nodes.size() - 1);
++        for (std::size_t i = 0; i + 1 < nodes.size(); ++i) guides.push_back(guidingPoint(nodes[i], nodes[i + 1]));
++        double path_len = 0.0;
++        for (std::size_t i = 0; i + 1 < guides.size(); ++i)
++            path_len += manhattan(guides[i].first, guides[i].second, guides[i + 1].first, guides[i + 1].second);
++        wirelength += path_len * p.nets;
++    }
++    out.wirelength = wirelength;
++
++    // Overflow / capacity: horizontal capacity = 25*height, vertical capacity = 25*width.
++    double overflow = 0.0;
++    double capacity = 0.0;
++    for (std::size_t k = 0; k < cfg.channels.size(); ++k) {
++        const Rect& r = cfg.channels[k].rect;
++        const double cap_h = kCapPerUm * r.h;
++        const double cap_v = kCapPerUm * r.w;
++        overflow += std::max(0.0, hu[k] - cap_h) + std::max(0.0, vu[k] - cap_v);
++        capacity += cap_h + cap_v;
++        out.demand_by_channel[cfg.channels[k].name] = {hu[k], vu[k]};
++    }
++    out.overflow_nets = overflow;
++    out.capacity_nets = capacity;
++    out.rate = (capacity > 0.0) ? overflow / capacity : 0.0;
++
++    // Overflow penalty (H1 global piecewise-linear). Base 20*A*R reproduces cases 0/2/3/4 exactly;
++    // the beta_tail tail is the best-proven form -- case1 (R>threshold) is ~0.31% of total cost
++    // short (no per-channel / direction-split hypothesis reproduced it; beta-task-2-report.md S4).
++    const double A = out.outline_area;
++    const double R = out.rate;
++    out.overflow_penalty = kBetaLin * A * R + kBetaTail * A * std::max(0.0, R - kThreshold);
++    out.ft_penalty = 0.0;  // alpha package used no feedthrough
++
++    out.checker_cost = A + problem.alpha * out.wirelength + out.overflow_penalty;
++    return out;
++}
++
++}  // namespace efgr
+diff --git a/src/cfg_score.hpp b/src/cfg_score.hpp
+new file mode 100644
+index 0000000..ace3399
+--- /dev/null
++++ b/src/cfg_score.hpp
+@@ -0,0 +1,66 @@
++#pragma once
++
++#include <map>
++#include <string>
++#include <utility>
++#include <vector>
++
++#include "model.hpp"
++
++namespace efgr {
++
++// Beta Task 2: golden .cfg re-scorer, locked to the official alpha-test checker (report.json).
++//
++// This is a CALIBRATION reference, independent of the solver's own routing/eval accounting. It
++// reproduces the official checker's four measured quantities from a written .cfg:
++//   * total_wirelength      -- exact to 1e-6 rel on all 5 alpha cases
++//   * channel_overflow_total, channel_total_capacity, per-channel demand -- exact on all 5 cases
++//   * cost                  -- exact on cases 0/2/3/4; case1 within 0.31% (penalty tail, see .cpp)
++//
++// IMPORTANT (verified against the official report.json + viz + E_20260608.pdf; see
++// .superpowers/sdd/beta-task-2-report.md): the checker's accounting is NOT the guide-segment model
++// in route_geometry.hpp (`accumulatePathUsage` / `guidePoint`). Two concrete differences, both
++// reproduced here and NOT via the shared helpers:
++//   1. Channel demand is PER-EDGE: each entry/exit edge a route uses on a channel charges `nets` to
++//      that edge's direction (edge 1/3 = left/right -> horizontal, 2/4 = top/bottom -> vertical), so
++//      a straight pass-through double-charges. `accumulatePathUsage`'s dx/dy guide-segment rule
++//      under-counts pass-throughs and mis-attributes L-turns.
++//   2. Wirelength uses a CENTER-anchored guiding point (midpoint of the two nodes' facing-edge
++//      midpoints, snapped to the shared border chosen by minimum gap -- rounding-robust for the
++//      .cfg's 3-decimal coordinates), summed as a manhattan CHAIN, weighted by nets.
++//      `guidePoint` instead uses the overlap-segment midpoint, which is ~6% off.
++// The solver-side port of this per-edge/center-anchored model is Task 3's scope; routing.cpp is
++// deliberately untouched here.
++
++struct CfgSolution {
++    double outline_w = 0.0;
++    double outline_h = 0.0;
++    std::map<std::string, Rect> blocks;   // BLOCK section, by name
++    std::vector<Channel> channels;        // CHANNEL section (name + rect), in file order
++    struct Path {
++        double nets = 0.0;
++        std::vector<std::pair<std::string, int>> steps;  // RAW (object, edge) tokens, not deduped
++    };
++    std::vector<Path> paths;              // PATH section
++};
++
++// Parse a .cfg (OUTLINE / BLOCK / CHANNEL / PATH sections). CRLF-safe (every token trimmed);
++// accepts the solver's own 3-decimal fixed floats. Values are doubles (never assumed integer).
++CfgSolution parseCfg(const std::string& path);
++
++struct OfficialBreakdown {
++    double outline_area = 0.0;
++    double wirelength = 0.0;
++    double overflow_nets = 0.0;
++    double capacity_nets = 0.0;
++    double rate = 0.0;               // overflow_nets / capacity_nets
++    double overflow_penalty = 0.0;   // 20*A*R + 1.5*A*max(0, R-0.05)
++    double ft_penalty = 0.0;         // 0 for the alpha package (no FT)
++    double checker_cost = 0.0;       // A + problem.alpha*WL + overflow_penalty
++    std::map<std::string, std::pair<double, double>> demand_by_channel;  // name -> (H, V)
++};
++
++// Score a parsed .cfg against the official cost model. Uses problem.alpha (CSV alpha) for the cost.
++OfficialBreakdown officialScoreCfg(const Problem& problem, const CfgSolution& cfg);
++
++}  // namespace efgr
+diff --git a/test/regression_cfg_score.cpp b/test/regression_cfg_score.cpp
+new file mode 100644
+index 0000000..733d241
+--- /dev/null
++++ b/test/regression_cfg_score.cpp
+@@ -0,0 +1,95 @@
++// Golden regression for the .cfg re-scorer, locked to the official alpha-test report.json files.
++// Golden values are read from each report.json at runtime with a minimal key scanner (the files are
++// fixed assets). NOTE on keys: the naive "overflow_total" first-match lands on a per-channel WARNING
++// value, not the global total -- we read "channel_overflow_total" (global, in the penalty block).
++#include <cassert>
++#include <cmath>
++#include <cstdio>
++#include <fstream>
++#include <sstream>
++#include <string>
++
++#include "../src/cfg_score.hpp"
++#include "../src/io.hpp"
++
++using namespace efgr;
++
++static double jsonNumber(const std::string& text, const std::string& key) {
++    auto pos = text.find(key);
++    assert(pos != std::string::npos);
++    pos = text.find(':', pos);
++    return std::stod(text.substr(pos + 1));
++}
++
++static std::string slurp(const std::string& p) {
++    std::ifstream f(p);
++    assert(f);
++    std::stringstream ss;
++    ss << f.rdbuf();
++    return ss.str();
++}
++
++int main() {
++    const char* base = "docs/official/alpha_test/cade0002";
++    const double kTolExact = 1e-6;    // relative
++    const double kTolCostTail = 5e-3; // case1 checker_cost: H1 residual is 0.31% of total cost
++    const double kTolPenTail = 1.1e-2; // case1 penalty tripwire: H1 residual is 0.95% of the penalty
++                                       // itself (NOT a fit -- guards against a WORSE tail form)
++
++    auto rel = [](double a, double b) { return std::abs(a - b) / std::max(1.0, std::abs(b)); };
++
++    for (int i = 0; i < 5; ++i) {
++        std::string dir = std::string(base) + "/case" + std::to_string(i);
++        Problem problem = parseProblem("test/2026 ICCAD_case.case" + std::to_string(i) + ".csv");
++        CfgSolution cfg = parseCfg(dir + "/output.cfg");
++        OfficialBreakdown got = officialScoreCfg(problem, cfg);
++
++        std::string rep = slurp(dir + "/report.json");
++        double wl = jsonNumber(rep, "\"total_wirelength\"");
++        double ovf = jsonNumber(rep, "\"channel_overflow_total\"");   // global (penalty block)
++        double cap = jsonNumber(rep, "\"channel_total_capacity\"");   // global (penalty block)
++        double pen = jsonNumber(rep, "\"overflow_ft_penalty\"");      // overflow_penalty (+ft=0)
++        double cost = jsonNumber(rep, "\"cost\"");
++
++        std::printf("case%d WL %.3f/%.3f ovf %.3f/%.3f cap %.3f/%.3f pen %.2f/%.2f cost %.2f/%.2f\n",
++                    i, got.wirelength, wl, got.overflow_nets, ovf, got.capacity_nets, cap,
++                    got.overflow_penalty, pen, got.checker_cost, cost);
++
++        // Wirelength, overflow, capacity: exact on all 5 (per-edge demand + center-anchored WL).
++        assert(rel(got.wirelength, wl) < kTolExact);
++        assert(rel(got.overflow_nets, ovf) < kTolExact);
++        assert(rel(got.capacity_nets, cap) < kTolExact);
++
++        if (i == 1) {
++            // case1 is the only R > threshold case; the penalty tail is short (H1 + gate). No
++            // per-channel / direction-split hypothesis (H1-H8) reproduced 8537517.705 exactly; the
++            // residual is 0.95% of the penalty == 0.31% of total cost. Gate the meaningful end value
++            // (cost) at 0.5%; the penalty carries a wider tripwire.
++            std::printf("case1 penalty delta = %.6f (%.4f%%) ; cost delta = %.6f (%.4f%%)\n",
++                        got.overflow_penalty - pen, 100.0 * rel(got.overflow_penalty, pen),
++                        got.checker_cost - cost, 100.0 * rel(got.checker_cost, cost));
++            assert(rel(got.overflow_penalty, pen) < kTolPenTail);
++            assert(rel(got.checker_cost, cost) < kTolCostTail);
++        } else {
++            // R < threshold: overflow_penalty = 20*A*R exactly -> cost exact.
++            assert(rel(got.overflow_penalty, pen) < kTolExact);
++            assert(rel(got.checker_cost, cost) < kTolExact);
++        }
++    }
++
++    // Fine-grained: case0 per-channel H / V demand (report.json channel.demand_{h,v}_by_channel).
++    {
++        Problem problem = parseProblem("test/2026 ICCAD_case.case0.csv");
++        CfgSolution cfg = parseCfg(std::string(base) + "/case0/output.cfg");
++        OfficialBreakdown got = officialScoreCfg(problem, cfg);
++        const std::pair<const char*, double> demand_h[] = {
++            {"CH4", 1000.0}, {"CH6", 1000.0}, {"CH8", 500.0}, {"CH10", 5800.0}, {"CH11", 4800.0}};
++        const std::pair<const char*, double> demand_v[] = {
++            {"CH8", 2300.0}, {"CH10", 1400.0}, {"CH11", 200.0}};
++        for (auto& [ch, want] : demand_h) assert(std::abs(got.demand_by_channel.at(ch).first - want) < 1e-6);
++        for (auto& [ch, want] : demand_v) assert(std::abs(got.demand_by_channel.at(ch).second - want) < 1e-6);
++    }
++
++    std::puts("cfg_score golden regressions passed");
++    return 0;
++}
+diff --git a/test/run_cfg_score_regressions.sh b/test/run_cfg_score_regressions.sh
+new file mode 100755
+index 0000000..001273c
+--- /dev/null
++++ b/test/run_cfg_score_regressions.sh
+@@ -0,0 +1,17 @@
++#!/usr/bin/env bash
++set -euo pipefail
++cd "$(dirname "$0")/.."
++
++make >/dev/null
++
++# cfg_score.cpp is self-contained, but parseProblem (io.cpp) pulls in the usual sibling set
++# (usedOutline lives in eval.cpp). Same proven set as run_20260618_regressions.sh, + cfg_score.cpp.
++g++ -std=c++17 -O2 -Wall -Wextra -pedantic \
++    -I. \
++    test/regression_cfg_score.cpp \
++    src/cfg_score.cpp src/eval.cpp src/io.cpp src/placement_engine.cpp src/respace.cpp \
++    src/routing.cpp src/search.cpp src/validate.cpp \
++    -o test/cfg_score_regression_bin
++
++./test/cfg_score_regression_bin
++echo "cfg_score regressions passed"
+diff --git a/tools/rescore.cpp b/tools/rescore.cpp
+new file mode 100644
+index 0000000..aa98d7f
+--- /dev/null
++++ b/tools/rescore.cpp
+@@ -0,0 +1,20 @@
++#include <cstdio>
++
++#include "../src/cfg_score.hpp"
++#include "../src/io.hpp"
++
++int main(int argc, char** argv) {
++    if (argc < 3) {
++        std::fprintf(stderr, "usage: rescore input.csv output.cfg\n");
++        return 2;
++    }
++    efgr::Problem problem = efgr::parseProblem(argv[1]);
++    efgr::CfgSolution cfg = efgr::parseCfg(argv[2]);
++    efgr::OfficialBreakdown b = efgr::officialScoreCfg(problem, cfg);
++    // Machine-readable single line; the benchmark script derives ranking cost from these fields.
++    std::printf("area=%.3f wl=%.3f overflow=%.3f capacity=%.3f rate=%.9f "
++                "overflow_penalty=%.3f checker_cost=%.3f alpha=%.3f\n",
++                b.outline_area, b.wirelength, b.overflow_nets, b.capacity_nets, b.rate,
++                b.overflow_penalty, b.checker_cost, problem.alpha);
++    return 0;
++}
