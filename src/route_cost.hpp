@@ -2,9 +2,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
+#include <utility>
 
 #include "ft.hpp"
 #include "model.hpp"
+#include "route_geometry.hpp"
 
 namespace efgr {
 
@@ -13,20 +16,17 @@ namespace efgr {
 // (future) cost-driven Dijkstra pass edge weights denominated in the SAME units the scorer charges
 // (eval.cpp:145-146), so the shortest path is the min-Delta-Cost path.
 
-// Named weights: ROUTER-SIDE marginal pricing only (channelMarginalCost/softFtMarginalCost below,
-// and the cost-driven Dijkstra's history surcharge / round-selection roundCost in routing.cpp).
-// These area-denominated per-channel proxies (routing.cpp's channel_overflow and
-// feedthrough_mismatch, both um^2) are what the router uses internally to find low-overflow /
-// low-FT-mismatch PATHS -- a local, per-edge marginal signal for search, not the scorer's cost.
-// C1 milestone: eval.cpp's exact tier no longer uses these weights at all. It charges a GLOBAL,
-// checker-faithful penalty instead -- kBetaLin/kBetaTail (below) applied to R =
-// channel_overflow_nets/channel_capacity_total (routing.cpp, RAW 25*h/25*w capacity), plus a flat
-// kBetaFt * feedthrough_mismatch term. The router-scorer "consistency invariant" this header used
-// to document is gone by design: the router's marginal proxy and the scorer's global penalty are
-// deliberately decoupled now, and kOverflowAreaWeight/kFtMismatchWeight are kept unchanged here
-// purely so the router's own search signal is undisturbed by the C1 scorer remap.
-constexpr double kOverflowAreaWeight = 1e6;  // per um^2 of channel overflow area (router-side proxy only)
-constexpr double kFtMismatchWeight = 1e6;    // per um^2 of FT required-area shortfall (router-side proxy only)
+// Named weights: HISTORICAL router-side marginal pricing (channelMarginalCost/softFtMarginalCost
+// below). B4 (b4-design.md §7.4) removed both from the router's own call sites in routing.cpp --
+// the Dijkstra edge pricing, history surcharge, and round-selection/comparison-gate key
+// (roundCostOfficial below) now price directly in the SCORER's own units (kBetaLin/kBetaTail/
+// kBetaFt applied to marginalOverflowNets/ftMismatchDelta, routing.cpp), replacing the 1e6-area-
+// denominated proxy these two weights drove. kOverflowAreaWeight/kFtMismatchWeight and the
+// functions that use them are KEPT, UNUSED BY THE ROUTER, solely so their existing T1 pure-function
+// unit tests (test/regression_p2_20260707.cpp) stay meaningful; no production code path reads them
+// anymore.
+constexpr double kOverflowAreaWeight = 1e6;  // per um^2 of channel overflow area (T1 test fixture only, no longer router-facing)
+constexpr double kFtMismatchWeight = 1e6;    // per um^2 of FT required-area shortfall (T1 test fixture only, no longer router-facing)
 
 // C1 milestone (official-checker cost replica): SCORER-side global overflow-rate penalty
 // coefficients + FT excess weight, matching the byte-verified official checker's cost_breakdown
@@ -44,6 +44,8 @@ constexpr double kBetaFt = 3.0;                   // flat per-um^2 FT required-a
 // denomination, routing.cpp:221-243): horizontal usage is capacitated by 25*h (missing capacity is
 // a height deficit spanning the channel's WIDTH); vertical usage is capacitated by 25*w (missing
 // capacity is a width deficit spanning the channel's HEIGHT).
+// B4 (b4-design.md §7.4): no longer called by the router (routing.cpp now prices overflow in NETS
+// via marginalOverflowNets below, at the official P_ovf=kBetaLin*A/C rate). Kept for its T1 tests.
 inline double channelOverflowArea(const Channel& ch, bool horizontal, double usage) {
     if (horizontal) {
         double hcap = 25.0 * std::max(1.0, ch.rect.h);
@@ -61,30 +63,107 @@ inline double channelOverflowArea(const Channel& ch, bool horizontal, double usa
 // direction, given current accumulated `usage` in that direction (design §3.2, plan Global
 // Constraint 3: MARGINAL pricing, i.e. penalty(usage+n) - penalty(usage), not total-demand area).
 // Slack channels (usage+n <= cap) are free. Deterministic, pure -- no mutation of `ch`.
+// B4 (b4-design.md §7.4): no longer called by the router. Kept for its T1 tests.
 inline double channelMarginalCost(const Channel& ch, bool horizontal, double usage, double n) {
     double before = channelOverflowArea(ch, horizontal, usage);
     double after = channelOverflowArea(ch, horizontal, usage + n);
     return kOverflowAreaWeight * (after - before);
 }
 
-// Marginal FT penalty (um^2 * weight) of pushing `n` more crossing nets through soft block `b`
+// B4 (design b4-design.md §3.2): exact marginal overflow in NETS (not area) of pushing `n` more
+// nets through channel `ch` in the given direction, given current per-direction `usage`. RAW cap
+// (25*ch.rect.h / 25*ch.rect.w, no max(1.0,.) clamp) matches the official checker's overflow_nets
+// accounting exactly -- the same RAW capacity computeOverflowAndMismatch (routing.cpp) and
+// cfg_score.cpp's officialScoreCfg both use for channel_overflow_nets/capacity_nets. This is the
+// EXACT derivative of the scorer's piecewise-linear `20*A*R` term across the cap kink: 0 while
+// usage+n <= cap (slack, free), n once usage >= cap (fully saturated, every pushed net is
+// marginal overflow), and the exact straddling partial otherwise. Multiplying by P_ovf =
+// kBetaLin*A/C (computed once per routeProblem call, routing.cpp) gives the official per-edge
+// marginal COST in the scorer's own units -- replacing channelMarginalCost's 1e6-area-denominated
+// proxy as the router's channel-hop pricing (design §3.1-3.2).
+inline double marginalOverflowNets(const Channel& ch, bool horizontal, double usage, double n) {
+    double cap = horizontal ? 25.0 * ch.rect.h : 25.0 * ch.rect.w;
+    return std::max(0.0, usage + n - cap) - std::max(0.0, usage - cap);
+}
+
+// B4 (design b4-design.md §4): per-node channel slack for the greedy bottleneck-chunking loop's
+// `pathSlack`, extracted as a pure function of the channel's two incident rects (predecessor,
+// successor) so it is directly unit-testable (design §8(iii)) -- routing.cpp's `pathSlack` lambda
+// calls this for every interior channel node, passing `rects[node_path[i-1]]` (predecessor),
+// `rr.channels[...]` (this channel), `rects[node_path[i+1]]` (successor). Counts EVERY charge this
+// node's two incident hops place on each axis (entry from the predecessor hop, exit to the successor
+// hop) -- not just the entry edge the pre-B4 code looked at. A straight pass-through (both hops on
+// the same axis) places TWO charges on that axis, so the residual capacity on that axis is HALVED
+// before it can be safely committed; an L-turn (hops on different axes) places one charge per axis,
+// so each axis's residual divides by 1 and the TIGHTER axis binds. RAW caps (25*ch.rect.h/w),
+// matching marginalOverflowNets/computeOverflowAndMismatch.
+inline double channelPathSlack(const Rect& pred_rect, const Channel& ch, const Rect& succ_rect) {
+    int entry_dir = edgeFromTo(pred_rect, ch.rect);  // charge from the p->k hop (k's entry edge)
+    int exit_dir = edgeFromTo(ch.rect, succ_rect);   // charge from the k->s hop (k's exit edge)
+    bool entry_h = (entry_dir == 1 || entry_dir == 3);
+    bool exit_h = (exit_dir == 1 || exit_dir == 3);
+    int h_charges = (entry_h ? 1 : 0) + (exit_h ? 1 : 0);
+    int v_charges = (entry_h ? 0 : 1) + (exit_h ? 0 : 1);
+    double res_h = (h_charges > 0) ? (25.0 * ch.rect.h - ch.horizontal_usage) / h_charges
+                                    : std::numeric_limits<double>::infinity();
+    double res_v = (v_charges > 0) ? (25.0 * ch.rect.w - ch.vertical_usage) / v_charges
+                                    : std::numeric_limits<double>::infinity();
+    return std::max(0.0, std::min(res_h, res_v));
+}
+
+// Marginal FT MISMATCH (um^2, unweighted) of pushing `n` more crossing nets through soft block `b`
 // whose accumulated crossing nets are `acc` and whose currently placed area is `placed_area`
-// (design §3.3, plan Global Constraint 4: incremental tier pricing). Uses ftRequiredArea/ftExtend/
-// ftTierRate (ft.hpp) so a tier jump (3000/6000/9000) is priced exactly, not linearly approximated.
-// Free while `placed_area` already covers the required area at `acc` and stays free until the
-// required area at `acc+n` exceeds it (slack absorption, design §3.3 subtlety 1).
-inline double softFtMarginalCost(const Block& b, double acc, double n, double placed_area) {
+// (design §3.3/§5, plan Global Constraint 4: incremental tier pricing). Uses ftRequiredArea/
+// ftExtend/ftTierRate (ft.hpp) so a tier jump (3000/6000/9000) is priced exactly, not linearly
+// approximated. Free while `placed_area` already covers the required area at `acc` and stays free
+// until the required area at `acc+n` exceeds it (slack absorption, design §3.3 subtlety 1). B4
+// (design §5): factored out of softFtMarginalCost below so the router can weight this same exact
+// delta by the OFFICIAL kBetaFt=3.0 (routing.cpp call site) instead of the legacy 1e6 proxy, without
+// duplicating the tier-math.
+inline double ftMismatchDelta(const Block& b, double acc, double n, double placed_area) {
     double base = b.ft_base_area > 0.0 ? b.ft_base_area : b.area;
     double required_before = ftRequiredArea(base, ftExtend(acc, ftTierRate(b, acc)));
     double required_after = ftRequiredArea(base, ftExtend(acc + n, ftTierRate(b, acc + n)));
     double mismatch_before = std::max(0.0, required_before - placed_area);
     double mismatch_after = std::max(0.0, required_after - placed_area);
-    return kFtMismatchWeight * (mismatch_after - mismatch_before);
+    return mismatch_after - mismatch_before;
+}
+
+// Marginal FT penalty (um^2 * weight) -- thin kFtMismatchWeight wrapper over ftMismatchDelta above.
+// B4 (b4-design.md §7.4): no longer called by the router (routing.cpp now weights ftMismatchDelta
+// by the official kBetaFt directly). Kept for its T1 tests.
+inline double softFtMarginalCost(const Block& b, double acc, double n, double placed_area) {
+    return kFtMismatchWeight * ftMismatchDelta(b, acc, n, placed_area);
 }
 
 // Wirelength term in Cost units for a hop of guiding-point distance `dist` carrying `n` nets
 // (design §3.1: alpha*n*manhattan monotone WL proxy, same units as the area terms above).
 inline double wireCost(double alpha, double n, double dist) { return alpha * n * dist; }
+
+// B4 (design b4-design.md §7.2): the negotiation round-selection / legacy-vs-cost-driven
+// comparison-gate key, re-denominated to the SAME units eval.cpp's exact scorer charges --
+// `(open_routes, alpha*WL + kBetaLin*A*R + kBetaTail*A*max(0,R-threshold) + kBetaFt*mismatch)`,
+// where `R = channel_overflow_nets/channel_capacity_total` (RAW-capacity nets rate, model.hpp
+// fields populated by computeOverflowAndMismatch) and `outline_area` is the SAME declared W*H
+// eval.cpp's routeAndScoreAt scores this routing at. Unlike the per-edge Dijkstra pricing (design
+// §3.4), the tail term IS included here -- R is known globally and cheaply once a full routing
+// exists, so the gate stays exactly scorer-faithful even in the (never-yet-seen) R>threshold
+// regime. Returned as (open_routes, value) so std::pair's lexicographic operator< sorts open
+// routes first, mirroring eval.cpp's open_routes*1e15 dominance.
+//
+// Algebraic identity (test-pinned, design §8(v)/R2): for a routing with open_routes==0 and zero
+// legality penalty (no overlap / out-of-outline), roundCostOfficial(rr, alpha, outline_area).second
+// == exactScore(...).value - outline_area EXACTLY -- this identity is what makes the gate
+// scorer-faithful (ranking candidates by this key ranks them exactly as the scorer would). A free
+// function (not a routeProblem-local lambda) specifically so this identity is unit-testable against
+// the SAME code routing.cpp's gate calls, not a reimplementation of the formula.
+inline std::pair<int, double> roundCostOfficial(const RoutingResult& rr, double alpha, double outline_area) {
+    double rate = (rr.channel_capacity_total > 0.0) ? rr.channel_overflow_nets / rr.channel_capacity_total : 0.0;
+    double overflow_penalty = kBetaLin * outline_area * rate +
+                               kBetaTail * outline_area * std::max(0.0, rate - kOverflowRateThreshold);
+    double value = alpha * rr.total_wirelength + overflow_penalty + kBetaFt * rr.feedthrough_mismatch;
+    return std::pair<int, double>(rr.open_routes, value);
+}
 
 // P2 Task 3 (design p2-design.md §5.1-5.4; plan Global Constraint 8): named constants for the
 // greedy split-at-bottleneck bundle-chunking loop (routing.cpp, cost_driven=true path only -- the

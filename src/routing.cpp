@@ -117,6 +117,20 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
     std::vector<std::array<double, 2>> history_channel(n_channels, std::array<double, 2>{0.0, 0.0});
     std::vector<double> history_ft(n_blocks, 0.0);
 
+    // B4 (design b4-design.md §3.1/§7.2): official per-overflow-net price, fixed for this whole
+    // routeProblem call. `outline_area` is the scorer's own A (eval.cpp's routeAndScoreAt scopes
+    // problem.outline_w/h to exactly the outline this call routes at, before calling routeProblem --
+    // so this IS that same declared outline). `raw_capacity_total` is C = Sum_ch(25*h + 25*w), RAW
+    // (no max(1.0,.) clamp), over the channels extracted once above -- both fixed for the whole
+    // pass, matching computeOverflowAndMismatch's own channel_capacity_total accumulation exactly
+    // (same channel list, same RAW formula), just computed up front since neither depends on usage.
+    // `p_ovf` is P_ovf = kBetaLin*A/C, the exact derivative of the scorer's linear overflow-rate term
+    // d(20*A*R)/d(overflow_nets) -- a single scorer-derived rate, not a per-channel area proxy.
+    const double outline_area = problem.outline_w * problem.outline_h;
+    double raw_capacity_total = 0.0;
+    for (const auto& ch : result.channels) raw_capacity_total += 25.0 * ch.rect.h + 25.0 * ch.rect.w;
+    const double p_ovf = (raw_capacity_total > 0.0) ? kBetaLin * outline_area / raw_capacity_total : 0.0;
+
     // P2 Task 3 (design p2-design.md §5.1-5.4; plan Global Constraint 8): `routeChunk` is split into
     // a pathfinding phase (`findRoutePath`, priced Dijkstra only, no accrual/mutation of `result`
     // except the open-route bookkeeping) and a commit phase (`commitRoutePath`, given an already-
@@ -204,19 +218,27 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
                         cost = wireCost(problem.alpha, nets, dist_uv);
                         if (v < n_blocks && isSoft(problem.blocks[v].type) && v != bundle.target) {
                             // Soft-block feedthrough intermediate: price the marginal FT tier delta
-                            // (design §3.3) using nets already accumulated through this block THIS
+                            // (design §3.3/§5) using nets already accumulated through this block THIS
                             // routing call so far (call-local state, GC6 purity/determinism -- no
-                            // static/global) plus this chunk's n, against the block's placed area.
+                            // static/global) plus this chunk's n, against the block's placed area. B4
+                            // (design §5): weight the exact mismatch delta by the OFFICIAL kBetaFt=3.0
+                            // (the same weight eval.cpp's exact scorer charges feedthrough_mismatch
+                            // at) instead of the legacy 1e6 area-denominated proxy -- `3.0*Delta
+                            // mismatch` is a provable upper bound on the true post-finalize cost
+                            // (design §5: it equals the actual charge whenever paydown fails, the
+                            // common tight-packing case).
                             double acc = rr.soft_feedthrough_nets[v];
                             double placed_area = round2(placement.rects[v].w * placement.rects[v].h);
-                            cost += softFtMarginalCost(problem.blocks[v], acc, nets, placed_area);
+                            cost += kBetaFt * ftMismatchDelta(problem.blocks[v], acc, nets, placed_area);
                             // P2 Task 4 (design §4.2): congested-history surcharge, added on top of
                             // the marginal FT cost above. Zero at round 0 (history_ft is all-zero
                             // until the FIRST post-round bump), so this is a strict no-op until a
-                            // later round's history has accumulated.
-                            cost += kFtMismatchWeight * history_ft[v] * nets;
+                            // later round's history has accumulated. B4 (design §7.3): re-scaled from
+                            // kFtMismatchWeight (1e6) to kBetaFt so the surcharge stays the same order
+                            // as the re-denominated base cost above (was ~5000x too large otherwise).
+                            cost += kBetaFt * history_ft[v] * nets;
                         }
-                        if (v >= n_blocks) {
+                        if (u >= n_blocks || v >= n_blocks) {
                             // Channel hop: direction-classify from rect adjacency (edgeFromTo), NOT
                             // from guiding points (those are only known after the path is committed,
                             // routing.cpp guides loop below). edgeFromTo(u,v) in {1,3} means u,v share
@@ -227,27 +249,40 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
                             // classification (not merely a monotone approximation), because both read
                             // the same rect-touch geometry; an L-shaped hop that changes both x and y
                             // cannot occur for a single rect-to-rect touch (positiveTouch requires a
-                            // shared edge on exactly one axis), so at most one of the two components
-                            // is ever priced per hop at COMMIT time here. Pricing itself, however, uses
-                            // only this single entry-edge axis as an admissible one-sided proxy: a path
-                            // that enters a channel on one axis (priced here) and exits it on the
-                            // orthogonal axis accrues BOTH horizontal_usage and vertical_usage at commit
-                            // (the dual `if`s below, routing.cpp accrual loop), while only the entry
-                            // axis was charged during the Dijkstra search. This is a deliberate,
-                            // deferred gap (design §3.1/R2: the search cost is a monotone proxy, not an
-                            // exact accounting of the committed accrual) -- not a claim that no corner
-                            // case exists. To be measured at T6/T7 once the full router is wired in.
-                            const auto& ch = rr.channels[v - n_blocks];
+                            // shared edge on exactly one axis), so exactly one axis is charged per side
+                            // below. B4 (design §3.3): BOTH sides of the hop are now priced, closing
+                            // the prior entry-axis-only gap -- `u`'s EXIT edge (when u is itself a
+                            // channel) AND `v`'s ENTRY edge (when v is), each on the SAME axis
+                            // classification (axis(u,v) == axis(v,u): a shared border has one
+                            // orientation, so `horizontal` below applies to whichever channel(s) are
+                            // present, computed once regardless of which side(s) are channels). This
+                            // matches, edge-for-edge, the two charges `accumulatePathUsage`
+                            // (route_geometry.hpp) accrues at commit time for this same hop -- the
+                            // search now sees exactly the demand its own commit will accrue (design
+                            // §2.2's straight-pass-through-halves-slack fix, §4, pairs with this).
                             int dir = edgeFromTo(rects[u], rects[v]);
                             bool horizontal = (dir == 1 || dir == 3);
-                            double usage = horizontal ? ch.horizontal_usage : ch.vertical_usage;
-                            cost += channelMarginalCost(ch, horizontal, usage, nets);
-                            // P2 Task 4 (design §4.2/§4.3): congested-history surcharge, keyed per
-                            // channel per direction on the SAME entry-edge axis classification the
-                            // marginal-cost pricing above just used. Zero at round 0. Index [0] =
-                            // horizontal, [1] = vertical (matches the array's doc comment above).
-                            double hist = horizontal ? history_channel[v - n_blocks][0] : history_channel[v - n_blocks][1];
-                            cost += kOverflowAreaWeight * hist * nets;
+                            if (u >= n_blocks) {
+                                const auto& ch_u = rr.channels[u - n_blocks];
+                                double usage = horizontal ? ch_u.horizontal_usage : ch_u.vertical_usage;
+                                cost += p_ovf * marginalOverflowNets(ch_u, horizontal, usage, nets);
+                                // P2 Task 4 (design §4.2/§4.3): congested-history surcharge, keyed per
+                                // channel per direction on the SAME axis classification the marginal-
+                                // cost pricing above just used. Zero at round 0. Index [0] =
+                                // horizontal, [1] = vertical (matches the array's doc comment above).
+                                // B4 (design §7.3): re-scaled from kOverflowAreaWeight to p_ovf so the
+                                // surcharge stays the same order as the re-denominated base cost (was
+                                // ~5000x too large otherwise).
+                                double hist = horizontal ? history_channel[u - n_blocks][0] : history_channel[u - n_blocks][1];
+                                cost += p_ovf * hist * nets;
+                            }
+                            if (v >= n_blocks) {
+                                const auto& ch_v = rr.channels[v - n_blocks];
+                                double usage = horizontal ? ch_v.horizontal_usage : ch_v.vertical_usage;
+                                cost += p_ovf * marginalOverflowNets(ch_v, horizontal, usage, nets);
+                                double hist = horizontal ? history_channel[v - n_blocks][0] : history_channel[v - n_blocks][1];
+                                cost += p_ovf * hist * nets;
+                            }
                         }
                     } else {
                         cost = manhattan(rects[u].cx(), rects[u].cy(), rects[v].cx(), rects[v].cy());
@@ -341,11 +376,21 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
     // §5.2 step 2): the minimum, over channel/soft-FT intermediates on the path, of "how many more
     // nets fit before this resource's next boundary" (cap for channels, next FT tier threshold for
     // soft blocks). Returns a value >= 0 (channels/soft blocks already at or past their boundary
-    // contribute 0, correctly signaling "no slack left, saturated"). Direction classification reuses
-    // the EXACT entry-edge axis the pricing loop above uses (edgeFromTo(rects[u],rects[v]) in {1,3} =
-    // horizontal, {2,4} = vertical) -- not the post-hoc guiding-point dx/dy the commit accrual uses,
-    // since slack must be computed from the SAME axis the Dijkstra pricing charged (documented gap
-    // between entry-axis pricing and dual-axis commit accrual, see the channel-hop comment above).
+    // contribute 0, correctly signaling "no slack left, saturated").
+    //
+    // B4 (design b4-design.md §4): channel slack now counts EVERY charge this node's two incident
+    // hops place on each axis, not just the entry-edge charge. For interior channel node `node` with
+    // predecessor `u = node_path[i-1]` and successor `s = node_path[i+1]` (both always exist for an
+    // interior node; a channel is never charged only once -- the block/channel->node hop supplies the
+    // entry, the node->(next) hop supplies the exit): a straight pass-through (both hops on the same
+    // axis) places TWO charges on that axis, so its residual capacity must be halved before it can be
+    // safely committed (`cap - usage` divided by the charge count on that axis) -- committing `n <=
+    // slack` then accrues `2n <= cap` at commit (route_geometry.hpp's accumulatePathUsage), closing
+    // the overshoot the old entry-axis-only slack allowed (design §2.2). An L-turn (entry/exit on
+    // different axes) places one charge per axis, so each axis's residual is divided by 1 (unchanged
+    // from before) and the TIGHTER axis binds -- also a fix vs the old code, which only ever looked at
+    // the entry axis and could miss a saturated exit axis entirely. RAW caps (25*ch.rect.h/w, no
+    // max(1.0,.) clamp), matching marginalOverflowNets/computeOverflowAndMismatch.
     auto pathSlack = [&](RoutingResult& rr, const std::vector<int>& node_path) {
         double slack = std::numeric_limits<double>::infinity();
         for (std::size_t i = 1; i + 1 < node_path.size(); ++i) {
@@ -365,12 +410,10 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
                 }
                 slack = std::min(slack, node_slack);
             } else if (node >= n_blocks) {
+                int s = node_path[i + 1];
                 const auto& ch = rr.channels[node - n_blocks];
-                int dir = edgeFromTo(rects[u], rects[node]);
-                bool horizontal = (dir == 1 || dir == 3);
-                double usage = horizontal ? ch.horizontal_usage : ch.vertical_usage;
-                double cap = horizontal ? 25.0 * std::max(1.0, ch.rect.h) : 25.0 * std::max(1.0, ch.rect.w);
-                slack = std::min(slack, std::max(0.0, cap - usage));
+                double node_slack = channelPathSlack(rects[u], ch, rects[s]);
+                slack = std::min(slack, node_slack);
             }
         }
         return slack;
@@ -474,13 +517,15 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
 
     bool have_best = false;
     RoutingResult best;
-    // Lexicographic round cost (design §4.1/requirement 5): (open_routes, then alpha*WL + area terms).
-    // Returned as a pair so std::pair's lexicographic operator< does the comparison directly.
-    auto roundCost = [&](const RoutingResult& rr) {
-        double area_cost = problem.alpha * rr.total_wirelength + kOverflowAreaWeight * rr.channel_overflow +
-                            kFtMismatchWeight * rr.feedthrough_mismatch;
-        return std::pair<int, double>(rr.open_routes, area_cost);
-    };
+    // Lexicographic round cost (design §4.1/requirement 5; B4 design §7.2 re-denomination): (open_routes,
+    // then the SAME units eval.cpp's exact scorer charges -- alpha*WL + kBetaLin*A*R +
+    // kBetaTail*A*max(0,R-threshold) + kBetaFt*mismatch, via the shared roundCostOfficial helper
+    // (route_cost.hpp). This is the load-bearing re-denomination (design §7.2): the old
+    // kOverflowAreaWeight/kFtMismatchWeight(1e6-area) key could rank a routing the golden re-scorer
+    // would score WORSE than legacy; roundCostOfficial ranks exactly as the scorer ranks, so the gate's
+    // "regression is impossible" guarantee (used for both round selection below and the legacy-vs-
+    // cost-driven gate further down) is now actually scorer-faithful.
+    auto roundCost = [&](const RoutingResult& rr) { return roundCostOfficial(rr, problem.alpha, outline_area); };
 
     for (int round = 0; round < kNegotiationRounds; ++round) {
         // Decay at the START of each round (round >= 1), design §4.2: standard PathFinder hygiene so
@@ -631,7 +676,8 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
     // legacy run rather than double-running it; `result` already carries the channel geometry extracted
     // at the top of this call and has not been mutated since, so it is the correct receptacle) -- and
     // pick whichever of {best, result} wins the SAME lexicographic key already used for round selection
-    // above: (open_routes, then alpha*WL + kOverflowAreaWeight*overflow + kFtMismatchWeight*mismatch).
+    // above: (open_routes, then roundCostOfficial's alpha*WL + kBetaLin*A*R + kBetaTail*A*max(0,R-
+    // threshold) + kBetaFt*mismatch -- B4 design §7.2's scorer-faithful re-denomination).
     // `findRoutePath`'s reachability gates are identical between cost_driven's single unified pass
     // (allow_soft always true) and legacy pass 1 (allow_soft true), so open_routes can never be LOWER
     // for legacy than for a genuinely-unroutable cost_driven bundle -- but the FULL key (not just the
