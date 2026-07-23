@@ -4,6 +4,8 @@
 // baseline). See .superpowers/sdd/b1-brief.md, .superpowers/sdd/b1-brief-amended.md, and
 // .superpowers/sdd/b1-report.md for the full narrative (the byte-identity premise was falsified for
 // cases 2/3/4, which is why the three-leg design and this file's upper-bound test exist).
+// B1.1 (Codex adversarial review, 2026-07-24): also pins placementsBitwiseEqual's stricter-than-key
+// semantics (the bug class the review found in the bstar_b skip predicate).
 #include <cassert>
 #include <algorithm>
 #include <iostream>
@@ -145,6 +147,37 @@ void testWorseValueLowerMismatchRejectedAcceptFeedthroughPaydown() {
     std::cout << "testWorseValueLowerMismatchRejectedAcceptFeedthroughPaydown ok\n";
 }
 
+// B1.1 (Codex adversarial review, 2026-07-24): pins the bug class the review found. placementKey
+// rounds each coordinate to 3 decimals (llround(x*1000)), but BStarEngine::seedFromPlacement
+// (placement_engine.cpp:622) sorts nodes by comparing RAW x (kEps=1e-6 tie-band) then y -- a 1e-4
+// difference is far below placementKey's rounding granularity (so the keys compare equal) but far
+// above seedFromPlacement's 1e-6 sort threshold (so it can genuinely reorder the tree). The old
+// (placementKey-based) bstar_b skip predicate would have wrongly treated such a pair as "the same
+// seed", skipping the leg and silently failing to reproduce the pre-B1 bstar trajectory.
+void testPlacementsBitwiseEqualDetectsSubKeyDifference() {
+    Placement a;
+    a.rects = {Rect{100.0, 0.0, 50.0, 50.0}, Rect{200.0, 100.0, 30.0, 40.0}};
+    a.outline_w = 500.0;
+    a.outline_h = 500.0;
+    Placement b = a;
+    b.rects[0].x = 100.0 + 1e-4;  // rounds to the SAME placementKey; sorts differently in bstar
+
+    assert(placementKey(a) == placementKey(b));   // the pinned bug class: keys agree...
+    assert(!placementsBitwiseEqual(a, b));         // ...but bitwise equality correctly disagrees
+    std::cout << "testPlacementsBitwiseEqualDetectsSubKeyDifference ok\n";
+}
+
+void testPlacementsBitwiseEqualIdentical() {
+    Placement a;
+    a.rects = {Rect{100.0, 0.0, 50.0, 50.0}, Rect{200.0, 100.0, 30.0, 40.0}};
+    a.outline_w = 500.0;
+    a.outline_h = 500.0;
+    Placement b = a;
+    assert(placementKey(a) == placementKey(b));
+    assert(placementsBitwiseEqual(a, b));
+    std::cout << "testPlacementsBitwiseEqualIdentical ok\n";
+}
+
 // B1 amendment item 5 (hybrid-consistency): hybrid's final result must never be worse (by value)
 // than the SP leg it was folded from -- paydownBetter's fold in runHybridPlacementSearch starts from
 // sp_result and only replaces it with a strictly-better (or exact-tie) candidate. Full 3-leg
@@ -234,6 +267,8 @@ int main() {
     testExactValueTieLowerMismatchWinsAcceptFeedthroughPaydown();
     testWorseValueLowerMismatchRejectedPaydownBetter();
     testWorseValueLowerMismatchRejectedAcceptFeedthroughPaydown();
+    testPlacementsBitwiseEqualDetectsSubKeyDifference();
+    testPlacementsBitwiseEqualIdentical();
     testHybridFinalNeverWorseThanSpLegCase1LowIters();
     testHybridDefaultFlagsNeverExceedPreB1Baseline();
     std::cout << "b1 regressions passed\n";

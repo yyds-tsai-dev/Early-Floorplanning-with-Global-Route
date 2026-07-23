@@ -67,6 +67,16 @@ OutlineSweepResult outlineSweep(const Problem& problem, const Placement& base, c
                                 bool include_pads = true);
 
 std::string placementKey(const Placement& placement);
+// B1.1 (Codex adversarial review, 2026-07-24, .superpowers/sdd/b1-report.md "Post-review
+// amendment"): exact (bitwise ==) placement equality -- same rect count, every rect's x/y/w/h and
+// the outline_w/h compare == with no tolerance. Deliberately stricter than `placementKey` equality
+// (which rounds to 3 decimals via llround(x*1000)): BStarEngine::seedFromPlacement
+// (placement_engine.cpp:622) sorts by RAW coordinates with a kEps=1e-6 tie-band, so two placements
+// that round to the SAME placementKey can still differ enough (e.g. 1e-4) to sort differently and
+// produce a different seed state. Bitwise equality of the seed placement, combined with an
+// identically-constructed fresh mt19937(seed), provably implies identical seedFromPlacement output
+// -- see runHybridPlacementSearch's bstar_b skip, the one caller this exists for.
+bool placementsBitwiseEqual(const Placement& a, const Placement& b);
 // Pushes non-edge blocks toward the origin against problem.outline_w/h (MAX), reclaiming slack
 // left by e.g. a feedthrough-inflation re-decode. Resets the returned placement's stamped declared
 // outline (outline_w/h = 0) since compaction moves core rects and invalidates any prior

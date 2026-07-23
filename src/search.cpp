@@ -107,6 +107,16 @@ std::string placementKey(const Placement& placement) {
     return out.str();
 }
 
+bool placementsBitwiseEqual(const Placement& a, const Placement& b) {
+    if (a.rects.size() != b.rects.size()) return false;
+    for (std::size_t i = 0; i < a.rects.size(); ++i) {
+        const Rect& ra = a.rects[i];
+        const Rect& rb = b.rects[i];
+        if (ra.x != rb.x || ra.y != rb.y || ra.w != rb.w || ra.h != rb.h) return false;
+    }
+    return a.outline_w == b.outline_w && a.outline_h == b.outline_h;
+}
+
 bool paydownBetter(const RoutingResult& a, double a_value, const RoutingResult& b, double b_value) {
     if (a.open_routes != b.open_routes) return a.open_routes < b.open_routes;
     if (a_value < b_value - kEps) return true;
@@ -650,8 +660,15 @@ SearchResult runHybridPlacementSearch(const Problem& problem, const SearchOption
     // directly). Skipped when the legacy and value-best sp placements coincide (finalize either never
     // engaged, or converged to the same point) -- rerunning bstar from an identical seed would only
     // reproduce bstar_a's result at double the cost.
+    // B1.1 (Codex adversarial review, 2026-07-24): the skip predicate must use BITWISE placement
+    // equality, not placementKey equality. placementKey rounds to 3 decimals; seedFromPlacement's
+    // BStarEngine sort (placement_engine.cpp:622) compares raw coordinates at kEps=1e-6 -- a pair of
+    // placements that round to the same key can still differ by e.g. 1e-4 and sort differently,
+    // which would wrongly skip bstar_b (breaking "reproduces the OLD bstar trajectory exactly").
+    // Bitwise equality + the identically-constructed fresh rng below together provably guarantee
+    // bstar_b would reproduce bstar_a byte-for-byte, so skipping is safe only at that stricter bar.
     const bool legacy_diverged =
-        placementKey(sp_result.legacy_paydown_placement) != placementKey(sp_result.best_placement);
+        !placementsBitwiseEqual(sp_result.legacy_paydown_placement, sp_result.best_placement);
     SearchResult bstar_b_result;
     if (legacy_diverged) {
         std::mt19937 rng_b(bstar_options.seed);

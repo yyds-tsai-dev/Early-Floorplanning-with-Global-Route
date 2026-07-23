@@ -209,3 +209,65 @@ One commit, staged exactly the files above (never `git add -A`); message:
 3. `bstar_a`/`bstar_b` reuse a single `bstar` `PlacementEngine` instance sequentially (all its methods
    are `const`, confirmed no shared mutable state) rather than two separate instances — matches the
    amendment's own pseudocode literally.
+
+## Post-review amendment (Codex adversarial, 2026-07-24)
+
+**Verdict: needs-fixes.** The WSL-side Codex adversarial review of the B1 commit (`1326819`) returned:
+
+- **[Critical]** the amended brief's own sweep acceptance criterion — "no budget cell may exceed its
+  budget-0 baseline by more than 1%" — **failed in 4 cells** (bstar case0 @15/@45, hybrid case2 @15,
+  hybrid case3 @15/@45), but the task was closed as DONE with no guard recorded against that failure.
+  **Disposition**: already reported honestly in this file's sweep section and Concerns #1 above (not a
+  silent miss), but the review is right that it was never *formally* elevated to an acceptance
+  criterion of its own. Corrected here: **the budget-enable acceptance gate (all sweep cells ≤ +1% vs
+  their own budget-0 baseline) is FORMALLY RECORDED AS NOT PASSED.** It is carried forward as the
+  acceptance criterion for B5 (abutment credit / move portfolio) and B6 (Kendall-τ cheap-vs-exact
+  harness) — the research doc's own attribution for the remaining elite-pass cheap-score mis-ranking
+  mechanism. **Budget stays defaulted OFF** (`main.cpp`'s `kDefaultTimeBudgetSec = 0.0`, unchanged by
+  B1/B1.1) until that gate passes; B1/B1.1 make no default-changing claim and none is made now.
+- **[Important]** the `bstar_b` skip predicate compared `placementKey` strings (rounds every
+  coordinate to 3 decimals, `llround(x*1000)`), but `BStarEngine::seedFromPlacement`
+  (`placement_engine.cpp:622`) sorts nodes by comparing RAW `x` (then `y`) with a `kEps=1e-6`
+  tie-band. A pair of placements differing by e.g. `1e-4` rounds to the *same* `placementKey` (below
+  its rounding granularity) but sorts *differently* under `seedFromPlacement`'s 1e-6 threshold — such
+  an input would have wrongly been treated as "the legacy and value-best sp placements coincide" and
+  skipped `bstar_b`, silently breaking "reproduces the OLD bstar trajectory exactly" (the property
+  THE GUARANTEE's proof for that leg depends on). **Fixed**: added `placementsBitwiseEqual` (exact
+  `==` on every rect's x/y/w/h plus outline_w/h, no rounding at all — `src/search.hpp`, declared next
+  to `placementKey`; defined `src/search.cpp` next to `placementKey`'s own definition), and the skip
+  predicate in `runHybridPlacementSearch` now uses `!placementsBitwiseEqual(legacy_paydown_placement,
+  best_placement)` instead of the `placementKey` inequality. Bitwise equality of the seed placement,
+  combined with the identically-constructed fresh `mt19937(bstar_options.seed)` already used for both
+  legs, provably implies identical `seedFromPlacement` output, so the stricter skip remains exactly as
+  safe as intended while closing the rounding gap. **Verified no behavior change on the 5 real cases**:
+  bitwise-equal implies key-equal (so every case the old predicate found "diverged" still diverges
+  under the new one), and the 2 early-return cases (0/1) already copy `legacy_paydown_placement =
+  best_placement` via direct field assignment inside `finalizeFeedthrough` — genuinely bitwise
+  identical there, not just key-coincidentally so. Confirmed empirically: all 5 default-flag cases'
+  `score.value` (case0 5,389,935 / case1 14,031,473.2008 / case2 65,650,121.9753 / case3
+  38,049,010.3264 / case4 91,952,579.009 — case0's B3-driven value differs from B1's own table only
+  because B3 landed in between, not because of this fix) convert to the exact same `checker_cost` row
+  `b3-report.md` already recorded for the current HEAD, both before and after this fix.
+- **[Minor]** three-leg semantics lacked introspection tests — addressed by the two new
+  `placementsBitwiseEqual` unit tests below (which exercise the exact bug class), on top of the
+  existing SP-leg introspection and 5-case upper-bound pin from the original B1 delivery.
+
+### New tests (`test/regression_b1_20260723.cpp`)
+
+- `testPlacementsBitwiseEqualDetectsSubKeyDifference` — two placements differing by `1e-4` in one
+  rect's `x`: asserts `placementKey` strings ARE equal (pins the rounding coincidence) AND
+  `placementsBitwiseEqual` is `false` (pins the fix).
+- `testPlacementsBitwiseEqualIdentical` — identical placements → `true`.
+
+### Files touched (B1.1, on top of B1)
+
+- `src/search.cpp` — `placementsBitwiseEqual` definition (next to `placementKey`); `bstar_b` skip
+  predicate in `runHybridPlacementSearch` switched to it.
+- `src/search.hpp` — `placementsBitwiseEqual` declaration + doc comment (next to `placementKey`).
+- `test/regression_b1_20260723.cpp` — 2 new tests + `main()` wiring.
+- `.superpowers/sdd/b1-report.md` (this section), `.superpowers/sdd/progress.md` (ledger line).
+
+### Commit (B1.1)
+
+One commit, staged exactly the files above; message:
+`fix(search): bitwise seed-equality for bstar_b skip; budget gate carried to B5/B6 (B1.1)`.
