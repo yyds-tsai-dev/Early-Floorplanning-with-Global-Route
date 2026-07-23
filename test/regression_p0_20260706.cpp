@@ -180,6 +180,13 @@ void testFeedthroughFinalizeWritesBackArea() {
     std::cout << "testFeedthroughFinalizeWritesBackArea ok\n";
 }
 
+// B1 amendment (2026-07-24, docs/research/2026-07-23-research-refresh-and-strategy.md §2 +
+// .superpowers/sdd/b1-brief-amended.md): rewritten from the pre-B1 objective (any strict mismatch
+// decrease commits unconditionally, regardless of value -- the P0-era defect this test used to pin)
+// to the value-gated rule. Since beta T3, exactScore already prices feedthrough mismatch into
+// score.value at the official kBetaFt rate, so a lower-value candidate is strictly better on the
+// checker's own terms and commits regardless of mismatch; mismatch is only a tiebreak at an exact
+// value tie. Same numeric fixtures as before, assertions flipped where the rule changed.
 void testAcceptFeedthroughPaydownRule() {
     RoutingResult best;
     best.feedthrough_mismatch = 5000.0;
@@ -187,44 +194,53 @@ void testAcceptFeedthroughPaydownRule() {
     RoutingResult cand;
     cand.open_routes = 0;
 
-    // The P0 defect: a candidate that pays mismatch down to 0 must commit even when
-    // its total score is far worse (re-decode spilled overflow/outline penalties).
+    // PINNED REGRESSION: a candidate that pays mismatch down to 0 must NOT commit when its total
+    // value is far worse (this was the pre-B1 defect; B1 fixes it).
     cand.feedthrough_mismatch = 0.0;
-    assert(acceptFeedthroughPaydown(cand, 2.19e11, best, 6.39e10));
-    // Partial paydown commits too (old guard required mismatch == 0).
+    assert(!acceptFeedthroughPaydown(cand, 2.19e11, best, 6.39e10));
+    // Partial paydown at a far-worse value must not commit either (was: committed pre-B1).
     cand.feedthrough_mismatch = 4000.0;
-    assert(acceptFeedthroughPaydown(cand, 1e12, best, 6.39e10));
-    // Equal mismatch: only a lower total score commits (the compact/reclaim path).
+    assert(!acceptFeedthroughPaydown(cand, 1e12, best, 6.39e10));
+    // Equal mismatch: a genuinely lower total value still commits (unchanged from pre-B1 -- both
+    // the old and new rule agree here, since the candidate's value strictly improves).
     cand.feedthrough_mismatch = 5000.0;
     assert(acceptFeedthroughPaydown(cand, 6.0e10, best, 6.39e10));
     assert(!acceptFeedthroughPaydown(cand, 7.0e10, best, 6.39e10));
-    // Higher mismatch never commits, no matter how good the total looks.
+    // Value dominates (the new rule's core property, the exact inverse of the pre-B1 assertion
+    // here): a candidate with WORSE (higher) mismatch but a hugely better value now commits.
     cand.feedthrough_mismatch = 6000.0;
-    assert(!acceptFeedthroughPaydown(cand, 1.0, best, 6.39e10));
-    // Open routes never commit.
+    assert(acceptFeedthroughPaydown(cand, 1.0, best, 6.39e10));
+    // Open routes never commit, no matter how good the total looks (unchanged: the legality gate
+    // is untouched by B1).
     cand.feedthrough_mismatch = 0.0;
     cand.open_routes = 1;
     assert(!acceptFeedthroughPaydown(cand, 1.0, best, 6.39e10));
     std::cout << "testAcceptFeedthroughPaydownRule ok\n";
 }
 
+// B1 amendment (2026-07-24, docs/research/2026-07-23-research-refresh-and-strategy.md §2 +
+// .superpowers/sdd/b1-brief-amended.md): rewritten from the pre-B1 objective (the mismatch-0 leg
+// always wins hybrid arbitration regardless of value -- the defect this test used to pin) to the
+// value-gated rule. Same numeric fixtures as before, assertions flipped where the rule changed.
 void testPaydownBetterLegSelection() {
     RoutingResult a;
     RoutingResult b;
     a.open_routes = 0;
     b.open_routes = 0;
-    // The mismatch-0 leg must win hybrid arbitration even at a much worse total,
-    // otherwise leg selection resurrects the finalizeFeedthrough commit defect.
+    // PINNED REGRESSION: the mismatch-0 leg must NOT win hybrid arbitration at a much worse total --
+    // the exact inverse of the pre-B1 assertion here.
     a.feedthrough_mismatch = 0.0;
     b.feedthrough_mismatch = 5000.0;
-    assert(paydownBetter(a, 2.0e11, b, 4.0e10));
-    assert(!paydownBetter(b, 4.0e10, a, 2.0e11));
-    // Equal mismatch: lower total wins (and exact ties keep the incumbent).
+    assert(!paydownBetter(a, 2.0e11, b, 4.0e10));
+    assert(paydownBetter(b, 4.0e10, a, 2.0e11));
+    // Equal mismatch: lower total wins, and exact ties keep the incumbent (unchanged from pre-B1 --
+    // both rules agree here).
     b.feedthrough_mismatch = 0.0;
     assert(paydownBetter(a, 1.0e10, b, 2.0e10));
     assert(!paydownBetter(a, 2.0e10, b, 1.0e10));
     assert(!paydownBetter(a, 1.0e10, b, 1.0e10));
-    // Open routes are a hard fail and dominate any deduction.
+    // Open routes are a hard fail and dominate any value/mismatch comparison (unchanged: the
+    // legality gate is untouched by B1).
     a.open_routes = 1;
     b.feedthrough_mismatch = 1.0e9;
     assert(!paydownBetter(a, 1.0, b, 1.0e15));

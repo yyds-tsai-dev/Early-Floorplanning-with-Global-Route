@@ -109,16 +109,19 @@ std::string placementKey(const Placement& placement) {
 
 bool paydownBetter(const RoutingResult& a, double a_value, const RoutingResult& b, double b_value) {
     if (a.open_routes != b.open_routes) return a.open_routes < b.open_routes;
-    if (a.feedthrough_mismatch < b.feedthrough_mismatch - kEps) return true;
-    if (b.feedthrough_mismatch < a.feedthrough_mismatch - kEps) return false;
-    return a_value < b_value;
+    if (a_value < b_value - kEps) return true;
+    if (b_value < a_value - kEps) return false;
+    // Effective value tie: prefer lower mismatch as hidden-case insurance (the official FT
+    // deduction has never been exercised on a nonzero case; costs nothing at a tie).
+    return a.feedthrough_mismatch < b.feedthrough_mismatch - kEps;
 }
 
 bool acceptFeedthroughPaydown(const RoutingResult& candidate, double candidate_value,
                               const RoutingResult& best, double best_value) {
     if (candidate.open_routes != 0) return false;
-    if (candidate.feedthrough_mismatch < best.feedthrough_mismatch - kEps) return true;
-    return candidate.feedthrough_mismatch <= best.feedthrough_mismatch + kEps && candidate_value < best_value;
+    if (candidate_value < best_value - kEps) return true;
+    return std::abs(candidate_value - best_value) <= kEps &&
+           candidate.feedthrough_mismatch < best.feedthrough_mismatch - kEps;
 }
 
 namespace {
@@ -250,19 +253,52 @@ OutlineSweepResult outlineSweep(const Problem& problem, const Placement& base, c
 }
 
 void finalizeFeedthrough(const Problem& problem, const PlacementEngine& engine, SearchResult& result) {
+    // B1 amendment (2026-07-24, research doc 2026-07-23 §2): always populate the legacy-paydown
+    // fields, even on early return, so callers (runHybridPlacementSearch) never see an unset triple.
+    result.legacy_paydown_score = result.best_score;
+    result.legacy_paydown_placement = result.best_placement;
+    result.legacy_paydown_routing = result.best_routing;
     if (result.best_routing.feedthrough_mismatch <= kEps) return;
     Problem inflated = problem;
     Placement placement = result.best_placement;
     RoutingResult routing = result.best_routing;
     std::mt19937 rng(0x9e3779b9u);
-    // Commit gate: mismatch paydown first, but never at the price of a solution main.cpp
-    // would report as invalid (the corrected decode can spill blocks past MAX).
+    // Commit gate: value-first (research doc 2026-07-23 §2) -- since beta T3, exactScore prices
+    // feedthrough mismatch into score.value at the official kBetaFt rate, so a lower-value candidate
+    // is strictly better on the checker's own terms; mismatch only breaks an exact value tie. Never
+    // commits a solution main.cpp would report as invalid (the corrected decode can spill blocks
+    // past MAX) -- validateSolution below still gates every commit.
     auto tryCommit = [&](const Placement& candidate, const Score& score, const RoutingResult& cand_routing) {
         if (!acceptFeedthroughPaydown(cand_routing, score.value, result.best_routing, result.best_score.value)) return;
         if (!validateSolution(problem, candidate, cand_routing).ok) return;
         result.best_score = score;
         result.best_placement = candidate;
         result.best_routing = cand_routing;
+    };
+    // B1 amendment: replicates the PRE-B1 acceptFeedthroughPaydown rule verbatim (mismatch strictly
+    // decreasing commits unconditionally; equal-mismatch-within-kEps commits only on lower value)
+    // against its OWN evolving state (result.legacy_paydown_*), walking the exact same generated
+    // candidate stream as tryCommit above. Read-only: writes only to legacy_paydown_* fields, never
+    // to `placement`/`routing`/`inflated`/`rng`/`state` below, so it cannot perturb candidate
+    // generation -- the B1 stop-and-report already proved that stream is decision-independent, and
+    // this lambda's body confirms the property still holds (it only reads its own arguments and
+    // result.legacy_paydown_*). This reproduces the pre-B1 committed endpoint exactly, so
+    // runHybridPlacementSearch can seed a third leg from it without resurrecting the old rule as a
+    // selection criterion.
+    auto tryLegacyCommit = [&](const Placement& candidate, const Score& score, const RoutingResult& cand_routing) {
+        if (cand_routing.open_routes != 0) return;
+        bool accept;
+        if (cand_routing.feedthrough_mismatch < result.legacy_paydown_routing.feedthrough_mismatch - kEps) {
+            accept = true;
+        } else {
+            accept = cand_routing.feedthrough_mismatch <= result.legacy_paydown_routing.feedthrough_mismatch + kEps &&
+                     score.value < result.legacy_paydown_score.value;
+        }
+        if (!accept) return;
+        if (!validateSolution(problem, candidate, cand_routing).ok) return;
+        result.legacy_paydown_score = score;
+        result.legacy_paydown_placement = candidate;
+        result.legacy_paydown_routing = cand_routing;
     };
     for (int pass = 0; pass < 3; ++pass) {
         bool grew = false;
@@ -326,7 +362,9 @@ void finalizeFeedthrough(const Problem& problem, const PlacementEngine& engine, 
         };
         RespaceResult respaced = respaceFixedPoint(inflated, placement, inflatedExact);
         tryCommit(decode_effective, exact, new_routing);
+        tryLegacyCommit(decode_effective, exact, new_routing);
         tryCommit(respaced.placement, respaced.score, respaced.routing);
+        tryLegacyCommit(respaced.placement, respaced.score, respaced.routing);
         // Reclaim outline/overflow lost to the inflated re-decode: same dims, tighter packing.
         Placement compacted = compactTowardOrigin(inflated, placement);
         if (fitsOutlineWithoutOverlap(inflated, compacted)) {
@@ -341,9 +379,11 @@ void finalizeFeedthrough(const Problem& problem, const PlacementEngine& engine, 
             Placement compacted_effective;
             Score compacted_exact = exactScore(inflated, compacted, &compacted_routing, &compacted_effective);
             tryCommit(compacted_effective, compacted_exact, compacted_routing);
+            tryLegacyCommit(compacted_effective, compacted_exact, compacted_routing);
             // Same T6 respace, applied to the compacted variant before ITS tryCommit.
             RespaceResult compacted_respaced = respaceFixedPoint(inflated, compacted, inflatedExact);
             tryCommit(compacted_respaced.placement, compacted_respaced.score, compacted_respaced.routing);
+            tryLegacyCommit(compacted_respaced.placement, compacted_respaced.score, compacted_respaced.routing);
         }
         // A single re-decode of the inflated problem often spills past MAX (a legal
         // arrangement may still exist -- other engines find one). Jiggle the inflated
@@ -360,6 +400,7 @@ void finalizeFeedthrough(const Problem& problem, const PlacementEngine& engine, 
             Placement cand_effective;
             Score cand_exact = exactScore(inflated, cand, &cand_routing, &cand_effective);
             tryCommit(cand_effective, cand_exact, cand_routing);
+            tryLegacyCommit(cand_effective, cand_exact, cand_routing);
         }
     }
 }
@@ -531,25 +572,60 @@ SearchResult runHybridPlacementSearch(const Problem& problem, const SearchOption
     sp_options.iters = std::max(1, options.iters / 2);
     bstar_options.iters = std::max(1, options.iters - sp_options.iters);
     bstar_options.seed = options.seed + 1;
-    // Beta Task 5: split any wall-clock budget evenly across the two legs (the copies already carry
-    // options.time_budget_sec; halve it here). Budget off (0) halves to 0 -> both legs iter-bounded.
+    // B1 amendment (2026-07-24): sp keeps half the wall-clock budget; each bstar leg (value-seeded
+    // bstar_a, legacy-seeded bstar_b below) gets a quarter, since up to two bstar legs may now run.
+    // Budget off (0) still halves/quarters to 0 -> every leg stays iter-bounded exactly as before.
     sp_options.time_budget_sec = options.time_budget_sec * 0.5;
-    bstar_options.time_budget_sec = options.time_budget_sec * 0.5;
+    bstar_options.time_budget_sec = options.time_budget_sec * 0.25;
 
     SearchResult sp_result = runPlacementSearch(problem, *sp, sp_options);
-    std::mt19937 rng(bstar_options.seed);
+
+    // Leg 2 (bstar_a): sp's VALUE-BEST placement seeds bstar -- today's path, mechanics unchanged.
     // Re-decode derives soft dims from the ORIGINAL problem areas, so any FT inflation accepted by the sp leg's
     // finalize is intentionally discarded here; each leg finalizes independently and the better full result wins.
-    PlacementState bstar_seed = bstar->seedFromPlacement(problem, sp_result.best_placement, rng);
-    SearchResult bstar_result = runPlacementSearch(problem, *bstar, bstar_options, bstar_seed);
+    std::mt19937 rng_a(bstar_options.seed);
+    PlacementState bstar_a_seed = bstar->seedFromPlacement(problem, sp_result.best_placement, rng_a);
+    SearchResult bstar_a_result = runPlacementSearch(problem, *bstar, bstar_options, bstar_a_seed);
 
-    SearchResult result = paydownBetter(bstar_result.best_routing, bstar_result.best_score.value,
-                                        sp_result.best_routing, sp_result.best_score.value)
-                              ? bstar_result
-                              : sp_result;
+    // Leg 3 (bstar_b, B1 amendment, research doc 2026-07-23 §2): sp's LEGACY-PAYDOWN placement --
+    // the endpoint the pre-B1 mismatch-first finalizeFeedthrough rule would have committed -- seeds
+    // a second bstar run, with a freshly-seeded rng identical to bstar_a's, so it reproduces the OLD
+    // bstar trajectory exactly (same bstar_options, same seed formula, only the seed placement
+    // differs). This demotes the legacy paydown walk to a candidate/seed generator: a case whose
+    // only route to a good result was the old rule's willingness to trade value for mismatch still
+    // has that path available, adjudicated honestly by the value-gated pick below (never by mismatch
+    // directly). Skipped when the legacy and value-best sp placements coincide (finalize either never
+    // engaged, or converged to the same point) -- rerunning bstar from an identical seed would only
+    // reproduce bstar_a's result at double the cost.
+    const bool legacy_diverged =
+        placementKey(sp_result.legacy_paydown_placement) != placementKey(sp_result.best_placement);
+    SearchResult bstar_b_result;
+    if (legacy_diverged) {
+        std::mt19937 rng_b(bstar_options.seed);
+        PlacementState bstar_b_seed = bstar->seedFromPlacement(problem, sp_result.legacy_paydown_placement, rng_b);
+        bstar_b_result = runPlacementSearch(problem, *bstar, bstar_options, bstar_b_seed);
+    }
+
+    // Leg pick (research doc 2026-07-23 §2 + B1 amendment): value-first, legality-gated, folded
+    // pairwise across all EXECUTED legs -- fewer open_routes wins outright, then lower score.value
+    // (already prices feedthrough mismatch at kBetaFt), mismatch only as an exact-value-tie breaker.
+    // Picking the mismatch-0 leg regardless of value was the pre-T3-fossil behavior this rule
+    // replaces; paydownBetter is a valid (transitive) total preorder, so pairwise folding in any
+    // order yields the same winner as comparing all three at once.
+    SearchResult result = sp_result;
+    if (paydownBetter(bstar_a_result.best_routing, bstar_a_result.best_score.value, result.best_routing,
+                       result.best_score.value)) {
+        result = bstar_a_result;
+    }
+    if (legacy_diverged && paydownBetter(bstar_b_result.best_routing, bstar_b_result.best_score.value,
+                                         result.best_routing, result.best_score.value)) {
+        result = bstar_b_result;
+    }
     result.engine_name = "hybrid";
-    result.iterations = sp_result.iterations + bstar_result.iterations;
-    result.exact_evaluations = sp_result.exact_evaluations + bstar_result.exact_evaluations;
+    result.iterations = sp_result.iterations + bstar_a_result.iterations +
+                       (legacy_diverged ? bstar_b_result.iterations : 0);
+    result.exact_evaluations = sp_result.exact_evaluations + bstar_a_result.exact_evaluations +
+                              (legacy_diverged ? bstar_b_result.exact_evaluations : 0);
     return result;
 }
 

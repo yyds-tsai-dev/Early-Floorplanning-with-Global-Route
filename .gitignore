@@ -7,6 +7,7 @@ test/p3_regression_bin
 test/testdata_regression_bin
 test/cfg_score_regression_bin
 test/integer_output_regression_bin
+test/b1_regression_bin
 
 # Object files
 *.o

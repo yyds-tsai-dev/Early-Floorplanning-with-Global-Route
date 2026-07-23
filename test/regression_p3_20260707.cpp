@@ -938,6 +938,14 @@ Placement congestedFtPlacement() {
     return pl;
 }
 
+// B1 amendment (2026-07-24, docs/research/2026-07-23-research-refresh-and-strategy.md §2 +
+// .superpowers/sdd/b1-brief-amended.md): repurposed from asserting finalizeFeedthrough's REAL commit
+// always reaches mismatch 0 (the pre-B1 objective, no longer correct once mismatch is priced into
+// value and paydown is value-gated) to asserting the new invariant directly -- best_score.value never
+// regresses past its own pre-finalize value -- while PRESERVING the fixture's original proof, now
+// aimed at the read-only LEGACY SIMULATION (legacy_paydown_*): it must still pay this synthetic's
+// mismatch all the way to 0, exactly as the pre-B1 rule did, since tryLegacyCommit replicates that
+// rule verbatim (see finalizeFeedthrough).
 void testFinalizeFeedthroughRespaceCongestedVariant() {
     Problem p = congestedFtProblem();
     Placement pl = congestedFtPlacement();
@@ -948,17 +956,17 @@ void testFinalizeFeedthroughRespaceCongestedVariant() {
     // Precondition: FT under-provisioning is real before finalize. Beta Task 3: with per-edge channel
     // demand the cost-driven router now diverts this bundle through BLK02's feedthrough rather than
     // overflowing the channel, so channel_overflow is 0 here (was >0 under the single-charge model) --
-    // the fixture now exercises finalize's FT paydown alone, which still drives the mismatch to 0 below.
+    // the fixture now exercises finalize's FT paydown alone, which still drives the LEGACY mismatch to
+    // 0 below (and the real, value-gated best to at least as good as its own pre-finalize value).
     assert(result.best_routing.feedthrough_mismatch > kEps);
+    const double pre_finalize_value = result.best_score.value;
 
     std::unique_ptr<PlacementEngine> engine = makePlacementEngine("bstar");
     finalizeFeedthrough(p, *engine, result);
 
-    // Acceptance criteria (plan Task 6): FT payoff reaches mismatch 0, routes stay closed, and
-    // the committed candidate validates against the original `problem` -- the same three gates
-    // finalizeFeedthrough already enforced pre-T6 (paydown + open==0 + validateSolution); T6 only
-    // supplies a possibly-better candidate to that unchanged gate, so these must still hold.
-    assert(result.best_routing.feedthrough_mismatch <= kEps);
+    // NEW invariant (B1): the real, value-gated commit never regresses value past pre-finalize --
+    // finalizeFeedthrough's monotone accept rule guarantees this by construction; this pins it.
+    assert(result.best_score.value <= pre_finalize_value + kEps);
     assert(result.best_routing.open_routes == 0);
     auto validation = validateSolution(p, result.best_placement, result.best_routing);
     if (!validation.ok) {
@@ -966,9 +974,20 @@ void testFinalizeFeedthroughRespaceCongestedVariant() {
     }
     assert(validation.ok);
 
+    // Original fixture's proof, preserved: the LEGACY SIMULATION (verbatim replica of the pre-B1
+    // mismatch-first rule) still pays this synthetic's mismatch all the way down to 0 and remains a
+    // legal, validated candidate -- confirming tryLegacyCommit reproduces the old rule faithfully.
+    assert(result.legacy_paydown_routing.feedthrough_mismatch <= kEps);
+    assert(result.legacy_paydown_routing.open_routes == 0);
+    auto legacy_validation = validateSolution(p, result.legacy_paydown_placement, result.legacy_paydown_routing);
+    if (!legacy_validation.ok) {
+        for (const auto& m : legacy_validation.messages) std::cout << "  legacy validation: " << m << "\n";
+    }
+    assert(legacy_validation.ok);
+
     // Determinism: finalizeFeedthrough (and the respaceFixedPoint calls now inside it) use a
     // fixed RNG seed and no other nondeterminism -- two independent runs from the same
-    // precondition must commit byte-identical results.
+    // precondition must commit byte-identical results, for both the real best and the legacy sim.
     SearchResult result2;
     result2.best_placement = pl;
     result2.best_score = exactScore(p, pl, &result2.best_routing);
@@ -981,6 +1000,7 @@ void testFinalizeFeedthroughRespaceCongestedVariant() {
         assert(result2.best_placement.rects[i].h == result.best_placement.rects[i].h);
     }
     assert(result2.best_score.value == result.best_score.value);
+    assert(result2.legacy_paydown_score.value == result.legacy_paydown_score.value);
     std::cout << "testFinalizeFeedthroughRespaceCongestedVariant ok\n";
 }
 

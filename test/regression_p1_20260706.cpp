@@ -881,56 +881,39 @@ void testOutlineSweepNeverReturnsEmptyPlacement() {
 // T8 (P1 acceptance criteria, plan design §1.5): finalizeFeedthrough must grow the declared outline
 // toward MAX to absorb FT inflation on the two cases that previously showed a residual mismatch
 // (case1/hybrid, case3/hybrid). Runs the full hybrid search at the acceptance parameters (iters
-// 2000, seed 1) and asserts open_routes==0 and validateSolution ok, plus -- Beta Task 3 realignment
-// to the official objective -- that any FT-mismatch PENALTY stays negligible (was: mismatch==0, which
-// per-edge channel demand makes infeasible on case1/hybrid; see runHybridAcceptance). Both cases
-// finish in single-digit seconds, so this lives in the permanent regression file rather than a
-// separate opt-in script.
+// 2000, seed 1) and asserts open_routes==0 and validateSolution ok. Both cases finish in single-digit
+// seconds, so this lives in the permanent regression file rather than a separate opt-in script.
 //
-// Beta Task 3 review Finding 2: the original fix used a single uniform <1% band for BOTH cases, but
-// case3/hybrid still reaches EXACT FT parity (mismatch==0) and case1/hybrid's observed residual was a
-// small fraction of score -- a 1% band was far looser than needed and would not catch a real
-// regression until it was already large. Split per case (`expect_exact_ft_parity`): case3 keeps the
-// hard ratchet (feedthrough_mismatch <= kEps, i.e. still exactly 0 -- no loosening at all, reconfirmed
-// by this fix); case1 gets a tight band (ft_penalty <= 0.002*score, 0.2%). This band is a TRIPWIRE,
-// not a target: the official objective (route_cost.hpp kBetaFt) makes FT required-area shortfall a
-// small LINEAR penalty, not a hard-zero constraint, and with per-edge channel demand (channels
-// saturate ~2x faster) the cost-driven router legitimately diverts more nets through soft-block
-// feedthrough on case1 -- the solver accepts a tiny residual FT mismatch there when eliminating it
-// (growing soft blocks) would cost more area than the FT penalty saves. The overall official cost
-// improved on both cases (benchmark), so accepting case1's small penalty is the correct trade, not a
-// regression; the band just means a FUTURE change that blows this residual up much further gets
-// caught early.
-//
-// Numeric note (deviates from the review's literal "0.1%/6496 um^2" recommendation, on measurement,
-// not on intent): re-run against current HEAD (2791587, an unrelated placement-decode change that
-// landed after the review was written) measures feedthrough_mismatch=6150.1 um^2, ratio=0.1158%, not
-// the review's cited 6496 um^2/0.066% -- the SA search's outcome shifted with the intervening decode
-// change, as heuristic search results generally can. 0.1% would therefore fail on current HEAD; 0.2%
-// keeps ~1.7x headroom over the freshly-measured 0.1158% while staying 5x tighter than the original
-// 1% band this finding was about. If this value drifts again, re-measure (this function already
-// prints the ratio on every near-fail) rather than widen blindly.
-void runHybridAcceptance(const std::string& csv_path, const char* label, bool expect_exact_ft_parity) {
+// B1 amendment (2026-07-24, docs/research/2026-07-23-research-refresh-and-strategy.md §2 +
+// .superpowers/sdd/b1-brief-amended.md): rewritten from the FT-mismatch-ratio tripwire (Beta Task 3
+// Finding 2's per-case band: case3 hard mismatch<=kEps, case1 ft_penalty<=0.2%*score) to the new
+// value-gated invariant directly -- since paydown no longer chases mismatch at value's expense, the
+// mismatch/ratio bands these tests used to encode are no longer the right thing to assert (a case can
+// legitimately keep a LARGER residual mismatch than before if that is what the value-optimal solution
+// looks like). What must hold instead: a legal, validated solution whose value is never worse than
+// what the PRE-B1 mismatch-first rule achieved at this exact invocation (iters=2000, seed=1, hybrid)
+// -- THE GUARANTEE the three-leg amendment provides. Old-rule values measured once from a throwaway
+// pre-B1 build (`git stash push -- src/search.cpp src/search.hpp` at HEAD 922a60a, rebuild, run, stash
+// pop; see b1-report.md for the full transcript) and pinned below as named constants.
+// Full round-trip-precision doubles (%.17g, exact under IEEE754 double round-trip) -- an earlier
+// version of this file pinned the 12-significant-figure values bin/efgr's stderr summary prints,
+// which is NOT enough precision for a 1e-6 absolute tolerance at this magnitude (~1e7).
+constexpr double kPreB1Case1HybridIters2000Value = 20929115.797251895;
+constexpr double kPreB1Case3HybridIters2000Value = 57221573.602126047;
+
+void runHybridAcceptance(const std::string& csv_path, const char* label, double pre_b1_value) {
     Problem problem = parseProblem(csv_path);
     SearchOptions options;
     options.iters = 2000;
     options.seed = 1;
     SearchResult result = runHybridPlacementSearch(problem, options);
 
-    double ft_penalty = result.best_routing.feedthrough_mismatch * kBetaFt;
-    double ratio = result.best_score.value > 0.0 ? ft_penalty / result.best_score.value : 0.0;
-    bool near_fail = expect_exact_ft_parity ? result.best_routing.feedthrough_mismatch > kEps
-                                             : ft_penalty >= 0.002 * result.best_score.value;
-    if (near_fail || result.best_routing.open_routes != 0) {
-        std::cerr << label << ": feedthrough_mismatch=" << result.best_routing.feedthrough_mismatch
-                   << " ft_penalty=" << ft_penalty << " score=" << result.best_score.value
-                   << " ratio=" << ratio << " open_routes=" << result.best_routing.open_routes << "\n";
+    if (result.best_score.value > pre_b1_value + kEps || result.best_routing.open_routes != 0) {
+        std::cerr << label << ": value=" << result.best_score.value << " pre_b1_value=" << pre_b1_value
+                   << " feedthrough_mismatch=" << result.best_routing.feedthrough_mismatch
+                   << " open_routes=" << result.best_routing.open_routes << "\n";
     }
-    if (expect_exact_ft_parity) {
-        assert(result.best_routing.feedthrough_mismatch <= kEps);  // case3: unchanged hard ratchet
-    } else {
-        assert(ft_penalty <= 0.002 * result.best_score.value);  // case1: tight 0.2% tripwire (see note above)
-    }
+    assert(result.best_score.value <= pre_b1_value + kEps);  // THE GUARANTEE: never worse than pre-B1
     assert(result.best_routing.open_routes == 0);
 
     ValidationResult vr = validateSolution(problem, result.best_placement, result.best_routing);
@@ -938,19 +921,19 @@ void runHybridAcceptance(const std::string& csv_path, const char* label, bool ex
         for (const auto& msg : vr.messages) std::cerr << label << " validate: " << msg << "\n";
     }
     assert(vr.ok);
-    std::cout << label << " ok (mismatch=" << result.best_routing.feedthrough_mismatch
-               << " ft_penalty_ratio=" << ratio
-               << " open_routes=" << result.best_routing.open_routes << ")\n";
+    std::cout << label << " ok (value=" << result.best_score.value << " <= pre-B1 " << pre_b1_value
+               << ", mismatch=" << result.best_routing.feedthrough_mismatch
+               << ", open_routes=" << result.best_routing.open_routes << ")\n";
 }
 
 void testFinalizeFeedthroughAcceptanceCase1Hybrid() {
     runHybridAcceptance("test/2026 ICCAD_case.case1.csv", "testFinalizeFeedthroughAcceptanceCase1Hybrid",
-                         /*expect_exact_ft_parity=*/false);
+                         kPreB1Case1HybridIters2000Value);
 }
 
 void testFinalizeFeedthroughAcceptanceCase3Hybrid() {
     runHybridAcceptance("test/2026 ICCAD_case.case3.csv", "testFinalizeFeedthroughAcceptanceCase3Hybrid",
-                         /*expect_exact_ft_parity=*/true);
+                         kPreB1Case3HybridIters2000Value);
 }
 
 // beta Codex-fix (corrective-grow consistency): exactScore's one-step corrective grow (eval.cpp
