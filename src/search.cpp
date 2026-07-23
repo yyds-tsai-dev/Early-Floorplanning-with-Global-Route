@@ -154,7 +154,8 @@ void maybeAdoptRespace(const Problem& problem, const ExactCachedFn& exactCached,
 
 }  // namespace
 
-OutlineSweepResult outlineSweep(const Problem& problem, const Placement& base, const ExactCachedFn& exactCached) {
+OutlineSweepResult outlineSweep(const Problem& problem, const Placement& base, const ExactCachedFn& exactCached,
+                                bool include_pads) {
     // Deterministic margin ladder (fractions of MAX-tight added to both dims), fixed per the task
     // brief -- no RNG. m=0.0 is the tight shrink-wrap itself (today's single-eval behavior), so
     // this sweep is strictly Pareto-safe: it can only match or beat the pre-sweep baseline.
@@ -163,6 +164,13 @@ OutlineSweepResult outlineSweep(const Problem& problem, const Placement& base, c
     // 0.02-0.20 rungs alone cannot climb back out of. The existing duplicate-target skip below
     // handles tight==MAX (all extra rungs collapse to a no-op there).
     static constexpr double kMargins[] = {0.0, 0.02, 0.05, 0.10, 0.20, 0.50, 1.0};
+    // B3 (research doc 2026-07-23 §3a-b, capacity-denominator engineering): integer-µm pads added
+    // to the TIGHT frontier, independent of the margin ladder above. The official overflow penalty
+    // is 20*A*R + 1.5*A*max(0,R-0.05) with R = overflow_total/capacity_total and
+    // capacity_total = Sum_channels 25*(h+w) over ALL emitted channels (used or not) -- padding the
+    // declared outline is a pure capacity-denominator play: it never touches overflow_nets or WL, so
+    // exactCached's own value gate below adjudicates every pad rung exactly like every other rung.
+    static constexpr double kPads[] = {1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0};
 
     Placement tight = base;
     tight.outline_w = 0.0;
@@ -173,27 +181,31 @@ OutlineSweepResult outlineSweep(const Problem& problem, const Placement& base, c
 
     OutlineSweepResult best;
     bool have_best = false;
-    double last_target_w = -1.0;
-    double last_target_h = -1.0;
-    for (double margin : kMargins) {
-        // Part D (T5 integer-leak rider): anchorAtOutline preserves the caller's EXACT target
-        // (T7.1 contract), so a fractional margin-rung target would leak into
-        // result.best_placement's outline stamp AND its re-anchored edge x/y. MAX
-        // (problem.outline_w/h) is integer, so ceil-then-clamp keeps every rung's target integral
-        // and <= MAX. m=0.0 targets tight_w/h, already integer from shrinkWrapOutline's rule-5
-        // ceiling, so this is a no-op there -- the strictly-Pareto-safe m=0.0 rung is unchanged.
-        double target_w =
-            std::min(problem.outline_w, std::ceil(tight_w + margin * (problem.outline_w - tight_w) - kEps));
-        double target_h =
-            std::min(problem.outline_h, std::ceil(tight_h + margin * (problem.outline_h - tight_h) - kEps));
-        // Skip a duplicate rung (e.g. tight == MAX already, so every larger margin's target is
-        // identical to m=0.0's) -- avoids a redundant exact-score call; the cache would dedupe it
-        // anyway via placementKey, but skipping keeps the sweep's trial count honest.
-        if (have_best && std::abs(target_w - last_target_w) < kEps && std::abs(target_h - last_target_h) < kEps) {
-            continue;
+    // B3: generalized the original last-rung-only dedupe (last_target_w/h, a single pair) into a
+    // running history of every DISTINCT (target_w,target_h) tried so far this call -- same
+    // mechanism ("skip a target this call already paid for"), extended rather than reinvented, per
+    // the task brief. Provably identical behavior for the m-ladder alone: target_w/h there is a
+    // non-decreasing step function of margin (ceil of a non-decreasing linear function, clamped at
+    // MAX), so a repeat can only ever equal the immediately preceding distinct value -- comparing
+    // against the full history or just the last entry gives the same answer for that loop. The pad
+    // rungs below are NOT monotonic in loop order (W-only/H-only/both interleave), so they need the
+    // full-history form.
+    std::vector<std::pair<double, double>> tried_targets;
+    auto alreadyTried = [&](double w, double h) {
+        for (const auto& t : tried_targets) {
+            if (std::abs(t.first - w) < kEps && std::abs(t.second - h) < kEps) return true;
         }
-        last_target_w = target_w;
-        last_target_h = target_h;
+        return false;
+    };
+    // Shared per-rung body (unchanged logic, now shared by the m-ladder and the pad rungs below):
+    // skip an already-tried (W,H) target -- dedupe checked BEFORE paying for an anchor/exact-eval,
+    // same discipline the original ladder used -- otherwise anchor exactly at the target via
+    // anchorAtOutline/commitOutlineAt (or, for the tight rung only, shrinkWrapOutline), exact-score
+    // it through the caller's own exactCached, and adopt it if outlineSweepBetter prefers it over
+    // the incumbent.
+    auto tryTarget = [&](double target_w, double target_h, bool is_tight_rung) {
+        if (alreadyTried(target_w, target_h)) return;
+        tried_targets.emplace_back(target_w, target_h);
 
         Placement variant = base;
         variant.outline_w = 0.0;
@@ -204,20 +216,28 @@ OutlineSweepResult outlineSweep(const Problem& problem, const Placement& base, c
         // T7.1 bugfix: shrinkWrapOutline is a minimizer -- it bisects back DOWN to the tight legal
         // frontier regardless of the ceiling it is given, so every margin>0 rung used to silently
         // collapse back to ~tight (dead sweep). m=0.0 IS the tight rung, so it alone still uses
-        // shrinkWrapOutline; every larger rung anchors directly at its exact target via
-        // anchorAtOutline (no bisection), re-anchoring edge blocks at that target's border.
-        // Targets >= tight are feasible by upward-closedness (shrinkWrapOutline already proved
-        // tight itself legal), so legal=false should not happen here -- skip the rung defensively
-        // rather than risk stamping/using an illegal variant.
+        // shrinkWrapOutline; every larger rung (every margin>0 AND every pad) anchors directly at
+        // its exact target via anchorAtOutline (no bisection), re-anchoring edge blocks at that
+        // target's border. Targets >= tight are feasible by upward-closedness (shrinkWrapOutline
+        // already proved tight itself legal), so legal=false should not happen here -- skip the
+        // rung defensively rather than risk stamping/using an illegal variant.
+        // B3 observation (pre-existing, unrelated to this task's own edits -- this branch is
+        // byte-identical to the pre-B3 code): re-invoking shrinkWrapOutline here with a ceiling of
+        // (tight_w,tight_h) instead of true MAX can converge to an EVEN TIGHTER frontier than the
+        // outer tight_w/tight_h above, since the bisection tolerance is relative to the given range
+        // (a narrower range -> tighter relative tolerance). Observed on case4: outer tight=(5366,5065)
+        // but this branch's own reshrink lands at (5366,5050) -- see b3-report.md and
+        // test/regression_b3_20260724.cpp, which asserts tight-or-tighter here rather than exact
+        // equality to the outer estimate for exactly this reason.
         bool anchored;
-        if (margin == 0.0) {
+        if (is_tight_rung) {
             OutlineFit tight_variant_fit = shrinkWrapOutline(ceiling, variant);
             anchored = tight_variant_fit.legal;
         } else {
             OutlineFit fit = anchorAtOutline(ceiling, variant);
             anchored = fit.legal;
         }
-        if (!anchored) continue;
+        if (!anchored) return;
 
         RoutingResult routing;
         // The effective placement (exactScore's grow may re-anchor edge blocks at a larger outline)
@@ -229,10 +249,43 @@ OutlineSweepResult outlineSweep(const Problem& problem, const Placement& base, c
             best = OutlineSweepResult{score, effective, routing};
             have_best = true;
         }
+    };
+
+    for (double margin : kMargins) {
+        // Part D (T5 integer-leak rider): anchorAtOutline preserves the caller's EXACT target
+        // (T7.1 contract), so a fractional margin-rung target would leak into
+        // result.best_placement's outline stamp AND its re-anchored edge x/y. MAX
+        // (problem.outline_w/h) is integer, so ceil-then-clamp keeps every rung's target integral
+        // and <= MAX. m=0.0 targets tight_w/h, already integer from shrinkWrapOutline's rule-5
+        // ceiling, so this is a no-op there -- the strictly-Pareto-safe m=0.0 rung is unchanged.
+        double target_w =
+            std::min(problem.outline_w, std::ceil(tight_w + margin * (problem.outline_w - tight_w) - kEps));
+        double target_h =
+            std::min(problem.outline_h, std::ceil(tight_h + margin * (problem.outline_h - tight_h) - kEps));
+        tryTarget(target_w, target_h, margin == 0.0);
     }
 
-    // P1 final-review fix: if every rung above failed its `anchored` check (all `continue`d), the
-    // loop never assigns `best`, and a default-constructed OutlineSweepResult{} would be returned
+    // B3 micro-pad rungs (research doc 2026-07-23 §3a-b): integer-µm pads on top of the TIGHT
+    // frontier only, three variants per pad -- W-only, H-only, both -- each clamped to MAX per axis.
+    // H-only matters independently of W-only: a full-width horizontal sliver is cut by every block
+    // x-edge into many channels (Sum cap ~= 25*(#strips + W)), a different capacity/area profile
+    // than the single right-margin channel a W-pad creates. Grows the rung set by <= 21
+    // targets/elite before dedupe (7 pads x 3 variants); tried_targets above and exactCached's own
+    // placementKey cache both dedupe repeats (within this call and across the whole run/elites,
+    // respectively). include_pads is a test-only escape hatch (default true, see search.hpp).
+    if (include_pads) {
+        for (double pad : kPads) {
+            double padded_w = std::min(problem.outline_w, tight_w + pad);
+            double padded_h = std::min(problem.outline_h, tight_h + pad);
+            tryTarget(padded_w, tight_h, false);   // W-only
+            tryTarget(tight_w, padded_h, false);   // H-only
+            tryTarget(padded_w, padded_h, false);  // both
+        }
+    }
+
+    // P1 final-review fix: if every rung above failed its `anchored` check (or was deduped) so
+    // `tryTarget` never adopted anything, `best` is never assigned, and a default-constructed
+    // OutlineSweepResult{} would be returned
     // instead -- an empty placement (no rects) with score.value == 0.0 (its default) and
     // routing.open_routes == 0 (its default), which outlineSweepBetter can then PREFER over a
     // legitimate incumbent with open_routes>0, silently committing an empty placement. Guarantee a

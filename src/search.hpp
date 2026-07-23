@@ -54,12 +54,17 @@ struct OutlineSweepResult {
 
 // Elite-pass outline sweep (design p1-design.md §1.4 elite path): for a fixed set of rects
 // (`base`, its own outline_w/h ignored -- always re-shrink-wrapped), tries a deterministic ladder
-// of declared-outline margins between the tight shrink-wrap and MAX, exact-scores each via the
-// caller-supplied `exactCached` (so results share the caller's exact-eval cache), and returns the
-// best variant: open_routes==0 strictly preferred over fewer open routes, then lower score.value
-// (mirrors compactTowardOrigin's fresh-restamp discipline -- see its comment above). Deterministic:
-// fixed margin ladder, no RNG.
-OutlineSweepResult outlineSweep(const Problem& problem, const Placement& base, const ExactCachedFn& exactCached);
+// of declared-outline margins between the tight shrink-wrap and MAX, PLUS (B3, research doc
+// 2026-07-23 §3a-b) a set of integer-µm capacity-denominator micro-pad rungs (W-only/H-only/both,
+// added to the tight frontier) -- exact-scores each via the caller-supplied `exactCached` (so
+// results share the caller's exact-eval cache), and returns the best variant: open_routes==0
+// strictly preferred over fewer open routes, then lower score.value (mirrors compactTowardOrigin's
+// fresh-restamp discipline -- see its comment above). Deterministic: fixed margin+pad ladder, no
+// RNG. `include_pads` is a test-only escape hatch (default true = "pads on" at every production call
+// site) so a test can compare pads-on vs pads-off on the same base placement without duplicating the
+// sweep's own logic -- see test/regression_b3_20260724.cpp.
+OutlineSweepResult outlineSweep(const Problem& problem, const Placement& base, const ExactCachedFn& exactCached,
+                                bool include_pads = true);
 
 std::string placementKey(const Placement& placement);
 // Pushes non-edge blocks toward the origin against problem.outline_w/h (MAX), reclaiming slack
