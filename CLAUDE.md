@@ -70,7 +70,7 @@ This repo runs **Fable 5 as the dispatcher**, delegating work to cheaper/special
 | **Orchestrator** | Fable 5 — main model, `effort: max` | Plan, decompose, route work to the right executor, integrate results, make the final call. Avoid doing bulk edits or long grinds directly. |
 | **Deep reasoning** | `deep-reasoner` subagent → **Opus** | Hard algorithm/design work, subtle root-causing, correctness & trade-off analysis. Returns plans and diagnoses, not sprawling edits. |
 | **Mechanical execution** | `fast-worker` subagent → **Sonnet** | Well-specified edits, wiring, `make`, running the regression scripts. No design decisions. |
-| **Peer engineer (2nd opinion)** | **Codex** (OpenAI, via the `gstack-codex` skill or `codex exec`) | Independent implementation or adversarial review from a *different model family* — cross-check the orchestrator's / Opus's conclusions. |
+| **Peer engineer (2nd opinion)** | **Codex** (OpenAI, via the official **codex-plugin-cc** — the `openai-codex` Claude Code plugin: `/codex:rescue`, `/codex:setup`) | Independent implementation or adversarial review from a *different model family* — cross-check the orchestrator's / Opus's conclusions. |
 
 Dispatch rules for the orchestrator:
 
@@ -83,4 +83,6 @@ Dispatch rules for the orchestrator:
 Invocation:
 
 - **Subagents** — launch the `deep-reasoner` / `fast-worker` agents (Agent/Task tooling); each runs on its bound model automatically.
-- **Codex** — the `gstack-codex` skill (`codex review` / `challenge` / `consult`) or `codex exec "<task>"` for a one-shot second opinion. Already installed (v0.141.0) and logged in via ChatGPT on both WSL and Windows.
+- **Codex** — the official OpenAI **codex-plugin-cc** (`openai-codex` Claude Code plugin; supersedes the old `gstack-codex` skill / raw `codex exec`). Delegate a task/diagnosis/fix with `/codex:rescue`; check CLI + ChatGPT auth and the stop-review gate with `/codex:setup`. Second-opinion reviews run through the plugin's shared Codex runtime: `node "$CLAUDE_PLUGIN_ROOT/scripts/codex-companion.mjs" review|adversarial-review` (poll with `status`/`result`; prefer `--background` over `--wait` so a slow review does not look frozen). Codex CLI 0.142.5.
+  - **Auth is per-OS and mutually exclusive on ChatGPT login:** WSL and Windows each keep their own `~/.codex/auth.json`, and logging in on one can revoke the other's refresh token (`refresh_token_invalidated` → the reviewer 401s and returns "Reviewer failed to output a response." in a few seconds). If a review dies that way, run `codex login` **in that shell** (WSL: native `/home/yyds` shell). For real reviews run codex from the **WSL native shell**, not the Windows side — the Windows sandbox cannot read the `\\wsl.localhost\...` UNC repo (`pwsh Get-Content` exits -1, so the review finishes with an empty "tool sandbox could not start" result).
+  - **Both** codex configs must give every `[mcp_servers.*]` a `tool_timeout_sec` — WSL `/home/yyds/.codex/config.toml` and Windows `C:\Users\USER\.codex\config.toml`. A server without one (e.g. `codebase-memory-mcp`) can hang on a tool call (`list_projects`) with no timeout and freeze the entire review in `investigating` (the "codex review 卡住沒回應" symptom). On the Windows/UNC path also add a git `safe.directory` exception or `git` fails with *dubious ownership* and the review dies before it starts.
