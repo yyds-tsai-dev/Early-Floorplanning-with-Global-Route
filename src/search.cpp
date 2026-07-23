@@ -737,4 +737,56 @@ SearchResult runHybridPlacementSearch(const Problem& problem, const SearchOption
     return result;
 }
 
+// B4.1 (route-pricing portfolio, coordinator adjudication 2026-07-24, b4-report.md): restores the
+// per-case <=-pre-B4 Pareto floor that B4's own per-placement gate cannot give across a CHANGED
+// SEARCH TRAJECTORY (design b4-design.md's own R4/R6 risk, measured on case3). Unlike B1's
+// analogous case3 finding -- a single seed-handoff divergence point that a third hybrid leg could
+// patch -- B4 changes every exactScore's own routing, so no single legacy ENDPOINT exists to seed
+// a compensating leg from; the only construction that guarantees per-case <= pre-B4 is running the
+// FULL search under BOTH pricings and folding by value. Runs the requested `engine` twice, on two
+// Problem copies differing ONLY in `route_pricing_official` -- the legacy-pricing run reproduces
+// pre-B4 (HEAD 207d08c) behavior BIT-EXACTLY (verified separately: byte-identical .cfg output on
+// all 5 default cases), so the fold's floor is structural, not empirical. This is also the minimal
+// special case of the B2 time-budget portfolio pattern (multi-restart, fold-by-value) arriving
+// early; B2 will generalize it (multiple seeds/engines) later.
+SearchResult runPricingPortfolio(const Problem& problem, const std::string& engine, const SearchOptions& options) {
+    Problem official_problem = problem;
+    official_problem.route_pricing_official = true;
+    Problem legacy_problem = problem;
+    legacy_problem.route_pricing_official = false;
+
+    // Same seed/options for both legs -- the ONLY difference between the two Problem copies is the
+    // pricing flag. A wall-clock time_budget, if set, is split 50/50 so the two full-search legs
+    // together spend the same total wall-clock a single un-portfolio'd run would have; budget-off
+    // (0.0) halves to 0.0, unaffected.
+    SearchOptions leg_options = options;
+    leg_options.time_budget_sec = options.time_budget_sec * 0.5;
+
+    // Same "sp"/"bstar"/"hybrid" dispatch main.cpp used to do inline before this function existed.
+    auto runLeg = [&](const Problem& p) {
+        if (engine == "hybrid") return runHybridPlacementSearch(p, leg_options);
+        std::unique_ptr<PlacementEngine> eng = makePlacementEngine(engine);
+        return runPlacementSearch(p, *eng, leg_options);
+    };
+
+    // Two separate exact-eval caches, one per leg, as today: runPlacementSearch/
+    // runHybridPlacementSearch each own a call-local `exact_cache` (an ordinary local variable,
+    // never static/global) -- calling either twice naturally gives two independent caches with no
+    // extra plumbing.
+    SearchResult official_result = runLeg(official_problem);
+    SearchResult legacy_result = runLeg(legacy_problem);
+
+    SearchResult result = official_result;
+    bool official_won = true;
+    if (paydownBetter(legacy_result.best_routing, legacy_result.best_score.value, result.best_routing,
+                       result.best_score.value)) {
+        result = legacy_result;
+        official_won = false;
+    }
+    result.pricing_official = official_won;
+    result.iterations = official_result.iterations + legacy_result.iterations;
+    result.exact_evaluations = official_result.exact_evaluations + legacy_result.exact_evaluations;
+    return result;
+}
+
 }  // namespace efgr

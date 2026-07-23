@@ -63,6 +63,15 @@ struct Problem {
     double outline_w = 0.0;
     double outline_h = 0.0;
     double alpha = 1.0;
+    // B4.1 (route-pricing portfolio, b4-report.md): solver-internal knob selecting which router
+    // pricing routeProblem's cost_driven=true path uses -- true = B4's official per-edge marginal
+    // pricing (routing.cpp's default), false = the pre-B4 (HEAD 207d08c) 1e6-area-denominated
+    // pricing, byte-identical to that history. NEVER parsed from the input CSV (io.cpp does not
+    // touch this field; every parsed Problem keeps the default true) -- it exists purely so
+    // search.cpp's runPricingPortfolio can run the SAME problem under both pricings on two Problem
+    // copies and fold the results, restoring the per-case Pareto floor a changed search trajectory
+    // can otherwise miss (design b4-design.md's own R4/R6 risk).
+    bool route_pricing_official = true;
 };
 
 struct Placement {

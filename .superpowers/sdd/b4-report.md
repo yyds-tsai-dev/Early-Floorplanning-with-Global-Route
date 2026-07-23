@@ -1,11 +1,11 @@
 # B4 Report — Official per-edge marginal pricing in the cost-driven router
 
-Status: **DONE, landing with an honest known limitation** (per coordinator adjudication, 2026-07-24).
-Implemented exactly per `.superpowers/sdd/b4-design.md`; all 14 suites green, warning-clean. The
-5-case default sweep shows 4/5 cases improve substantially (Σ −8.87%) but **case3 regresses
-end-to-end (+7.46%)** — a proven search-trajectory effect, not a router-correctness defect (see
-"The case3 finding" below). B4.1 (next commit) restores the per-case ≤-pre-B4 guarantee via a
-route-pricing portfolio.
+Status: **DONE.** Implemented exactly per `.superpowers/sdd/b4-design.md`; all 14 suites green,
+warning-clean. The 5-case default sweep shows 4/5 cases improve substantially (Σ −8.87%) but
+**case3 regresses end-to-end (+7.46%)** — a proven search-trajectory effect, not a
+router-correctness defect (see "The case3 finding" below). **B4.1 (second commit, same day)**
+restores the per-case ≤-pre-B4 guarantee via a route-pricing portfolio — see that section at the
+end of this report for the full story and measured results.
 
 ## What changed
 
@@ -195,8 +195,135 @@ search under both official and legacy router pricing, fold by value — the lega
 pre-B4 behavior bit-exactly since B4 never touched `search.cpp`, so the fold's floor is structural).
 See the B4.1 section below for that work.
 
-## Commit
+## Commit 1
 
 `feat(routing): official per-edge marginal pricing + scorer-faithful round gate (B4)` — files:
 `src/route_cost.hpp`, `src/routing.cpp`, `test/regression_p2_20260707.cpp`,
+`.superpowers/sdd/b4-report.md`, `.superpowers/sdd/progress.md`.
+
+---
+
+# B4.1 — Route-pricing portfolio restores the per-case Pareto floor
+
+Status: **DONE.** Second commit, same day, per the coordinator adjudication above.
+
+## Rationale
+
+B4's per-placement gate guarantee (§7.2/R2, algebraic-tie-proven) holds for a FIXED placement —
+cost-driven routing of a given geometry is never worse than legacy routing of that same geometry.
+It cannot, by itself, guarantee the SEARCH TRAJECTORY stays monotone: a re-priced landscape can
+shift which candidate placements the SA/hybrid search keeps as "best" along the way, so the FINAL
+placement itself can differ (case3, measured above). Unlike B1's analogous case3 finding — a
+single seed-handoff divergence point a third hybrid leg could patch by seeding from one specific
+legacy endpoint — B4 changes every `exactScore` call's own routing, everywhere in the search, so
+there is no single legacy endpoint to seed a compensating leg from. The only construction that
+*guarantees* per-case ≤ pre-B4 is running the full search under BOTH pricings and folding the two
+complete results by value. Because the legacy-pricing leg reproduces pre-B4 (HEAD `207d08c`)
+behavior bit-exactly (B4 never touched `search.cpp`), the fold's floor is structural, not
+empirical — this is also the minimal special case of the B2 time-budget portfolio pattern
+(multi-restart, fold-by-value) arriving early; B2 will generalize it (multiple seeds/engines)
+later.
+
+## What changed
+
+- **`src/model.hpp`**: `Problem` gained `bool route_pricing_official = true;` — a solver-internal
+  knob, never parsed from the input CSV (`io.cpp` untouched), selecting which router pricing
+  `routing.cpp`'s `cost_driven=true` path uses.
+- **`src/routing.cpp`**: the four B4-priced sites (channel-hop pricing, FT pricing, `pathSlack`'s
+  channel branch, `roundCost`) each gained an `if (problem.route_pricing_official) { ... } else {
+  ... }` branch — official (B4, unchanged) vs. legacy (the RETAINED pre-B4 functions/weights:
+  `channelMarginalCost`/`kOverflowAreaWeight`, `softFtMarginalCost`/`kFtMismatchWeight`, the old
+  entry-axis-only slack formula, the old 1e6-area `roundCost` key). No function was forked — every
+  site is a small if/else at the pricing expression itself, per the coordinator's explicit
+  instruction. **Verified byte-identical**: built a scratch tool
+  (`/tmp/b4/verify_legacy_pricing.cpp`) that parses each case, forces
+  `route_pricing_official=false`, runs the exact default search (`runHybridPlacementSearch`,
+  `SearchOptions{}` defaults), and writes a `.cfg` — diffed byte-for-byte against the pre-B4
+  build's own 5 default-flag `.cfg` outputs (saved during B4's own before/after measurement): **all
+  5 cases BYTE-IDENTICAL**.
+- **`src/search.hpp`/`src/search.cpp`**: `SearchResult` gained `bool pricing_official = true;`
+  (telemetry only, defaults matching `Problem::route_pricing_official`'s own default so existing
+  direct callers are unaffected). New, APPENDED function `runPricingPortfolio(problem, engine,
+  options)`: builds two `Problem` copies (`route_pricing_official` true/false), runs the requested
+  engine (`"sp"`/`"bstar"`/`"hybrid"`, same dispatch main.cpp used to do inline) on each with shared
+  `options` (a wall-clock `time_budget_sec`, if set, split 50/50 — budget-off stays 0 either way),
+  and folds the two `SearchResult`s with the EXISTING `paydownBetter` (legality-first, then value,
+  mismatch only an exact-tie breaker) — the identical rule `runHybridPlacementSearch` already uses
+  to fold its own legs. No existing function was modified. Iterations/exact-evaluations are summed
+  across both legs; each leg keeps its own call-local exact-eval cache (no new caching plumbing
+  needed — `runPlacementSearch`/`runHybridPlacementSearch` already scope `exact_cache` locally).
+- **`src/main.cpp`**: entry call switched from the inline `hybrid`-vs-`makePlacementEngine` dispatch
+  to `runPricingPortfolio(problem, engine_name, options)`; stderr summary gained `pricing=official`
+  or `pricing=legacy`.
+- **`test/regression_b4_20260724.cpp`** (new) + **`test/run_b4_regressions.sh`** (new, 15th suite,
+  reuses `run_b3_regressions.sh`'s sibling-source set verbatim — no new g++ churn beyond the new
+  test file/binary name, itself added to `.gitignore` alongside the existing `b1`/`b3` binary
+  entries).
+
+## Byte-identity verification (load-bearing, done before writing the portfolio)
+
+`route_pricing_official=false` + `runHybridPlacementSearch` (default `SearchOptions`) vs. the
+pre-B4 build's own 5 default-flag `.cfg` outputs (saved from B4's before/after measurement):
+
+```
+case0: BYTE-IDENTICAL
+case1: BYTE-IDENTICAL
+case2: BYTE-IDENTICAL
+case3: BYTE-IDENTICAL
+case4: BYTE-IDENTICAL
+```
+
+This is the property the whole B4.1 argument depends on — confirmed empirically, not merely
+argued from the diff.
+
+## Acceptance: 5-case default matrix (hybrid, iters1000, seed1, `runPricingPortfolio`, golden-rescored)
+
+| case | pricing won | portfolio checker_cost | pre-B4 baseline | B4-alone | ≤ pre-B4? | ≤ B4-alone? | wall time |
+|---|---|---:|---:|---:|---|---|---:|
+| 0 | official | 5,233,375.000 | 5,389,935.00 | 5,233,375.00 | yes | yes (tie) | 0.441s |
+| 1 | official | 9,100,697.980 | 13,246,805.65 | 9,100,697.98 | yes | yes (tie) | 6.574s |
+| 2 | official | 56,045,213.300 | 59,420,652.77 | 56,045,213.30 | yes | yes (tie) | 15.161s |
+| 3 | **legacy** | 36,615,637.236 | 36,615,637.24 | 39,346,073.62 | yes (tie) | **yes (−6.94%)** | 14.965s |
+| 4 | official | 76,369,838.931 | 89,523,552.21 | 76,369,838.93 | yes | yes (tie) | 27.853s |
+| **Σ** | | **183,364,762.45** | 204,196,582.86 | 186,095,198.83 | | | **64.99s** |
+
+**All 5 cases satisfy both halves of the acceptance criterion — no STOP triggered.** Case3's
+portfolio result is the legacy leg's own output, matching the pre-B4 baseline to the reported
+decimal (both are the SAME deterministic `runHybridPlacementSearch` trajectory under identical
+options/seed) — the exact "structural floor" outcome the rationale predicted. Cases 0/1/2/4 pick
+the official leg, matching B4-alone exactly (their pre-B4-vs-B4-alone comparison was already a
+strict improvement, so the fold has nothing to recover there). Σ 183,364,762.45 matches the
+coordinator's "expected Σ ≈ 183.4M" almost exactly.
+
+**Runtime guard**: 5-case default total **64.99s**, comfortably under the 90s guard (roughly 2×
+B4-alone's own per-case cost, as expected — each case now runs the full search twice).
+
+## Suites
+
+All 15 green (14 pre-existing + the new `run_b4_regressions.sh`), warning-clean, including
+`run_selfconsistency_regressions.sh` (still 5/5 — the portfolio changes which SearchResult wins,
+never how it is scored/written) and `run_b1_regressions.sh`/`run_b3_regressions.sh` (both still call
+`runHybridPlacementSearch` directly in their own fixtures, so they exercise single-pricing semantics
+unchanged, per the coordinator's note that existing direct callers keep that behavior).
+
+## Regression tests (`test/regression_b4_20260724.cpp`)
+
+1. **`testPricingPortfolioRestoresCase3PreB4Floor`** — runs `runPricingPortfolio` on case3's default
+   settings, golden-rescores the result, and pins `checker_cost <= 36,615,637.236 + 1.0` (the
+   pre-B4 baseline, named constant, ±1.0 absolute headroom for 3-decimal `.cfg`-rounding noise, the
+   same convention `run_b3_regressions.sh`'s own case2 pin already uses). Measured:
+   `checker_cost=36,615,637.236`, `pricing_official=false`. (Byte-identity of the legacy path itself
+   is covered by the manual diff above, not re-encoded as a brittle whole-`.cfg` literal.)
+2. **`testPricingPortfolioPicksOfficialLegOnCase1`** — case1, where the official leg wins by a wide
+   margin (pre-B4 13.2M vs. B4-alone 9.1M). Asserts BOTH `result.pricing_official == true` AND the
+   golden-rescored `checker_cost` lands at the official number (not merely below some loose bound),
+   strictly below the official/legacy midpoint — ruling out a bug where the telemetry flag is set
+   correctly but the wrong `RoutingResult`/`Placement`/`Score` triple is actually returned. Measured:
+   `checker_cost=9,100,697.98`, `pricing_official=true`.
+
+## Commit 2
+
+`feat(search): route-pricing portfolio restores per-case Pareto floor (B4.1)` — files:
+`src/model.hpp`, `src/routing.cpp`, `src/search.hpp`, `src/search.cpp`, `src/main.cpp`,
+`test/regression_b4_20260724.cpp`, `test/run_b4_regressions.sh`, `.gitignore`,
 `.superpowers/sdd/b4-report.md`, `.superpowers/sdd/progress.md`.

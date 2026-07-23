@@ -93,13 +93,12 @@ int main(int argc, char** argv) {
         problem.alpha = alpha;
         std::string engine_name = argString(argc, argv, "--engine", "hybrid");
 
-        SearchResult result;
-        if (engine_name == "hybrid") {
-            result = runHybridPlacementSearch(problem, options);
-        } else {
-            std::unique_ptr<PlacementEngine> engine = makePlacementEngine(engine_name);
-            result = runPlacementSearch(problem, *engine, options);
-        }
+        // B4.1 (route-pricing portfolio, b4-report.md): runs the requested engine under both the
+        // official (B4) and retained pre-B4 router pricing, folding by value -- restores the
+        // per-case <=-pre-B4 Pareto floor. Subsumes the old inline hybrid-vs-single-engine dispatch
+        // (runPricingPortfolio does the same "hybrid" vs makePlacementEngine(engine_name) split
+        // internally, once per pricing leg).
+        SearchResult result = runPricingPortfolio(problem, engine_name, options);
 
         auto validation = validateSolution(problem, result.best_placement, result.best_routing);
         writeCfg(output_path, problem, result.best_placement, result.best_routing);
@@ -109,6 +108,7 @@ int main(int argc, char** argv) {
         // output at <=1e-6 relative without display quantization masking the true agreement.
         std::cerr << std::setprecision(12)
                   << "engine=" << result.engine_name
+                  << " pricing=" << (result.pricing_official ? "official" : "legacy")
                   << " iters=" << result.iterations
                   << " exact_evals=" << result.exact_evaluations
                   << " blocks=" << problem.blocks.size()

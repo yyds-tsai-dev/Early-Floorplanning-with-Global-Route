@@ -229,14 +229,26 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
                             // common tight-packing case).
                             double acc = rr.soft_feedthrough_nets[v];
                             double placed_area = round2(placement.rects[v].w * placement.rects[v].h);
-                            cost += kBetaFt * ftMismatchDelta(problem.blocks[v], acc, nets, placed_area);
-                            // P2 Task 4 (design §4.2): congested-history surcharge, added on top of
-                            // the marginal FT cost above. Zero at round 0 (history_ft is all-zero
-                            // until the FIRST post-round bump), so this is a strict no-op until a
-                            // later round's history has accumulated. B4 (design §7.3): re-scaled from
-                            // kFtMismatchWeight (1e6) to kBetaFt so the surcharge stays the same order
-                            // as the re-denominated base cost above (was ~5000x too large otherwise).
-                            cost += kBetaFt * history_ft[v] * nets;
+                            // B4.1 (route-pricing portfolio, b4-report.md): `route_pricing_official`
+                            // selects official (B4) vs the RETAINED pre-B4 (HEAD 207d08c) FT pricing.
+                            // The false branch is byte-identical to that history -- it exists purely
+                            // so search.cpp's runPricingPortfolio can run the SAME problem under both
+                            // and fold the results, restoring the per-case Pareto floor a changed
+                            // search trajectory can otherwise miss.
+                            if (problem.route_pricing_official) {
+                                // P2 Task 4 (design §4.2): congested-history surcharge, added on top of
+                                // the marginal FT cost above. Zero at round 0 (history_ft is all-zero
+                                // until the FIRST post-round bump), so this is a strict no-op until a
+                                // later round's history has accumulated. B4 (design §7.3): re-scaled
+                                // from kFtMismatchWeight (1e6) to kBetaFt so the surcharge stays the
+                                // same order as the re-denominated base cost (was ~5000x too large
+                                // otherwise).
+                                cost += kBetaFt * ftMismatchDelta(problem.blocks[v], acc, nets, placed_area);
+                                cost += kBetaFt * history_ft[v] * nets;
+                            } else {
+                                cost += softFtMarginalCost(problem.blocks[v], acc, nets, placed_area);
+                                cost += kFtMismatchWeight * history_ft[v] * nets;
+                            }
                         }
                         if (u >= n_blocks || v >= n_blocks) {
                             // Channel hop: direction-classify from rect adjacency (edgeFromTo), NOT
@@ -262,26 +274,38 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
                             // §2.2's straight-pass-through-halves-slack fix, §4, pairs with this).
                             int dir = edgeFromTo(rects[u], rects[v]);
                             bool horizontal = (dir == 1 || dir == 3);
-                            if (u >= n_blocks) {
-                                const auto& ch_u = rr.channels[u - n_blocks];
-                                double usage = horizontal ? ch_u.horizontal_usage : ch_u.vertical_usage;
-                                cost += p_ovf * marginalOverflowNets(ch_u, horizontal, usage, nets);
-                                // P2 Task 4 (design §4.2/§4.3): congested-history surcharge, keyed per
-                                // channel per direction on the SAME axis classification the marginal-
-                                // cost pricing above just used. Zero at round 0. Index [0] =
-                                // horizontal, [1] = vertical (matches the array's doc comment above).
-                                // B4 (design §7.3): re-scaled from kOverflowAreaWeight to p_ovf so the
-                                // surcharge stays the same order as the re-denominated base cost (was
-                                // ~5000x too large otherwise).
-                                double hist = horizontal ? history_channel[u - n_blocks][0] : history_channel[u - n_blocks][1];
-                                cost += p_ovf * hist * nets;
-                            }
-                            if (v >= n_blocks) {
-                                const auto& ch_v = rr.channels[v - n_blocks];
-                                double usage = horizontal ? ch_v.horizontal_usage : ch_v.vertical_usage;
-                                cost += p_ovf * marginalOverflowNets(ch_v, horizontal, usage, nets);
+                            // B4.1 (route-pricing portfolio, b4-report.md): `route_pricing_official`
+                            // selects official (B4, both-edges) vs the RETAINED pre-B4 (HEAD 207d08c)
+                            // channel pricing (entry-axis-only -- no `u`-side clause existed at all).
+                            // The false branch is byte-identical to that history.
+                            if (problem.route_pricing_official) {
+                                if (u >= n_blocks) {
+                                    const auto& ch_u = rr.channels[u - n_blocks];
+                                    double usage = horizontal ? ch_u.horizontal_usage : ch_u.vertical_usage;
+                                    cost += p_ovf * marginalOverflowNets(ch_u, horizontal, usage, nets);
+                                    // P2 Task 4 (design §4.2/§4.3): congested-history surcharge, keyed
+                                    // per channel per direction on the SAME axis classification the
+                                    // marginal-cost pricing above just used. Zero at round 0. Index [0]
+                                    // = horizontal, [1] = vertical (matches the array's doc comment
+                                    // above). B4 (design §7.3): re-scaled from kOverflowAreaWeight to
+                                    // p_ovf so the surcharge stays the same order as the re-denominated
+                                    // base cost (was ~5000x too large otherwise).
+                                    double hist = horizontal ? history_channel[u - n_blocks][0] : history_channel[u - n_blocks][1];
+                                    cost += p_ovf * hist * nets;
+                                }
+                                if (v >= n_blocks) {
+                                    const auto& ch_v = rr.channels[v - n_blocks];
+                                    double usage = horizontal ? ch_v.horizontal_usage : ch_v.vertical_usage;
+                                    cost += p_ovf * marginalOverflowNets(ch_v, horizontal, usage, nets);
+                                    double hist = horizontal ? history_channel[v - n_blocks][0] : history_channel[v - n_blocks][1];
+                                    cost += p_ovf * hist * nets;
+                                }
+                            } else if (v >= n_blocks) {
+                                const auto& ch = rr.channels[v - n_blocks];
+                                double usage = horizontal ? ch.horizontal_usage : ch.vertical_usage;
+                                cost += channelMarginalCost(ch, horizontal, usage, nets);
                                 double hist = horizontal ? history_channel[v - n_blocks][0] : history_channel[v - n_blocks][1];
-                                cost += p_ovf * hist * nets;
+                                cost += kOverflowAreaWeight * hist * nets;
                             }
                         }
                     } else {
@@ -410,9 +434,21 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
                 }
                 slack = std::min(slack, node_slack);
             } else if (node >= n_blocks) {
-                int s = node_path[i + 1];
                 const auto& ch = rr.channels[node - n_blocks];
-                double node_slack = channelPathSlack(rects[u], ch, rects[s]);
+                double node_slack;
+                // B4.1 (route-pricing portfolio, b4-report.md): official (both-edges/halving) vs the
+                // RETAINED pre-B4 (HEAD 207d08c) entry-axis-only slack -- the false branch is
+                // byte-identical to that history.
+                if (problem.route_pricing_official) {
+                    int s = node_path[i + 1];
+                    node_slack = channelPathSlack(rects[u], ch, rects[s]);
+                } else {
+                    int dir = edgeFromTo(rects[u], rects[node]);
+                    bool horizontal = (dir == 1 || dir == 3);
+                    double usage = horizontal ? ch.horizontal_usage : ch.vertical_usage;
+                    double cap = horizontal ? 25.0 * std::max(1.0, ch.rect.h) : 25.0 * std::max(1.0, ch.rect.w);
+                    node_slack = std::max(0.0, cap - usage);
+                }
                 slack = std::min(slack, node_slack);
             }
         }
@@ -525,7 +561,15 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
     // would score WORSE than legacy; roundCostOfficial ranks exactly as the scorer ranks, so the gate's
     // "regression is impossible" guarantee (used for both round selection below and the legacy-vs-
     // cost-driven gate further down) is now actually scorer-faithful.
-    auto roundCost = [&](const RoutingResult& rr) { return roundCostOfficial(rr, problem.alpha, outline_area); };
+    // B4.1 (route-pricing portfolio, b4-report.md): official (roundCostOfficial) vs the RETAINED
+    // pre-B4 (HEAD 207d08c) 1e6-area-denominated key -- the false branch is byte-identical to that
+    // history.
+    auto roundCost = [&](const RoutingResult& rr) {
+        if (problem.route_pricing_official) return roundCostOfficial(rr, problem.alpha, outline_area);
+        double area_cost = problem.alpha * rr.total_wirelength + kOverflowAreaWeight * rr.channel_overflow +
+                            kFtMismatchWeight * rr.feedthrough_mismatch;
+        return std::pair<int, double>(rr.open_routes, area_cost);
+    };
 
     for (int round = 0; round < kNegotiationRounds; ++round) {
         // Decay at the START of each round (round >= 1), design §4.2: standard PathFinder hygiene so

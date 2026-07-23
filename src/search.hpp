@@ -32,6 +32,13 @@ struct SearchResult {
     Score legacy_paydown_score;
     Placement legacy_paydown_placement;
     RoutingResult legacy_paydown_routing;
+    // B4.1 (route-pricing portfolio, b4-report.md): true iff the OFFICIAL router pricing (B4) won
+    // runPricingPortfolio's fold; false iff the RETAINED pre-B4 pricing won. Telemetry only (never
+    // read by scoring/caching logic) -- surfaced in main.cpp's stderr summary as
+    // `pricing=official|legacy`. Defaults true (matches Problem::route_pricing_official's default)
+    // for any SearchResult not produced by runPricingPortfolio, so existing direct callers of
+    // runPlacementSearch/runHybridPlacementSearch are unaffected.
+    bool pricing_official = true;
 };
 
 // Exact-scoring callback shape used by the elite pass's exact_cache (search.cpp's `exactCached`
@@ -98,5 +105,16 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
                                 const PlacementState& initial_state);
 SearchResult runHybridPlacementSearch(const Problem& problem, const SearchOptions& options);
 void finalizeFeedthrough(const Problem& problem, const PlacementEngine& engine, SearchResult& result);
+// B4.1 (route-pricing portfolio, b4-report.md): runs the FULL requested engine search ("sp",
+// "bstar", or "hybrid" -- same dispatch main.cpp used to do inline) TWICE, on two `problem` copies
+// differing ONLY in `route_pricing_official` (model.hpp) -- official (B4's per-edge marginal
+// pricing) and legacy (byte-identical to pre-B4/HEAD 207d08c) -- then folds the two SearchResults
+// with the existing value-gated `paydownBetter` (legality-first, then value). Restores the
+// per-case <=-pre-B4 Pareto floor a changed search trajectory can otherwise miss, since the legacy
+// leg reproduces pre-B4 behavior bit-exactly (B4 never touched search.cpp) -- the fold's floor is
+// structural. `options` is shared by both legs (same seed); a wall-clock time_budget, if set, is
+// split 50/50 across them. Existing direct callers of runPlacementSearch/runHybridPlacementSearch
+// keep single-pricing semantics unchanged.
+SearchResult runPricingPortfolio(const Problem& problem, const std::string& engine, const SearchOptions& options);
 
 }  // namespace efgr
