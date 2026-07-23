@@ -1,0 +1,603 @@
+== commits ==
+cee3537 feat: respace inside feedthrough finalize
+51ef4d5 feat: respace elites to demand
+
+== stat ==
+ .superpowers/sdd/p3-task-5-report.md     |  69 ++++++++++++++
+ .superpowers/sdd/p3-task-6-report.md     |  85 +++++++++++++++++
+ src/search.cpp                           |  40 ++++++++
+ test/regression_p3_20260707.cpp          | 156 ++++++++++++++++++++++++++++++-
+ test/run_20260618_regressions.sh         |   2 +-
+ test/run_p0_regressions.sh               |   2 +-
+ test/run_p1_regressions.sh               |   2 +-
+ test/run_placement_engine_regressions.sh |   2 +-
+ 8 files changed, 353 insertions(+), 5 deletions(-)
+
+== diff ==
+diff --git a/.superpowers/sdd/p3-task-5-report.md b/.superpowers/sdd/p3-task-5-report.md
+new file mode 100644
+index 0000000..64f114c
+--- /dev/null
++++ b/.superpowers/sdd/p3-task-5-report.md
+@@ -0,0 +1,69 @@
++# P3 Task 5 report — elite-pass respace hook
++
++## Status: complete
++
++## Changed files
++
++- `src/search.cpp`
++  - `search.cpp:11` — added `#include "respace.hpp"`.
++  - `search.cpp:122-136` — new file-local helper `maybeAdoptRespace(problem, exactCached, result)`
++    inside the existing anonymous namespace (alongside `outlineSweepBetter`): runs
++    `respaceFixedPoint(problem, result.best_placement, exactCached)` and adopts the result into
++    `result.best_score/best_placement/best_routing` under the SAME `outlineSweepBetter` preference
++    (open_routes==0 strictly first, then lower value).
++  - `search.cpp:412-416` (elite loop, `top_candidates` iteration) — one call to
++    `maybeAdoptRespace(problem, exactCached, result)` placed **after** both sweep-adoption blocks
++    (raw candidate sweep + compacted-variant sweep) for each elite. This respaces the
++    then-current `result.best_placement`, not the swept candidate directly, so a losing sweep
++    variant never separately pays for a respace call — each elite contributes at most one
++    `respaceFixedPoint` call, exactly as specified.
++- `test/regression_p3_20260707.cpp:833-882` — new `testEliteRespaceHookEndToEndCase1BStarSeed1`:
++  runs `runPlacementSearch` end-to-end (case1, bstar, seed 1, iters 500), asserts
++  `open_routes==0`, `validateSolution().ok`, and determinism (two identical runs produce
++  byte-identical rects/outline/score). Wired into `main()`.
++- `test/run_20260618_regressions.sh:10`, `test/run_placement_engine_regressions.sh:9`,
++  `test/run_p0_regressions.sh:9`, `test/run_p1_regressions.sh:10` — added `src/respace.cpp` to the
++  g++ link line (all four link `search.cpp` directly and broke with `undefined reference to
++  respaceFixedPoint` before this fix). `run_20260608_regressions.sh` does not link `search.cpp` —
++  confirmed unaffected, left untouched.
++
++## Why not a unit test on the helper directly
++
++`maybeAdoptRespace` is file-local (anonymous namespace), matching the existing precedent:
++`outlineSweepBetter` — the exact rule it reuses — is also file-local and is *not* unit-tested
++directly anywhere in this repo; it's only exercised through `outlineSweep`/`runPlacementSearch`
++end-to-end. I followed that precedent rather than exposing a new symbol just for testability.
++
++## Why the test doesn't assert "overflow strictly lower than pre-hook"
++
++The brief's literal criterion (`case1 bstar seed1 iters 500 ⇒ final channel_overflow strictly
++below the pre-hook value`) is not honestly assertable on this fixture: T4's own regression
++(`testRespaceFixedPointCase1BStarSeed1NeverRegresses`, already landed) documents that case1's raw
++decode at seed 1 is axis-locked — `respaceFixedPoint` legitimately returns `improved=false` there
++(see `p3-task-4-report.md`). Asserting a strict overflow decrease on this exact fixture would be a
++false requirement baked into the test. Per the task instructions, I asserted the honest contract
++instead: end-to-end validation ok + open_routes==0 + determinism. Cost-movement evidence (cases
++where respacing genuinely reduces overflow) is T7's sweep, not this task's.
++
++## Test results (verbatim tail)
++
++- `bash test/run_p3_regressions.sh` → all 17 tests ok, `P3 T1+T2+T3+T4+T5 regressions passed`,
++  `P3 regressions passed`.
++- `bash test/run_p1_regressions.sh` → all tests ok, `P1 regressions passed`.
++- `bash test/run_p0_regressions.sh` → all tests ok, `P0 regressions passed`.
++- `bash test/run_case00.sh` → passed, `validation=ok`.
++- `bash test/run_placement_engine_regressions.sh` → `placement_engine_regression: ok`, all three
++  engines (sp/bstar/hybrid) produced valid `.cfg` output.
++- `bash test/run_20260618_regressions.sh` → `regression_20260618: ok`.
++- `bash test/run_20260608_regressions.sh` → `regression_20260608: ok`, `validation=ok`.
++- `make` → warning-clean (`-Wall -Wextra -pedantic`), builds `src/respace.o` and links cleanly.
++
++## Concerns / follow-ups
++
++- None new. The known empirical limit (axis-locked real cases at fixed seeds return
++  `improved=false`) is inherited from T4 and does not regress anything here — it just means this
++  hook is frequently a no-op on the current 5-case corpus at seed 1, same as documented.
++
++## Commit
++
++`feat: respace elites to demand` (pending push in this session).
+diff --git a/.superpowers/sdd/p3-task-6-report.md b/.superpowers/sdd/p3-task-6-report.md
+new file mode 100644
+index 0000000..e90d52d
+--- /dev/null
++++ b/.superpowers/sdd/p3-task-6-report.md
+@@ -0,0 +1,85 @@
++# P3 Task 6 report — finalizeFeedthrough respace hook
++
++## Status: complete
++
++## Changed files
++
++- `src/search.cpp` — inside `finalizeFeedthrough`'s per-pass loop (`search.cpp:227-` region):
++  - After the inflated re-decode's `exactScore` call (raw `placement`), added a plain
++    `ExactCachedFn inflatedExact` lambda that scores against `inflated` (not the original
++    `problem`), then `RespaceResult respaced = respaceFixedPoint(inflated, placement,
++    inflatedExact)`, and `tryCommit(respaced.placement, respaced.score, respaced.routing)` —
++    called right after the existing `tryCommit(placement, exact, new_routing)`, so the pre-T6
++    commit path is untouched and the respaced candidate gets an *additional* shot at the same
++    gate.
++  - Same pattern applied to the compacted-variant branch: after `compacted`'s own `tryCommit`,
++    added `respaceFixedPoint(inflated, compacted, inflatedExact)` + a second `tryCommit` for that
++    result.
++  - `tryCommit` itself is **unchanged** — still gates on `acceptFeedthroughPaydown` against
++    `result.best_routing`/`result.best_score` and `validateSolution(problem, ...)` against the
++    **original** `problem`, exactly as the brief specified ("respace only supplies a possibly-
++    better candidate to the same gate").
++- `test/regression_p3_20260707.cpp:883-970` — new `congestedFtProblem()`/`congestedFtPlacement()`
++  fixture + `testFinalizeFeedthroughRespaceCongestedVariant`, wired into `main()`.
++
++## Fixture construction (why it looks like this)
++
++The brief pointed at the FT-forced fixture family, which actually lives in
++`test/regression_p0_20260706.cpp` (`forcedFtProblem`/`rowPlacement`/`testFinalizeFeedthroughDirect`
++— the P1 test file has no such family; the p0 file is the real "FT-forced" origin). I kept its
++row layout (BLK01 macro | BLK02 soft | BLK03 macro) and its top-wall trick (BLK04 blocks channel
++routing over the row, forcing BLK01<->BLK03 through the soft block, `feedthrough_mismatch>0`), and
++added a **congestion** block BLK05 to the right of BLK03 with a real x-gap (so `extractChannels`
++carves a genuine channel there) and a short shared y-band, so a heavy BLK03->BLK05 bundle (3200
++nets) produces a real, empirically-verified `channel_overflow>0` (vcap=25×40=1000 on that channel;
++usage 3200 overflows by 2200) *simultaneously* with the FT precondition. I verified this
++empirically with a scratch harness before writing the real test (both preconditions hold:
++`feedthrough_mismatch=2416`, `channel_overflow=2200`, `open_routes=0`).
++
++Earlier attempts (placing the congestion target above the wall) failed because `routeProblem`'s
++`allowed()` predicate (`routing.cpp:108-112`) never lets a route pass *through* a non-soft,
++non-endpoint block — a hard-macro wall blocks transit entirely regardless of channels beyond it,
++so that geometry could never route at all (`open_routes>0`, not a congestion scenario).
++
++## Why the test doesn't assert "overflow reduced vs no-respace"
++
++Same honesty concern as T5: this specific fixture's *existing* (pre-T6) `finalizeFeedthrough`
++already drives both mismatch and overflow to 0 via its bounded repair-jiggle loop (32 random
++mutations per pass), so a literal "overflow reduced vs no-respace" comparison on this exact
++fixture would show no numeric difference — not because the hook is inert, but because this
++fixture's repair-jiggle already happens to find a legal zero-overflow arrangement. I verified this
++directly: re-running the identical fixture through the pre-T6 and post-T6 `finalizeFeedthrough`
++produces the same final numbers (mismatch=0, overflow=0, validation ok). Rather than tune the
++fixture further to force a fragile numeric gap (which risks becoming a flaky/over-fit test as
++engine internals change), I asserted the acceptance criteria the brief actually named: mismatch
++reaches 0, `open_routes==0`, `validateSolution().ok`, and determinism — the same never-worse
++contract `respaceFixedPoint` already guarantees, exercised end-to-end through
++`finalizeFeedthrough`. Overflow-reduction evidence across the real 5-case corpus is T7's sweep.
++
++## Test results (verbatim tail)
++
++- `bash test/run_p3_regressions.sh` → all 18 tests ok, `P3 T1+T2+T3+T4+T5+T6 regressions passed`,
++  `P3 regressions passed`.
++- `bash test/run_p1_regressions.sh` → all tests ok, `P1 regressions passed`.
++- `bash test/run_p0_regressions.sh` → all tests ok, `P0 regressions passed`.
++- `bash test/run_case00.sh` → passed, `validation=ok`.
++- `bash test/run_placement_engine_regressions.sh` → `placement_engine_regression: ok`.
++- `bash test/run_20260618_regressions.sh` → `regression_20260618: ok`.
++- `bash test/run_20260608_regressions.sh` → `regression_20260608: ok`, `validation=ok`.
++- `make` → warning-clean (`-Wall -Wextra -pedantic`).
++
++## Concerns / follow-ups
++
++- The added `respaceFixedPoint` calls run against `inflated` (the FT-grown problem) at up to 3
++  iterations each, for both the raw and compacted variants, per finalize pass (up to 3 passes) —
++  a bounded but real increase in exact-route calls inside `finalizeFeedthrough`. No timeout issue
++  observed on any of the seven suites, but noted for the P4 profiling item already tracked in
++  `progress.md` ("36-evals=accept-till-P4-profiling").
++- On the corpus tested here, this hook did not change the final committed numbers (see above) —
++  consistent with T5's finding that respace is frequently a no-op on cases where the existing
++  machinery (repair-jiggle / outlineSweep) already reaches overflow 0. Genuine overflow-reduction
++  evidence belongs to T7's sweep, not this task.
++
++## Commit
++
++`feat: respace inside feedthrough finalize` (pending push in this session).
+diff --git a/src/search.cpp b/src/search.cpp
+index 7ce3a9b..3507523 100644
+--- a/src/search.cpp
++++ b/src/search.cpp
+@@ -1,20 +1,21 @@
+ #include "search.hpp"
+ 
+ #include <cmath>
+ #include <random>
+ #include <sstream>
+ #include <unordered_map>
+ #include <utility>
+ 
+ #include "eval.hpp"
+ #include "ft.hpp"
++#include "respace.hpp"
+ #include "validate.hpp"
+ 
+ namespace efgr {
+ namespace {
+ 
+ bool axisOverlap(double a0, double a1, double b0, double b1) {
+     return std::min(a1, b1) - std::max(a0, b0) > kEps;
+ }
+ 
+ }  // namespace
+@@ -111,20 +112,38 @@ bool acceptFeedthroughPaydown(const RoutingResult& candidate, double candidate_v
+ namespace {
+ 
+ // Elite-pass outline sweep preference (design p1-design.md §1.4 elite path): open_routes==0 is
+ // strictly preferred over any nonzero count (legality first, per the same discipline as
+ // acceptFeedthroughPaydown/paydownBetter above); among equally-legal candidates, lower value wins.
+ bool outlineSweepBetter(const RoutingResult& a, double a_value, const RoutingResult& b, double b_value) {
+     if ((a.open_routes == 0) != (b.open_routes == 0)) return a.open_routes == 0;
+     return a_value < b_value;
+ }
+ 
++// T5 (design p3-design.md §5, plan Task 5): respaces the elite pass's then-current best against
++// its own routed channel demand and adopts the result under the SAME preference rule the sweep
++// adoptions above already use (`outlineSweepBetter`: open_routes==0 strictly first, then lower
++// value). Called once per elite candidate, on `result.best_*` AFTER both of that candidate's
++// sweep adoptions (raw + compacted) have already run -- never on the swept candidate itself, so a
++// losing sweep variant never pays for an extra respaceFixedPoint call, and each elite contributes
++// at most one respace exact-eval batch. `respaceFixedPoint` is itself Pareto-safe (never returns
++// worse than its own `base` per its documented contract), so this can only match or improve
++// `result`, never regress it.
++void maybeAdoptRespace(const Problem& problem, const ExactCachedFn& exactCached, SearchResult& result) {
++    RespaceResult respaced = respaceFixedPoint(problem, result.best_placement, exactCached);
++    if (outlineSweepBetter(respaced.routing, respaced.score.value, result.best_routing, result.best_score.value)) {
++        result.best_score = respaced.score;
++        result.best_placement = respaced.placement;
++        result.best_routing = respaced.routing;
++    }
++}
++
+ }  // namespace
+ 
+ OutlineSweepResult outlineSweep(const Problem& problem, const Placement& base, const ExactCachedFn& exactCached) {
+     // Deterministic margin ladder (fractions of MAX-tight added to both dims), fixed per the task
+     // brief -- no RNG. m=0.0 is the tight shrink-wrap itself (today's single-eval behavior), so
+     // this sweep is strictly Pareto-safe: it can only match or beat the pre-sweep baseline.
+     // T8.1: extended with 0.50/1.0 rungs so the ladder can recover MAX-like outlines on
+     // overflow-bound cases, where tight outlines carry huge channel_overflow penalties that the
+     // 0.02-0.20 rungs alone cannot climb back out of. The existing duplicate-target skip below
+     // handles tight==MAX (all extra rungs collapse to a no-op there).
+@@ -237,34 +256,49 @@ void finalizeFeedthrough(const Problem& problem, const PlacementEngine& engine,
+         PlacementState state = engine.seedFromPlacement(inflated, placement, rng);
+         placement = engine.decode(inflated, state);
+         // Defensive symmetry with the compacted path below: decode stamps the declared outline
+         // today, but future engines may not -- guard against committing an unstamped placement.
+         if (placement.outline_w <= 0.0 || placement.outline_h <= 0.0) {
+             shrinkWrapOutline(inflated, placement);
+         }
+         RoutingResult new_routing;
+         Score exact = exactScore(inflated, placement, &new_routing);
+         routing = new_routing;
++        // T6 (design p3-design.md §3.4/§5, plan Task 6): respace the inflated re-decode against
++        // its own routed channel demand BEFORE tryCommit -- FT inflation grows a soft block in
++        // place, which can push a neighboring strip into overflow; respacing here widens exactly
++        // that strip on the SAME inflated problem the candidate was decoded against. The commit
++        // gate itself is untouched: tryCommit still scores/validates against the ORIGINAL
++        // `problem` (not `inflated`), so respacing only ever supplies a possibly-better candidate
++        // to the same paydown + validateSolution funnel, never changes what gets accepted.
++        ExactCachedFn inflatedExact = [&](const Placement& cand, RoutingResult* routing_out) {
++            return exactScore(inflated, cand, routing_out);
++        };
++        RespaceResult respaced = respaceFixedPoint(inflated, placement, inflatedExact);
+         tryCommit(placement, exact, new_routing);
++        tryCommit(respaced.placement, respaced.score, respaced.routing);
+         // Reclaim outline/overflow lost to the inflated re-decode: same dims, tighter packing.
+         Placement compacted = compactTowardOrigin(inflated, placement);
+         if (fitsOutlineWithoutOverlap(inflated, compacted)) {
+             // compactTowardOrigin resets outline_w/h to 0 (moved core rects invalidate any prior
+             // stamp). Re-stamp immediately so `compacted`, once committed as best_placement, is
+             // internally consistent with its OWN rects/outline for later validateSolution/writeCfg
+             // calls -- exactScore below would otherwise recompute the shrink-wrap on an internal
+             // copy for scoring only, leaving this stored `compacted` stale (edges not re-anchored,
+             // stamp 0 -> falls back to MAX) even though it was scored/routed at a smaller outline.
+             shrinkWrapOutline(inflated, compacted);
+             RoutingResult compacted_routing;
+             Score compacted_exact = exactScore(inflated, compacted, &compacted_routing);
+             tryCommit(compacted, compacted_exact, compacted_routing);
++            // Same T6 respace, applied to the compacted variant before ITS tryCommit.
++            RespaceResult compacted_respaced = respaceFixedPoint(inflated, compacted, inflatedExact);
++            tryCommit(compacted_respaced.placement, compacted_respaced.score, compacted_respaced.routing);
+         }
+         // A single re-decode of the inflated problem often spills past MAX (a legal
+         // arrangement may still exist -- other engines find one). Jiggle the inflated
+         // topology a bounded number of times; only geometrically legal candidates pay
+         // for exact routing, and all commits go through the same paydown gate.
+         constexpr int kFinalizeRepairAttempts = 32;
+         PlacementState repair = state;
+         for (int attempt = 0; attempt < kFinalizeRepairAttempts; ++attempt) {
+             engine.mutate(inflated, repair, rng);
+             if (!engine.isValidState(inflated, repair)) continue;
+@@ -383,20 +417,26 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
+         // stamp) -- outlineSweep re-shrink-wraps from scratch per rung regardless, so no
+         // additional restamp is needed here before sweeping (unlike the pre-T7 single-eval path,
+         // which required an explicit restamp so exactCached's placementKey stayed accurate).
+         OutlineSweepResult swept_compacted = outlineSweep(problem, compacted, exactCached);
+         if (outlineSweepBetter(swept_compacted.routing, swept_compacted.score.value, result.best_routing,
+                                result.best_score.value)) {
+             result.best_score = swept_compacted.score;
+             result.best_placement = swept_compacted.placement;
+             result.best_routing = swept_compacted.routing;
+         }
++
++        // T5 (design p3-design.md §5, plan Task 5): respace the then-current best ONCE per
++        // elite candidate, after both sweep adoptions above have already run their course --
++        // never on the swept candidate directly, so a sweep variant that lost either adoption
++        // never separately pays for its own respaceFixedPoint call.
++        maybeAdoptRespace(problem, exactCached, result);
+     }
+ 
+     (void)best_state;
+     (void)current_place;
+     finalizeFeedthrough(problem, engine, result);
+     return result;
+ }
+ 
+ SearchResult runHybridPlacementSearch(const Problem& problem, const SearchOptions& options) {
+     std::unique_ptr<PlacementEngine> sp = makePlacementEngine("sp");
+diff --git a/test/regression_p3_20260707.cpp b/test/regression_p3_20260707.cpp
+index 1098843..676d99a 100644
+--- a/test/regression_p3_20260707.cpp
++++ b/test/regression_p3_20260707.cpp
+@@ -823,32 +823,186 @@ void testRespaceFixedPointSyntheticTwoAxisSlackReducesOverflow() {
+     for (std::size_t i = 0; i < result.placement.rects.size(); ++i) {
+         assert(result2.placement.rects[i].x == result.placement.rects[i].x);
+         assert(result2.placement.rects[i].y == result.placement.rects[i].y);
+         assert(result2.placement.rects[i].w == result.placement.rects[i].w);
+         assert(result2.placement.rects[i].h == result.placement.rects[i].h);
+     }
+     assert(result2.routing.channel_overflow == result.routing.channel_overflow);
+     std::cout << "testRespaceFixedPointSyntheticTwoAxisSlackReducesOverflow ok\n";
+ }
+ 
++// T5 (design p3-design.md §5, plan Task 5): the elite pass's per-candidate respace hook
++// (`maybeAdoptRespace`, file-local to search.cpp, mirroring outlineSweepBetter's own
++// file-local precedent -- see p1-design's outlineSweep tests, which exercise it only through
++// runPlacementSearch/outlineSweep rather than a standalone unit hook). case1/bstar/seed1 is the
++// SAME axis-locked fixture T4's never-regresses test already pins (raw re-decode has no slack on
++// the locked axis, so `respaceFixedPoint` legitimately returns improved=false there -- see
++// respaceFixedPointCase1BStarSeed1NeverRegresses above and p3-task-4-report.md). Asserting a
++// strictly-lower post-hook channel_overflow here would therefore be a FALSE requirement on this
++// fixture; the honest, non-fragile contract this test pins is: (1) the end-to-end search still
++// reaches open_routes==0 and validateSolution().ok with the hook wired in (never-worse, since
++// maybeAdoptRespace only adopts a strictly-better candidate per outlineSweepBetter's own rule),
++// and (2) determinism is preserved (byte-identical output across two identical runs) despite the
++// added respaceFixedPoint calls in the elite loop. Cost-movement evidence (the cases where
++// respacing genuinely lowers overflow) lands in T7's full sweep, not here.
++void testEliteRespaceHookEndToEndCase1BStarSeed1() {
++    Problem problem = parseProblem("test/2026 ICCAD_case.case1.csv");
++    std::unique_ptr<PlacementEngine> engine = makePlacementEngine("bstar");
++    SearchOptions options;
++    options.iters = 500;
++    options.seed = 1;
++    options.exact_interval = 50;
++
++    SearchResult result = runPlacementSearch(problem, *engine, options);
++    assert(result.best_routing.open_routes == 0);
++
++    Problem scoped = problem;
++    scoped.outline_w = result.best_placement.outline_w;
++    scoped.outline_h = result.best_placement.outline_h;
++    RoutingResult post_routing = routeProblem(scoped, result.best_placement);
++    ValidationResult validation = validateSolution(scoped, result.best_placement, post_routing);
++    if (!validation.ok) {
++        for (const auto& m : validation.messages) std::cout << "  validation: " << m << "\n";
++    }
++    assert(validation.ok);
++
++    // Determinism: the elite loop's added respaceFixedPoint calls are pure/deterministic
++    // (no RNG, per respace.hpp's contract), so a second identical run must reproduce the exact
++    // same best placement byte-for-byte.
++    SearchResult result2 = runPlacementSearch(problem, *engine, options);
++    assert(result2.best_placement.rects.size() == result.best_placement.rects.size());
++    for (std::size_t i = 0; i < result.best_placement.rects.size(); ++i) {
++        assert(result2.best_placement.rects[i].x == result.best_placement.rects[i].x);
++        assert(result2.best_placement.rects[i].y == result.best_placement.rects[i].y);
++        assert(result2.best_placement.rects[i].w == result.best_placement.rects[i].w);
++        assert(result2.best_placement.rects[i].h == result.best_placement.rects[i].h);
++    }
++    assert(result2.best_placement.outline_w == result.best_placement.outline_w);
++    assert(result2.best_placement.outline_h == result.best_placement.outline_h);
++    assert(result2.best_score.value == result.best_score.value);
++    std::cout << "testEliteRespaceHookEndToEndCase1BStarSeed1 ok\n";
++}
++
++// T6 (design p3-design.md §3.4/§5, plan Task 6): a CONGESTED variant of the P0 FT-forced fixture
++// family (`forcedFtProblem`/`rowPlacement`/`testFinalizeFeedthroughDirect`,
++// test/regression_p0_20260706.cpp:47-81,235-270) -- same row (BLK01 macro | BLK02 soft | BLK03
++// macro) with the same top wall (BLK04) forcing BLK01<->BLK03 through feedthrough (nonzero
++// feedthrough_mismatch precondition), PLUS an added macro BLK05 to the right of BLK03 with a real
++// x-gap (BLK03 right edge=500, BLK05 at x=[540,600]) and a SHORT shared y-band (both start at
++// y=0, height 60) so extractChannels carves a genuine channel (CH4, width=40) between them. A
++// heavy BLK03->BLK05 bundle (3200 nets) routes straight through CH4: the guide-point hop has both
++// a dx and dy component (BLK05 is short relative to BLK03), so BOTH horizontal_usage and
++// vertical_usage land on CH4 at 3200 -- vcap = 25*40 = 1000, so vertical_usage alone overflows by
++// 2200 (verified empirically against routing.cpp's usage accrual before writing this fixture).
++// This gives a real, nonzero precondition on BOTH axes finalizeFeedthrough must handle at once:
++// feedthrough_mismatch > 0 (FT under-provisioned) AND channel_overflow > 0 (congested channel).
++Problem congestedFtProblem() {
++    Problem p;
++    auto addBlock = [&](const std::string& name, double area, double w, double h, BlockType type) {
++        Block b;
++        b.name = name;
++        b.area = area;
++        b.width = w;
++        b.height = h;
++        b.type = type;
++        b.ar_min = 0.25;
++        b.ar_max = 4.0;
++        b.ft_rates = {0.2, 0.4, 0.8, 1.0};
++        p.block_index[name] = static_cast<int>(p.blocks.size());
++        p.blocks.push_back(b);
++    };
++    addBlock("BLK01", 30000.0, 100.0, 300.0, BlockType::Macro);
++    addBlock("BLK02", 90000.0, 300.0, 300.0, BlockType::Soft);
++    addBlock("BLK03", 30000.0, 100.0, 300.0, BlockType::Macro);
++    addBlock("BLK04", 620.0 * 40.0, 620.0, 40.0, BlockType::Macro);   // top wall: forces FT
++    addBlock("BLK05", 60.0 * 60.0, 60.0, 60.0, BlockType::Macro);     // congestion target
++    p.outline_w = 620.0;
++    p.outline_h = 700.0;  // headroom for BStarEngine's re-stack on inflated re-decode
++    p.alpha = 1.0;
++    Bundle ft_bundle;
++    ft_bundle.source = 0;
++    ft_bundle.target = 2;
++    ft_bundle.nets = 900;
++    Bundle congestion_bundle;
++    congestion_bundle.source = 2;
++    congestion_bundle.target = 4;
++    congestion_bundle.nets = 3200;
++    p.bundles = {ft_bundle, congestion_bundle};
++    return p;
++}
++
++Placement congestedFtPlacement() {
++    Placement pl;
++    pl.rects = {Rect{0.0, 0.0, 100.0, 300.0}, Rect{100.0, 0.0, 300.0, 300.0}, Rect{400.0, 0.0, 100.0, 300.0},
++                Rect{0.0, 300.0, 620.0, 40.0}, Rect{540.0, 0.0, 60.0, 60.0}};
++    pl.aspect = {1.0, 1.0, 1.0, 1.0, 1.0};
++    return pl;
++}
++
++void testFinalizeFeedthroughRespaceCongestedVariant() {
++    Problem p = congestedFtProblem();
++    Placement pl = congestedFtPlacement();
++
++    SearchResult result;
++    result.best_placement = pl;
++    result.best_score = exactScore(p, pl, &result.best_routing);
++    // Precondition: both FT under-provisioning AND channel congestion are real before finalize.
++    assert(result.best_routing.feedthrough_mismatch > kEps);
++    assert(result.best_routing.channel_overflow > kEps);
++
++    std::unique_ptr<PlacementEngine> engine = makePlacementEngine("bstar");
++    finalizeFeedthrough(p, *engine, result);
++
++    // Acceptance criteria (plan Task 6): FT payoff reaches mismatch 0, routes stay closed, and
++    // the committed candidate validates against the original `problem` -- the same three gates
++    // finalizeFeedthrough already enforced pre-T6 (paydown + open==0 + validateSolution); T6 only
++    // supplies a possibly-better candidate to that unchanged gate, so these must still hold.
++    assert(result.best_routing.feedthrough_mismatch <= kEps);
++    assert(result.best_routing.open_routes == 0);
++    auto validation = validateSolution(p, result.best_placement, result.best_routing);
++    if (!validation.ok) {
++        for (const auto& m : validation.messages) std::cout << "  validation: " << m << "\n";
++    }
++    assert(validation.ok);
++
++    // Determinism: finalizeFeedthrough (and the respaceFixedPoint calls now inside it) use a
++    // fixed RNG seed and no other nondeterminism -- two independent runs from the same
++    // precondition must commit byte-identical results.
++    SearchResult result2;
++    result2.best_placement = pl;
++    result2.best_score = exactScore(p, pl, &result2.best_routing);
++    finalizeFeedthrough(p, *engine, result2);
++    assert(result2.best_placement.rects.size() == result.best_placement.rects.size());
++    for (std::size_t i = 0; i < result.best_placement.rects.size(); ++i) {
++        assert(result2.best_placement.rects[i].x == result.best_placement.rects[i].x);
++        assert(result2.best_placement.rects[i].y == result.best_placement.rects[i].y);
++        assert(result2.best_placement.rects[i].w == result.best_placement.rects[i].w);
++        assert(result2.best_placement.rects[i].h == result.best_placement.rects[i].h);
++    }
++    assert(result2.best_score.value == result.best_score.value);
++    std::cout << "testFinalizeFeedthroughRespaceCongestedVariant ok\n";
++}
++
+ }  // namespace
+ 
+ int main() {
+     testVerticalUsageChargesNeedWOnLeftRight();
+     testHorizontalUsageChargesNeedHOnBelowAbove();
+     testWallBoundedChannelSideIsMinusOne();
+     testZeroUsageChannelsProduceNoDemand();
+     testThreeBlockRowShiftsByExactDeficit();
+     testThreeBlockColumnShiftsByExactDeficit();
+     testDemandExceedingMaxClampsToOutlineAndStaysLegal();
+     testOrderFreezeUnderVariedDemands();
+     testStaggeredDistractorDoesNotWinChannelBound();
+     testMixedDirectionChannelPopulatesBothNeeds();
+     testTieLosingCandidateCannotOverlapDiscardingBlock();
+     testDemandKeyedPairAppliesEvenWhenAnotherBlockWinsPredecessorSlot();
+     testRespaceToDemandCase1BStarSeed1();
+     testRespaceToDemandNoDemandIsNoOp();
+     testRespaceFixedPointCase1BStarSeed1NeverRegresses();
+     testRespaceFixedPointSyntheticTwoAxisSlackReducesOverflow();
+-    std::cout << "P3 T1+T2+T3+T4 regressions passed\n";
++    testEliteRespaceHookEndToEndCase1BStarSeed1();
++    testFinalizeFeedthroughRespaceCongestedVariant();
++    std::cout << "P3 T1+T2+T3+T4+T5+T6 regressions passed\n";
+     return 0;
+ }
+diff --git a/test/run_20260618_regressions.sh b/test/run_20260618_regressions.sh
+old mode 100644
+new mode 100755
+index c668f9c..d861fda
+--- a/test/run_20260618_regressions.sh
++++ b/test/run_20260618_regressions.sh
+@@ -1,12 +1,12 @@
+ #!/usr/bin/env bash
+ set -euo pipefail
+ 
+ make clean
+ make
+ test -x bin/EarlyFloorplanning_with_GlobalRoute
+ g++ -std=c++17 -O2 -Wall -Wextra -pedantic \
+   -I. \
+   test/regression_20260618.cpp \
+-  src/eval.cpp src/io.cpp src/placement_engine.cpp src/routing.cpp src/search.cpp src/validate.cpp \
++  src/eval.cpp src/io.cpp src/placement_engine.cpp src/respace.cpp src/routing.cpp src/search.cpp src/validate.cpp \
+   -o /tmp/regression_20260618
+ /tmp/regression_20260618
+diff --git a/test/run_p0_regressions.sh b/test/run_p0_regressions.sh
+index 13e260f..22861e2 100755
+--- a/test/run_p0_regressions.sh
++++ b/test/run_p0_regressions.sh
+@@ -1,14 +1,14 @@
+ #!/usr/bin/env bash
+ set -euo pipefail
+ cd "$(dirname "$0")/.."
+ 
+ make >/dev/null
+ 
+ g++ -std=c++17 -O2 -Wall -Wextra -pedantic \
+     test/regression_p0_20260706.cpp \
+     src/routing.cpp src/eval.cpp src/io.cpp src/validate.cpp \
+-    src/placement_engine.cpp src/search.cpp src/floorplan.cpp \
++    src/placement_engine.cpp src/search.cpp src/floorplan.cpp src/respace.cpp \
+     -o test/p0_regression_bin
+ 
+ ./test/p0_regression_bin
+ echo "P0 regressions passed"
+diff --git a/test/run_p1_regressions.sh b/test/run_p1_regressions.sh
+index df1017e..ec68530 100755
+--- a/test/run_p1_regressions.sh
++++ b/test/run_p1_regressions.sh
+@@ -1,14 +1,14 @@
+ #!/usr/bin/env bash
+ set -euo pipefail
+ cd "$(dirname "$0")/.."
+ 
+ make >/dev/null
+ 
+ g++ -std=c++17 -O2 -Wall -Wextra -pedantic \
+     test/regression_p1_20260706.cpp \
+     src/routing.cpp src/eval.cpp src/io.cpp src/validate.cpp \
+-    src/placement_engine.cpp src/search.cpp src/floorplan.cpp \
++    src/placement_engine.cpp src/search.cpp src/floorplan.cpp src/respace.cpp \
+     -o test/p1_regression_bin
+ 
+ ./test/p1_regression_bin
+ echo "P1 regressions passed"
+diff --git a/test/run_placement_engine_regressions.sh b/test/run_placement_engine_regressions.sh
+old mode 100644
+new mode 100755
+index ade196d..380b90f
+--- a/test/run_placement_engine_regressions.sh
++++ b/test/run_placement_engine_regressions.sh
+@@ -1,19 +1,19 @@
+ #!/usr/bin/env bash
+ set -euo pipefail
+ 
+ make clean
+ make
+ g++ -std=c++17 -O2 -Wall -Wextra -pedantic \
+   -I. \
+   test/placement_engine_regression.cpp \
+-  src/eval.cpp src/floorplan.cpp src/io.cpp src/placement_engine.cpp src/routing.cpp src/search.cpp src/validate.cpp \
++  src/eval.cpp src/floorplan.cpp src/io.cpp src/placement_engine.cpp src/respace.cpp src/routing.cpp src/search.cpp src/validate.cpp \
+   -o /tmp/placement_engine_regression
+ /tmp/placement_engine_regression
+ 
+ for engine in sp bstar hybrid; do
+   out="/tmp/placement_${engine}.cfg"
+   log="/tmp/placement_${engine}.log"
+   bin/efgr "test/E_testcase_20260414.xlsx - case00.csv" "$out" \
+     --engine "$engine" --iters 40 --seed 3 --exact-interval 10 2>"$log"
+   test -s "$out"
+   grep -q "engine=${engine}" "$log"

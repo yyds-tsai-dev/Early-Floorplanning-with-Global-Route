@@ -1,0 +1,277 @@
+6d2de22 feat: cost-driven routing default-on
+
+ src/eval.cpp                    |  13 +++--
+ src/routing.cpp                 |   6 +++
+ src/routing.hpp                 |  15 +++---
+ test/regression_p2_20260707.cpp | 114 +++++++++++++++++++++++++++++++++++++++-
+ 4 files changed, 138 insertions(+), 10 deletions(-)
+
+diff --git a/src/eval.cpp b/src/eval.cpp
+index 00ad327..f468007 100644
+--- a/src/eval.cpp
++++ b/src/eval.cpp
+@@ -1,17 +1,18 @@
+ #include "eval.hpp"
+ 
+ #include <algorithm>
+ #include <tuple>
+ 
+ #include "ft.hpp"
+ #include "placement_engine.hpp"
++#include "route_cost.hpp"
+ 
+ namespace efgr {
+ 
+ std::pair<double, double> usedOutline(const Problem& problem, const Placement& placement) {
+     double w = 0.0;
+     double h = 0.0;
+     for (const auto& r : placement.rects) {
+         w = std::max(w, r.right());
+         h = std::max(h, r.top());
+     }
+@@ -134,23 +135,29 @@ namespace {
+ Score routeAndScoreAt(const Problem& problem, const Placement& placement, double w, double h,
+                       RoutingResult* routing_out) {
+     Problem scoped = problem;
+     scoped.outline_w = w;
+     scoped.outline_h = h;
+     RoutingResult routing = routeProblem(scoped, placement);
+     Score score = cheapScore(scoped, placement);
+     score.wirelength = routing.total_wirelength;
+     score.penalty += routing.open_routes * 1e15;
+     // channel_overflow and feedthrough_mismatch are both um^2 (design p2-design.md §8.1 / R0:
+-    // routing.cpp area-denominates channel_overflow so this shared 1e6 weight compares like units).
+-    score.penalty += routing.channel_overflow * 1e6;
+-    score.penalty += routing.feedthrough_mismatch * 1e6;
++    // routing.cpp area-denominates channel_overflow so this shared weight compares like units).
++    // P2 Task 6 (design §9 T6; plan Global Constraint 11): consume the SAME named constants
++    // route_cost.hpp's router-side edge pricing uses (kOverflowAreaWeight/kFtMismatchWeight),
++    // instead of repeating the 1e6 literal here -- one source of truth for the router-scorer
++    // consistency invariant (design §7/§9-T0: "MUST equal eval.cpp's overflow/FT-mismatch
++    // multiplier exactly"). Values unchanged (1e6 each), so this is a pure refactor, not a
++    // scoring change.
++    score.penalty += routing.channel_overflow * kOverflowAreaWeight;
++    score.penalty += routing.feedthrough_mismatch * kFtMismatchWeight;
+     score.value = score.outline_area + problem.alpha * score.wirelength + score.penalty;
+     if (routing_out) *routing_out = routing;
+     return score;
+ }
+ 
+ }  // namespace
+ 
+ Score exactScore(const Problem& problem, const Placement& placement, RoutingResult* routing_out) {
+     // Scope routing to the placement's STAMPED declared outline (design §1.4) -- not a bbox
+     // recomputed from usedOutline, which ignores the shrink-wrap entirely. When unset (0,0; e.g.
+diff --git a/src/routing.cpp b/src/routing.cpp
+index 041062b..6d2afcb 100644
+--- a/src/routing.cpp
++++ b/src/routing.cpp
+@@ -164,20 +164,26 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
+     // cost_driven=true invocation (the new unconditional comparison-gate run). Without this override,
+     // `runLegacyPass` inside a cost_driven=true call silently reran cost-driven's OWN single-pass
+     // pricing (same `cost_driven` capture, same edge-cost formula) instead of the real two-pass
+     // channels-then-soft-fallback legacy algorithm -- a pre-existing bug in T5's original fallback that
+     // this parameter fixes: `use_legacy` below is the actual per-call mode, `force_legacy=true`
+     // unconditionally selects legacy pricing regardless of the outer flag; the default (false) preserves
+     // every existing call site's behavior exactly (`cost_driven=false` top-level calls already had
+     // `cost_driven` false, so `use_legacy` degenerates to the same thing either way; the negotiation
+     // loop's own calls never pass force_legacy, so they keep reading the outer `cost_driven`, which is
+     // always true there).
++    //
++    // WARNING (P2 Task 6, Rider A of the T5.1 review): any FUTURE call site that wants true legacy
++    // (channels-first, then soft-FT fallback) pricing from WITHIN a cost_driven=true routeProblem
++    // call MUST pass force_legacy=true explicitly. Omitting it silently reruns cost-driven's own
++    // pricing instead (the exact bug class this parameter was added to fix) -- the default `false`
++    // only preserves behavior for callers where the outer `cost_driven` is already false.
+     auto findRoutePath = [&](RoutingResult& rr, const Bundle& bundle, int nets, bool force_legacy = false) {
+         bool use_legacy = force_legacy || !cost_driven;
+         Route route;
+         route.source = bundle.source;
+         route.target = bundle.target;
+         // NOTE: route.nets is intentionally NOT set here -- it is a probe-priced search, and the
+         // caller may commit a smaller chunk of this path than `nets`. commitRoutePath sets route.nets
+         // to the actually-committed size.
+         // P2 Task 2 (design p2-design.md §Q1-Q2 core; plan Global Constraint 7 comparison gate):
+         // cost_driven=false keeps the legacy two-pass feasibility search byte-identical (pass 0
+diff --git a/src/routing.hpp b/src/routing.hpp
+index d267f23..536119a 100644
+--- a/src/routing.hpp
++++ b/src/routing.hpp
+@@ -1,16 +1,19 @@
+ #pragma once
+ 
+ #include "model.hpp"
+ 
+ namespace efgr {
+ 
+ std::vector<Channel> extractChannels(const Problem& problem, const Placement& placement);
+ 
+-// P2 Task 2 (design p2-design.md §Q1-Q2 core; plan Global Constraint 7 comparison gate): `cost_driven`
+-// defaults to false so every existing caller (eval.cpp, search.cpp) is byte-identical to pre-P2
+-// behavior. When true, routeChunk runs a single unified Dijkstra pass per chunk with T1's
+-// cost-unit edge weights (route_cost.hpp) instead of the legacy two-pass heuristic; see routing.cpp
+-// for the edge-pricing details.
+-RoutingResult routeProblem(const Problem& problem, const Placement& placement, bool cost_driven = false);
++// P2 Task 6 (design p2-design.md §9 T6; plan Global Constraint 11 default-on rollout): `cost_driven`
++// now defaults to true, so every existing production caller (eval.cpp, search.cpp) picks up the
++// cost-driven + negotiated + adaptive router (routing.cpp) via its comparison gate against the
++// legacy two-pass result -- never worse on the (open_routes, then alpha*WL + kOverflowAreaWeight*
++// overflow + kFtMismatchWeight*mismatch) lexicographic key (routing.cpp's `runLegacyPass` +
++// `roundCost` gate, landed T5/T5.1). The legacy path stays reachable via an explicit
++// `cost_driven=false` argument (used by tests and, internally, by routing.cpp's own
++// `force_legacy` comparison-gate run) -- no signature change, so no caller needs updating.
++RoutingResult routeProblem(const Problem& problem, const Placement& placement, bool cost_driven = true);
+ 
+ }  // namespace efgr
+diff --git a/test/regression_p2_20260707.cpp b/test/regression_p2_20260707.cpp
+index e3b84da..17bad06 100644
+--- a/test/regression_p2_20260707.cpp
++++ b/test/regression_p2_20260707.cpp
+@@ -1005,20 +1005,131 @@ void testComparisonGateDeterministic() {
+ 
+     assert(r1.used_fallback == r2.used_fallback);
+     assert(r1.open_routes == r2.open_routes);
+     assert(std::abs(r1.total_wirelength - r2.total_wirelength) < kEps);
+     assert(std::abs(r1.channel_overflow - r2.channel_overflow) < kEps);
+     assert(std::abs(r1.feedthrough_mismatch - r2.feedthrough_mismatch) < kEps);
+     assert(r1.routes.size() == r2.routes.size());
+     std::cout << "testComparisonGateDeterministic ok\n";
+ }
+ 
++// P2 Task 6 Rider A (design p2-design.md §9 T6; T4/T5.1 review action item): round-consistency check
++// for T6's default-on flip. The comparison gate (T5.1) and negotiation loop (T4) select a single
++// "winning" RoutingResult (a negotiated round or the legacy fallback) and copy it wholesale -- but a
++// bug that mixed fields from DIFFERENT rounds/branches (e.g. `soft_feedthrough_nets` from one round's
++// accrual while `feedthrough_mismatch` was computed against another) would not be caught by any
++// existing single-field assertion. This fixture uses a soft block with NO starting FT slack (unlike
++// ChannelVsFtFixture's S, whose generous placed area keeps feedthrough_mismatch at exactly 0 --
++// deliberately different here so the cross-check below is a nontrivial nonzero equality, not 0==0),
++// on a contended A->B flow whose channel saturates before the full bundle fits (vcap=25*80=2000 <
++// bundle.nets=3600), forcing the router to divert the overflow through S.
++struct SoftFtRoundConsistencyFixture {
++    Problem problem;
++    Placement placement;
++};
++
++SoftFtRoundConsistencyFixture makeSoftFtRoundConsistencyFixture() {
++    SoftFtRoundConsistencyFixture f;
++    Problem& p = f.problem;
++    p.outline_w = 80.0 + 200.0;          // A/B column (80 wide) + soft block S (200 wide) to the right
++    p.outline_h = 610.0 + 100.0 + 100.0;  // A (bottom) + channel span 610 + B (top), same geometry as
++                                          // the T0 overflow fixture above (vcap = 25*80 = 2000).
++    p.alpha = 1.0;
++
++    Block a = makeChannelBlock("A", 80.0, 100.0);
++    Block b = makeChannelBlock("B", 80.0, 100.0);
++    Block s;
++    s.name = "S";
++    s.width = 200.0;
++    s.height = 810.0;
++    s.area = 200.0 * 810.0;
++    s.ft_base_area = s.area;  // NO starting slack: any nets diverted through S immediately grow the
++                               // required area past the placed area, so feedthrough_mismatch is
++                               // nonzero whenever soft_feedthrough_nets[S] is nonzero.
++    s.type = BlockType::Soft;
++    s.ft_rates = {0.2, 0.4, 0.8, 1.0};
++
++    p.blocks = {a, b, s};
++    p.block_index = {{"A", 0}, {"B", 1}, {"S", 2}};
++
++    Bundle bun;
++    bun.source = 0;
++    bun.target = 1;
++    bun.nets = 3600;  // 1600 nets exceed the channel's 2000-net capacity -- the router must divert
++                       // the excess (or all of it, depending on marginal pricing) through S.
++    p.bundles = {bun};
++
++    Placement& pl = f.placement;
++    pl.rects = {
++        Rect{0.0, 0.0, 80.0, 100.0},     // A
++        Rect{0.0, 710.0, 80.0, 100.0},   // B
++        Rect{80.0, 0.0, 200.0, 810.0},   // S: touches A's right edge and B's right edge directly
++    };
++    pl.aspect = {1.0, 1.0, 1.0};
++    return f;
++}
++
++void testRoundConsistencyOfSoftFeedthroughFields() {
++    SoftFtRoundConsistencyFixture f = makeSoftFtRoundConsistencyFixture();
++
++    // T6: the default arg now IS cost_driven=true (negotiation + comparison gate) -- this exercises
++    // the exact call shape production callers use (eval.cpp's routeProblem(scoped, placement)).
++    RoutingResult r = routeProblem(f.problem, f.placement);
++    assert(r.open_routes == 0);
++    assert(r.soft_feedthrough_nets[2] > 0.0);  // task requirement 3: soft_feedthrough_nets nonzero
++
++    // Cross-check 1: soft_feedthrough_nets[S] must equal the sum of nets routed through S as an
++    // INTERMEDIATE node across every route in the returned struct's own `routes` list -- this is
++    // literally how commitRoutePath accrues soft_feedthrough_nets (routing.cpp), so if the returned
++    // `routes` came from a different round/branch than the returned `soft_feedthrough_nets` vector,
++    // this sum would diverge.
++    double nets_via_routes = 0.0;
++    for (const auto& route : r.routes) {
++        for (std::size_t i = 1; i + 1 < route.node_path.size(); ++i) {
++            if (route.node_path[i] == 2) nets_via_routes += route.nets;  // S is block index 2
++        }
++    }
++    assert(std::abs(nets_via_routes - r.soft_feedthrough_nets[2]) < 1e-6);
++
++    // Cross-check 2 (the task's named check): recompute feedthrough_mismatch from the returned
++    // soft_feedthrough_nets via ft.hpp -- the EXACT formula computeOverflowAndMismatch (routing.cpp)
++    // uses -- and assert it equals the returned struct's feedthrough_mismatch. A mismatch computed
++    // against a different round's soft_feedthrough_nets (or vice versa) would fail this equality.
++    const Block& s = f.problem.blocks[2];
++    double base = s.ft_base_area > 0.0 ? s.ft_base_area : s.area;
++    double nets = r.soft_feedthrough_nets[2];
++    double required_area = ftRequiredArea(base, ftExtend(nets, ftTierRate(s, nets)));
++    double actual_area = round2(f.placement.rects[2].w * f.placement.rects[2].h);
++    double expected_mismatch = std::max(0.0, required_area - actual_area);
++    assert(expected_mismatch > 0.0);  // confirms this fixture exercises a NONTRIVIAL (nonzero) check,
++                                       // not the 0==0 case ChannelVsFtFixture's slack-absorbed S would
++                                       // give.
++    assert(std::abs(r.feedthrough_mismatch - expected_mismatch) < 1e-6);
++
++    // Determinism (task requirement 3's "determinism across two calls"), same discipline as
++    // testCostDrivenDeterministic/testNegotiatedRoutingDeterministic/testComparisonGateDeterministic
++    // above.
++    RoutingResult r2 = routeProblem(f.problem, f.placement);
++    assert(r2.open_routes == r.open_routes);
++    assert(std::abs(r2.soft_feedthrough_nets[2] - r.soft_feedthrough_nets[2]) < kEps);
++    assert(std::abs(r2.feedthrough_mismatch - r.feedthrough_mismatch) < kEps);
++    assert(r2.routes.size() == r.routes.size());
++    for (std::size_t i = 0; i < r.routes.size(); ++i) {
++        assert(r2.routes[i].node_path == r.routes[i].node_path);
++        assert(r2.routes[i].nets == r.routes[i].nets);
++    }
++
++    std::cout << "testRoundConsistencyOfSoftFeedthroughFields ok (soft_feedthrough_nets[S]="
++              << r.soft_feedthrough_nets[2] << ", feedthrough_mismatch=" << r.feedthrough_mismatch
++              << ")\n";
++}
++
+ }  // namespace
+ 
+ int main() {
+     testVerticalOverflowIsAreaDenominatedByChannelHeight();
+     testHorizontalOverflowIsAreaDenominatedByChannelWidth();
+     testOverflowAreaComparableToFtMismatchMagnitude();
+     testChannelMarginalCostIsZeroWhenSlack();
+     testChannelMarginalCostSaturatedVertical();
+     testChannelMarginalCostSaturatedHorizontal();
+     testChannelMarginalCostStraddlesCap();
+@@ -1030,13 +1141,14 @@ int main() {
+     testCostDrivenDeterministic();
+     testFixedSplitUnchangedForCostDrivenFalse();
+     testAdaptiveChunkingSplitsAtBottleneck();
+     testAdaptiveChunkingRespectsMaxChunksWithNoAlternative();
+     testAdaptiveChunkingDeterministic();
+     testNegotiationClearsRoundZeroOverflow();
+     testNegotiatedRoutingDeterministic();
+     testFeasibilityFallbackNeverWorseThanLegacyOnGenuineDeadEnd();
+     testComparisonGatePrefersLegacyWhenCostDrivenFullyRoutedButWorse();
+     testComparisonGateDeterministic();
+-    std::cout << "P2 T0+T1+T2+T3+T4+T5+T5.1 regressions passed\n";
++    testRoundConsistencyOfSoftFeedthroughFields();
++    std::cout << "P2 T0+T1+T2+T3+T4+T5+T5.1+T6 regressions passed\n";
+     return 0;
+ }

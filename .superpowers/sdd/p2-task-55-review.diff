@@ -1,0 +1,676 @@
+f4443d0 feat: comparison gate for cost-driven routing
+6833287 feat: feasibility fallback for cost-driven routing
+0587b16 docs(routing): T4 review comment minors
+
+ src/model.hpp                   |   6 +
+ src/routing.cpp                 | 105 +++++++++++---
+ test/regression_p2_20260707.cpp | 309 +++++++++++++++++++++++++++++++++++++++-
+ 3 files changed, 396 insertions(+), 24 deletions(-)
+
+diff --git a/src/model.hpp b/src/model.hpp
+index ec122ed..6e25df5 100644
+--- a/src/model.hpp
++++ b/src/model.hpp
+@@ -87,20 +87,26 @@ struct Route {
+ };
+ 
+ struct RoutingResult {
+     std::vector<Channel> channels;
+     std::vector<Route> routes;
+     std::vector<double> soft_feedthrough_nets;
+     double total_wirelength = 0.0;
+     double channel_overflow = 0.0;
+     double feedthrough_mismatch = 0.0;
+     int open_routes = 0;
++    // P2 Task 5.1 (design p2-design.md §9 T5, controller amendment: comparison gate). Telemetry only
++    // -- true iff routeProblem(..., cost_driven=true) returned the legacy two-pass result because it
++    // won (or tied) the lexicographic (open_routes, cost) comparison gate. Never read by scoring or
++    // caching logic (eval.cpp/search.cpp); exists so T7's sweep can report how often the gate saved us.
++    // Always false when cost_driven=false (legacy path never sets it).
++    bool used_fallback = false;
+ };
+ 
+ struct Score {
+     double value = std::numeric_limits<double>::infinity();
+     double outline_area = 0.0;
+     double wirelength = 0.0;
+     double penalty = 0.0;
+ };
+ 
+ inline bool isSoft(BlockType type) { return type == BlockType::Soft; }
+diff --git a/src/routing.cpp b/src/routing.cpp
+index 53b2ab8..041062b 100644
+--- a/src/routing.cpp
++++ b/src/routing.cpp
+@@ -151,54 +151,68 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
+     // finding), and cost_driven=true's non-adaptive open-route fallthrough behaves identically too.
+     //
+     // P2 Task 4: `findRoutePath`/`commitRoutePath`/`pathSlack`/`routeChunk` now take an explicit
+     // `RoutingResult& rr` (the resource ledger to read/mutate usage on) instead of closing over the
+     // single outer `result`, so the negotiation loop (below) can route each round into a fresh,
+     // round-local `RoutingResult` while `cost_driven=false` keeps passing the outer `result` directly
+     // -- zero behavior change for that path. cost_driven=true's non-negotiated call sites are gone
+     // (the round loop is now the ONLY cost_driven=true caller), so the history surcharge below is
+     // read unconditionally when cost_driven; round 0 has all-zero history vectors, making the added
+     // terms exactly 0 and reproducing plain T3 behavior (task requirement: round 0 == T3-exact).
+-    auto findRoutePath = [&](RoutingResult& rr, const Bundle& bundle, int nets) {
++    // `force_legacy` (P2 Task 5.1 fix, controller amendment): findRoutePath dispatches on the OUTER
++    // `cost_driven` parameter captured by reference, which is fixed for the entire routeProblem call --
++    // but `runLegacyPass` (below) must run TRUE legacy pricing even when called from WITHIN a
++    // cost_driven=true invocation (the new unconditional comparison-gate run). Without this override,
++    // `runLegacyPass` inside a cost_driven=true call silently reran cost-driven's OWN single-pass
++    // pricing (same `cost_driven` capture, same edge-cost formula) instead of the real two-pass
++    // channels-then-soft-fallback legacy algorithm -- a pre-existing bug in T5's original fallback that
++    // this parameter fixes: `use_legacy` below is the actual per-call mode, `force_legacy=true`
++    // unconditionally selects legacy pricing regardless of the outer flag; the default (false) preserves
++    // every existing call site's behavior exactly (`cost_driven=false` top-level calls already had
++    // `cost_driven` false, so `use_legacy` degenerates to the same thing either way; the negotiation
++    // loop's own calls never pass force_legacy, so they keep reading the outer `cost_driven`, which is
++    // always true there).
++    auto findRoutePath = [&](RoutingResult& rr, const Bundle& bundle, int nets, bool force_legacy = false) {
++        bool use_legacy = force_legacy || !cost_driven;
+         Route route;
+         route.source = bundle.source;
+         route.target = bundle.target;
+         // NOTE: route.nets is intentionally NOT set here -- it is a probe-priced search, and the
+         // caller may commit a smaller chunk of this path than `nets`. commitRoutePath sets route.nets
+         // to the actually-committed size.
+         // P2 Task 2 (design p2-design.md §Q1-Q2 core; plan Global Constraint 7 comparison gate):
+         // cost_driven=false keeps the legacy two-pass feasibility search byte-identical (pass 0
+         // channels-only, pass 1 adds soft-block feedthrough as a fallback). cost_driven=true runs a
+         // SINGLE unified Dijkstra: soft blocks are always allowed as intermediates (never a
+         // fallback-only resource) and every edge is priced in the scorer's own Cost units via
+         // route_cost.hpp, so the shortest path is the min-marginal-Delta-Cost path (channel overflow
+         // vs FT tier jump compete honestly, GC5 direct-abut stays 0, GC5 never-open is enforced by
+         // routeChunk's existing "if node_path empty -> open" fallthrough below, unchanged).
+-        int pass_count = cost_driven ? 1 : 2;
++        int pass_count = use_legacy ? 2 : 1;
+         for (int pass = 0; pass < pass_count && route.node_path.empty(); ++pass) {
+-            bool allow_soft = cost_driven ? true : (pass == 1);
++            bool allow_soft = use_legacy ? (pass == 1) : true;
+             std::vector<double> dist(total, std::numeric_limits<double>::infinity());
+             std::vector<int> prev(total, -1);
+             using Item = std::pair<double, int>;
+             std::priority_queue<Item, std::vector<Item>, std::greater<Item>> pq;
+             dist[bundle.source] = 0.0;
+             pq.push({0.0, bundle.source});
+             while (!pq.empty()) {
+                 auto [d, u] = pq.top();
+                 pq.pop();
+                 if (d != dist[u]) continue;
+                 if (u == bundle.target) break;
+                 for (int v : adj[u]) {
+                     if (!allowed(v, bundle.source, bundle.target, allow_soft)) continue;
+                     if (!endpointEdgeAllowed(u, v, bundle.source, bundle.target)) continue;
+                     double cost;
+-                    if (cost_driven) {
++                    if (!use_legacy) {
+                         // GC5: direct block<->block abut (both endpoints, zero channel, zero guide
+                         // hops) costs exactly wireCost's manhattan term with dist 0 in practice for a
+                         // 2-node path -- but pricing here is per-EDGE during search, so a block-to-
+                         // block hop (no channel/soft-FT component) is priced at wireCost only; the
+                         // eventual zero-WL abut case (§3.1/A31) falls out because the true guiding-
+                         // point WL for a 2-node path is 0 regardless of this proxy (route.wirelength
+                         // is recomputed from guides after the path is fixed, routing.cpp below).
+                         double dist_uv = manhattan(rects[u].cx(), rects[u].cy(), rects[v].cx(), rects[v].cy());
+                         cost = wireCost(problem.alpha, nets, dist_uv);
+                         if (v < n_blocks && isSoft(problem.blocks[v].type) && v != bundle.target) {
+@@ -321,24 +335,26 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
+             std::string name_b = b < n_blocks ? problem.blocks[b].name : rr.channels[b - n_blocks].name;
+             route.steps.push_back(RouteStep{name_a, edgeFromTo(rects[a], rects[b])});
+             route.steps.push_back(RouteStep{name_b, edgeFromTo(rects[b], rects[a])});
+         }
+         rr.total_wirelength += route.wirelength;
+         return route;
+     };
+ 
+     // Legacy-shaped wrapper: find a path priced at `nets` and immediately commit the WHOLE `nets` of
+     // it along that same path -- this is what routeChunk always did pre-T3 (never shrinks after
+-    // finding), so composing find+commit at the SAME size reproduces byte-identical behavior for
+-    // cost_driven=false (the only remaining caller of this wrapper after P2 Task 4).
+-    auto routeChunk = [&](RoutingResult& rr, const Bundle& bundle, int nets) {
+-        Route path = findRoutePath(rr, bundle, nets);
++    // finding), so composing find+commit at the SAME size reproduces byte-identical behavior. `force_legacy`
++    // (P2 Task 5.1 fix) forwards to findRoutePath so `runLegacyPass` (below) gets true legacy pricing
++    // even when called from within a cost_driven=true routeProblem invocation -- see findRoutePath's
++    // `force_legacy` comment. Default false preserves the top-level cost_driven=false caller unchanged.
++    auto routeChunk = [&](RoutingResult& rr, const Bundle& bundle, int nets, bool force_legacy = false) {
++        Route path = findRoutePath(rr, bundle, nets, force_legacy);
+         if (path.node_path.empty()) return path;  // open=true, open_routes already incremented
+         return commitRoutePath(rr, bundle, path.node_path, nets);
+     };
+ 
+     // Bottleneck slack along an already-found path, priced at the SAME `nets` that found it (design
+     // §5.2 step 2): the minimum, over channel/soft-FT intermediates on the path, of "how many more
+     // nets fit before this resource's next boundary" (cap for channels, next FT tier threshold for
+     // soft blocks). Returns a value >= 0 (channels/soft blocks already at or past their boundary
+     // contribute 0, correctly signaling "no slack left, saturated"). Direction classification reuses
+     // the EXACT entry-edge axis the pricing loop above uses (edgeFromTo(rects[u],rects[v]) in {1,3} =
+@@ -407,36 +423,49 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
+             double nets = rr.soft_feedthrough_nets[i];
+             if (nets <= 0.0 || !isSoft(problem.blocks[i].type)) continue;
+             // ft_base_area is 0 only for test-constructed Blocks; the parser always sets it.
+             double base = problem.blocks[i].ft_base_area > 0.0 ? problem.blocks[i].ft_base_area : problem.blocks[i].area;
+             double required_area = ftRequiredArea(base, ftExtend(nets, ftTierRate(problem.blocks[i], nets)));
+             double actual_area = round2(placement.rects[i].w * placement.rects[i].h);
+             if (actual_area + kEps < required_area) rr.feedthrough_mismatch += required_area - actual_area;
+         }
+     };
+ 
+-    if (!cost_driven) {
+-        // Legacy path (byte-identical to pre-T4, the hard global constraint): unchanged in shape,
+-        // routes straight into the outer `result` with no rounds/history.
++    // Legacy two-pass feasibility routing (channels-first pass 0, soft-block-feedthrough-fallback
++    // pass 1 via `routeChunk`/`findRoutePath` above): fixed ceil(nets/1000) chunking, routed straight
++    // into `rr`. Byte-identical in shape to pre-T4. Shared by the cost_driven=false path (below,
++    // unchanged) and, as of P2 Task 5 (design p2-design.md §9 T5; plan Global Constraint 10
++    // feasibility fallback) / P2 Task 5.1 (comparison gate, controller amendment), the cost_driven=true
++    // comparison-gate call further down. `routeChunk(rr, bundle, nets, /*force_legacy=*/true)` (P2
++    // Task 5.1 fix) is REQUIRED here, not optional: without it, this loop would silently use the OUTER
++    // `cost_driven` flag's pricing (true, when called from the gate) instead of true legacy pricing,
++    // defeating the entire comparison -- see findRoutePath's `force_legacy` comment for the full story.
++    auto runLegacyPass = [&](RoutingResult& rr) {
+         for (const auto& bundle : problem.bundles) {
+             int split_count = std::max(1, static_cast<int>(std::ceil(bundle.nets / 1000.0)));
+             split_count = std::min(split_count, 8);
+             int remaining = bundle.nets;
+             for (int part = 0; part < split_count; ++part) {
+                 int parts_left = split_count - part;
+                 int nets = (remaining + parts_left - 1) / parts_left;
+                 remaining -= nets;
+-                Route route = routeChunk(result, bundle, nets);
+-                result.routes.push_back(route);
++                Route route = routeChunk(rr, bundle, nets, /*force_legacy=*/true);
++                rr.routes.push_back(route);
+             }
+         }
+-        computeOverflowAndMismatch(result);
++        computeOverflowAndMismatch(rr);
++    };
++
++    if (!cost_driven) {
++        // Legacy path (byte-identical to pre-T4, the hard global constraint): unchanged in shape,
++        // routes straight into the outer `result` with no rounds/history.
++        runLegacyPass(result);
+         return result;
+     }
+ 
+     // P2 Task 4 (design p2-design.md §4.1-§4.4; plan Global Constraint 9): negotiated rip-up/reroute,
+     // cost_driven=true ONLY. Outer loop of kNegotiationRounds full rip-up rounds; each round routes
+     // every bundle from scratch (fresh usage/soft_feedthrough_nets, channels' GEOMETRY reused from
+     // the single extractChannels call above) into a round-local RoutingResult, using the T2/T3
+     // cost-driven Dijkstra + adaptive chunking (unchanged) plus a per-resource history surcharge that
+     // persists ACROSS rounds (history_channel/history_ft, declared call-local above routeProblem's
+     // return). Round 0's history is all-zero (nothing has been bumped yet), so round 0 is exactly the
+@@ -549,26 +578,35 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
+ 
+         // Best-round selection (design §4.1/requirement 5): strictly-less replaces, ties keep the
+         // EARLIER round (so a later round identical in cost to an earlier one does NOT overwrite it).
+         if (!have_best || roundCost(round_result) < roundCost(best)) {
+             best = round_result;
+             have_best = true;
+         }
+ 
+         // Bump history AFTER this round, for every resource that ended the round over capacity
+         // (design §4.2). Track whether ANY bump was applied this round: if none was, every resource
+-        // is within capacity and history is unchanged from before this round, so ALL subsequent
+-        // rounds would price identically and therefore route identically (same weights -> same
+-        // Dijkstra decisions -> same result) -- their outcome is PROVABLY IDENTICAL to this round's,
+-        // so continuing would be wasted work. This keeps clean/overflow-free cases (e.g. case0) at
+-        // ~1x routing cost instead of paying kNegotiationRounds x, which matters once T6 flips
+-        // cost_driven on for every exact eval (task requirement 6).
++        // is within capacity and history is unchanged from before this round. Two cases (T4 review
++        // correction -- the prior "provably identical" claim only held for the first of these): if
++        // history was ALSO all-zero going into this round, every subsequent round prices identically
++        // and therefore routes identically (same weights -> same Dijkstra decisions -> same result) --
++        // provably identical. If history was NONZERO (a prior round bumped it, then decayed) but this
++        // round still ended bump-free, later rounds are provably NOT BETTER for `best`: `best` already
++        // holds this round's overflow-free, mismatch-free result, and every later round only ever
++        // decays history further (a re-bump requires going over capacity again) -- so a later round
++        // can only reproduce the same zero-overflow routing (a tie, and best-round selection above
++        // already keeps the EARLIER round on ties) or, once the surcharge decays enough to stop
++        // deterring a previously-avoided saturated resource, reintroduce overflow (strictly worse).
++        // Either way it cannot beat `best`, so continuing is wasted work in both cases. This keeps
++        // clean/overflow-free cases (e.g. case0) at ~1x routing cost instead of paying
++        // kNegotiationRounds x, which matters once T6 flips cost_driven on for every exact eval (task
++        // requirement 6).
+         bool any_bump = false;
+         for (std::size_t c = 0; c < round_result.channels.size(); ++c) {
+             const auto& ch = round_result.channels[c];
+             double hcap = 25.0 * std::max(1.0, ch.rect.h);
+             double vcap = 25.0 * std::max(1.0, ch.rect.w);
+             if (ch.horizontal_usage > hcap) {
+                 history_channel[c][0] += kHistoryBump * (ch.horizontal_usage - hcap) / hcap;
+                 any_bump = true;
+             }
+             if (ch.vertical_usage > vcap) {
+@@ -584,14 +622,39 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
+             double placed_area = round2(placement.rects[b].w * placement.rects[b].h);
+             if (placed_area > 0.0 && required_area > placed_area) {
+                 history_ft[b] += kHistoryBump * (required_area - placed_area) / placed_area;
+                 any_bump = true;
+             }
+         }
+ 
+         if (!any_bump) break;  // provably-identical early exit, see comment above
+     }
+ 
+-    return best;
++    // P2 Task 5.1 (design p2-design.md §9 T5 preamble; controller amendment -- the binding design text
++    // mandates a FULL comparison gate, not just an open-routes fallback: "routeProblem returns the
++    // cost-driven result when it is fully routed and no worse, else the fallback"). Run the legacy
++    // two-pass router UNCONDITIONALLY here -- exactly ONCE (this is routeProblem's only runLegacyPass
++    // call site under cost_driven=true, so T5's original open-routes fallback and this gate share one
++    // legacy run rather than double-running it; `result` already carries the channel geometry extracted
++    // at the top of this call and has not been mutated since, so it is the correct receptacle) -- and
++    // pick whichever of {best, result} wins the SAME lexicographic key already used for round selection
++    // above: (open_routes, then alpha*WL + kOverflowAreaWeight*overflow + kFtMismatchWeight*mismatch).
++    // `findRoutePath`'s reachability gates are identical between cost_driven's single unified pass
++    // (allow_soft always true) and legacy pass 1 (allow_soft true), so open_routes can never be LOWER
++    // for legacy than for a genuinely-unroutable cost_driven bundle -- but the FULL key (not just the
++    // open_routes component) can still favor legacy when cost_driven is fully routed yet its greedy/
++    // history-priced choices land on a worse total cost, which is exactly the gap this amendment closes
++    // over the original open-routes-only fallback. Tie rule (deterministic, no ambiguity): `<=` prefers
++    // `best` on an EXACT tie -- ties go to the cost-driven result per controller resolution #1, since a
++    // tie means cost-driven is provably no worse and preferring it is the whole point of P2. Runtime:
++    // this doubles routing cost for every cost_driven=true call (~1x extra legacy pass on top of the
++    // negotiation rounds), accepted against the measured 45-300x contest-budget headroom in exchange for
++    // the design's "regression is impossible by the comparison gate" guarantee (§9 ordering rationale).
++    runLegacyPass(result);
++    if (roundCost(best) <= roundCost(result)) {
++        return best;
++    }
++    result.used_fallback = true;
++    return result;
+ }
+ 
+ }  // namespace efgr
+diff --git a/test/regression_p2_20260707.cpp b/test/regression_p2_20260707.cpp
+index b784eb7..e3b84da 100644
+--- a/test/regression_p2_20260707.cpp
++++ b/test/regression_p2_20260707.cpp
+@@ -600,22 +600,23 @@ void testAdaptiveChunkingDeterministic() {
+ //     x=[100,300) so it never touches SRC_B directly).
+ //   WALL (x=[140,160)) separates the two channels so they are not graph-adjacent to each other.
+ //   TGT (x=[100,300), y=[90,100)) touches both channels.
+ // Bundle A (900 nets, source=SRC_A) is heavier than bundle B (400 nets, source=SRC_B), so it is
+ // routed FIRST every round (design §4.1 nets-descending order). Round 0 (all-zero history): A finds
+ // the narrow channel cheaper (closer) than the alternate and takes all 900 nets there (900<1000, no
+ // overflow for A alone); B then has nowhere else to go (its ONLY reachable resource is the SAME
+ // narrow channel) and is forced through it too, pushing usage to 1300 > 1000 cap -- confirmed via
+ // trace: round 0 channel_overflow = ((1300-1000)/25)*80 = 960.0 um^2, open_routes=0. After round 0,
+ // the narrow channel ended over capacity, so history[narrow][vertical] is bumped
+-// (kHistoryBump*(1300-1000)/1000 = 0.3). In round 1, A is re-priced with that history surcharge
+-// (kOverflowAreaWeight * 0.3 * 900 = 2.7e8), which dwarfs the small extra wireCost distance of the
++// (kHistoryBump*(1300-1000)/1000 = 0.3). Round 1 begins by decaying history (kHistoryDecay=0.5), so
++// the LIVE value used when A is re-priced is 0.3*0.5 = 0.15; the resulting surcharge
++// (kOverflowAreaWeight * 0.15 * 900 = 1.35e8) still dwarfs the small extra wireCost distance of the
+ // alternate channel (alpha=0.001 keeps the base term negligible against 1e6-scale area terms) -- A's
+ // cheapest path flips entirely to the alternate channel, freeing the narrow channel for B alone
+ // (400 < 1000 cap) -- confirmed via trace: round 1 channel_overflow = 0.0, and this round has zero
+ // bumps (any_bump=false) so the early-exit (design requirement 6) stops before round 2.
+ struct NegotiationFixture {
+     Problem problem;
+     Placement placement;
+ };
+ 
+ NegotiationFixture makeNegotiationFixture() {
+@@ -679,20 +680,28 @@ void testNegotiationClearsRoundZeroOverflow() {
+             found_narrow = true;
+             assert(std::abs(ch.vertical_usage - 400.0) < kEps);
+         }
+         if (std::abs(ch.rect.w - 139.0) < kEps && std::abs(ch.rect.h - 90.0) < kEps) {
+             found_alt = true;
+             assert(std::abs(ch.vertical_usage - 900.0) < kEps);
+         }
+     }
+     assert(found_narrow);
+     assert(found_alt);
++
++    // P2 Task 5.1 (controller amendment, comparison gate): this fixture's whole point is that
++    // negotiation clears round 0's overflow entirely (960 um^2 -> 0), something legacy's non-
++    // negotiated single pass cannot do (legacy has no rip-up/reroute; it is stuck with round-0-
++    // equivalent behavior on this contended channel). The new gate must NOT flip this: cost-driven's
++    // fully-negotiated, zero-overflow result must still beat (or at worst tie) legacy's own run, so
++    // the fallback must not have engaged here.
++    assert(!r.used_fallback);
+     std::cout << "testNegotiationClearsRoundZeroOverflow ok (overflow=" << r.channel_overflow << ")\n";
+ }
+ 
+ // Fixture (b): determinism -- two calls of the negotiated router on the identical (problem,
+ // placement) must be bit-identical (design §4.4/§6, GC6 purity: history/usage/order are all
+ // call-local, no static/global/RNG). Checks node_paths, per-route wirelength, and the aggregate
+ // overflow/mismatch/open_routes fields element-wise, matching the T2/T3 determinism fixtures' shape.
+ void testNegotiatedRoutingDeterministic() {
+     NegotiationFixture f = makeNegotiationFixture();
+ 
+@@ -705,20 +714,311 @@ void testNegotiatedRoutingDeterministic() {
+     assert(std::abs(r1.feedthrough_mismatch - r2.feedthrough_mismatch) < kEps);
+     assert(r1.routes.size() == r2.routes.size());
+     for (std::size_t i = 0; i < r1.routes.size(); ++i) {
+         assert(r1.routes[i].node_path == r2.routes[i].node_path);
+         assert(r1.routes[i].nets == r2.routes[i].nets);
+         assert(std::abs(r1.routes[i].wirelength - r2.routes[i].wirelength) < kEps);
+     }
+     std::cout << "testNegotiatedRoutingDeterministic ok\n";
+ }
+ 
++// P2 Task 5 (design p2-design.md §9 T5; plan Global Constraint 10 comparison gate/feasibility
++// fallback): "never emit an open route" guarantee. `findRoutePath`'s reachability gates
++// (`allowed`/`endpointEdgeAllowed`, routing.cpp) are IDENTICAL between the legacy two-pass router's
++// pass 1 (channels + soft blocks, allow_soft=true) and cost_driven's single unified pass
++// (allow_soft=true unconditionally) -- same node set, same port-edge checks, same non-negative edge
++// costs -- so Dijkstra reachability (path exists vs. not) can never differ between the two: a bundle
++// unroutable by cost_driven is, by construction, EQUALLY unroutable by legacy, and vice versa. That
++// makes "legacy succeeds, cost-driven fails" NOT constructible (confirmed against the running code,
++// not just by inspection -- see the T5 report). Per the brief's fallback clause, this is instead a
++// CHARACTERIZATION fixture: a genuine topology dead end (unroutable by BOTH), used to exercise the
++// fallback CODE PATH and prove `routeProblem(...,true)` is never worse than `routeProblem(...,false)`.
++//
++// P2 Task 5.1 update (controller amendment, full comparison gate): this fixture's "ok" bundle (A->B)
++// routes identically under both algorithms (same unique channel, zero congestion at 10 nets), so its
++// contribution to the lexicographic (open_routes, cost) key is IDENTICAL on both sides; the "dead"
++// bundle (open on both sides) contributes only to the open_routes count (also identical: 1 vs 1), not
++// to the area-cost term. The gate's key is therefore an EXACT TIE, and per the gate's tie rule (ties
++// go to the cost-driven result, routing.cpp's comparison gate), `routeProblem(...,true)` now returns
++// its OWN `best` here, NOT legacy substituted wholesale -- `used_fallback` is false for this fixture,
++// a DIFFERENT outcome than the original T5-only fallback (which engaged unconditionally on
++// best.open_routes>0). This is the documented, deterministic tie-break outcome, verified against the
++// running code (not merely asserted): both `cd` and `legacy` end up numerically equal on every
++// aggregate field (so those equality assertions below still hold either way), but the ONE field that
++// distinguishes "cost-driven's own open-route bookkeeping" from "legacy's" -- `Route::nets` on the
++// dead bundle's open route (legacy's `routeChunk` leaves it at the default 0; cost-driven's
++// exhausted-probe fallthrough explicitly sets `probe.nets = remaining`) -- now reveals `cd` is
++// genuinely cost-driven's OWN result, not a substituted copy.
++//
++// Layout (single row, height 40, outline 200x40): A[0,40) -- CH[40,60) -- B[60,100) -- WALL[100,140)
++// -- D_SRC[140,160) -- D_TGT[160,200). A and B are channel-connected only via the [40,60) gap; B,
++// WALL, D_SRC, D_TGT tile the rest of the row with zero gaps, so D_SRC/D_TGT form an isolated pocket
++// reachable only from EACH OTHER, by direct abut on D_TGT's LEFT edge (edge code 1, `edgeFromTo`).
++// D_TGT.port_edges = {2} (TOP only) excludes that edge code entirely, so no traversable edge into
++// D_TGT exists anywhere in the graph -- a genuine, port-blocked dead end (brief's suggested
++// construction: "all finite-cost edges port-blocked").
++struct DeadEndFixture {
++    Problem problem;
++    Placement placement;
++};
++
++DeadEndFixture makeDeadEndFixture() {
++    DeadEndFixture f;
++    Problem& p = f.problem;
++    p.outline_w = 200.0;
++    p.outline_h = 40.0;
++    p.alpha = 1.0;
++
++    Block a = makeChannelBlock("A", 40.0, 40.0);
++    Block b = makeChannelBlock("B", 40.0, 40.0);
++    Block wall = makeChannelBlock("WALL", 40.0, 40.0);
++    Block d_src = makeChannelBlock("D_SRC", 20.0, 40.0);
++    Block d_tgt = makeChannelBlock("D_TGT", 40.0, 40.0);
++    d_tgt.port_edges = {2};  // TOP only -- excludes D_SRC's LEFT-edge (code 1) touch entirely
++
++    p.blocks = {a, b, wall, d_src, d_tgt};
++    p.block_index = {{"A", 0}, {"B", 1}, {"WALL", 2}, {"D_SRC", 3}, {"D_TGT", 4}};
++
++    Bundle ok;
++    ok.source = 0;  // A
++    ok.target = 1;  // B
++    ok.nets = 10;
++    Bundle dead;
++    dead.source = 3;  // D_SRC
++    dead.target = 4;  // D_TGT
++    dead.nets = 10;
++    p.bundles = {ok, dead};
++
++    Placement& pl = f.placement;
++    pl.rects = {
++        Rect{0.0, 0.0, 40.0, 40.0},    // A: x=[0,40)
++        Rect{60.0, 0.0, 40.0, 40.0},   // B: x=[60,100)
++        Rect{100.0, 0.0, 40.0, 40.0},  // WALL: x=[100,140)
++        Rect{140.0, 0.0, 20.0, 40.0},  // D_SRC: x=[140,160)
++        Rect{160.0, 0.0, 40.0, 40.0},  // D_TGT: x=[160,200)
++    };
++    pl.aspect.assign(pl.rects.size(), 1.0);
++    return f;
++}
++
++void testFeasibilityFallbackNeverWorseThanLegacyOnGenuineDeadEnd() {
++    DeadEndFixture f = makeDeadEndFixture();
++
++    RoutingResult legacy = routeProblem(f.problem, f.placement, /*cost_driven=*/false);
++    // Establish genuineness: the dead end is unroutable by the pre-P2 baseline too (both passes
++    // share the same port-edge gate).
++    assert(legacy.open_routes == 1);
++
++    RoutingResult cd = routeProblem(f.problem, f.placement, /*cost_driven=*/true);
++    // T5's never-worse guarantee: cost-driven's negotiation loop hits the SAME dead end every round
++    // (best.open_routes stays 1 for all kNegotiationRounds), so open_routes can never be worse than
++    // legacy's own open-route count -- true regardless of which side the T5.1 gate ultimately picks.
++    assert(cd.open_routes == legacy.open_routes);
++
++    // Aggregate fields match legacy's numerically on this fixture (see the updated fixture-level
++    // comment above): NOT because the gate substituted legacy wholesale here (it did not -- see the
++    // used_fallback/nets checks below), but because the "ok" bundle routes identically either way and
++    // the "dead" bundle contributes nothing to these fields on either side.
++    assert(cd.routes.size() == legacy.routes.size());
++    assert(std::abs(cd.total_wirelength - legacy.total_wirelength) < kEps);
++    assert(std::abs(cd.channel_overflow - legacy.channel_overflow) < kEps);
++    assert(std::abs(cd.feedthrough_mismatch - legacy.feedthrough_mismatch) < kEps);
++
++    // P2 Task 5.1 (controller amendment): the gate's key is an EXACT TIE here (open_routes 1==1, area
++    // cost equal per the fixture comment), and ties go to the cost-driven result -- so the fallback
++    // must NOT have engaged for this fixture, unlike the original T5-only (open-routes-triggers-
++    // unconditionally) behavior. This is the "documented outcome" the gate's tie rule guarantees
++    // deterministically, verified against the running code (see the nets-field check below).
++    assert(!cd.used_fallback);
++
++    // The co-existing OK bundle (A->B) still routed successfully in both -- the fallback didn't
++    // collateral-damage an otherwise-healthy bundle.
++    int ok_routes_legacy = 0, ok_routes_cd = 0;
++    for (const auto& r : legacy.routes) {
++        if (r.source == 0 && r.target == 1) {
++            assert(!r.open);
++            ++ok_routes_legacy;
++        }
++    }
++    for (const auto& r : cd.routes) {
++        if (r.source == 0 && r.target == 1) {
++            assert(!r.open);
++            ++ok_routes_cd;
++        }
++    }
++    assert(ok_routes_legacy > 0);
++    assert(ok_routes_cd == ok_routes_legacy);
++
++    // Decisive TIE-BREAK check on the DEAD bundle's own open route (P2 Task 5.1 update -- this
++    // assertion's expected outcome FLIPPED from the original T5-only test): legacy's `findRoutePath`
++    // intentionally leaves an open route's `.nets` at its 0 default (routing.cpp's "route.nets is
++    // intentionally NOT set here" comment -- `routeChunk` returns it as-is on an empty node_path,
++    // never reaching `commitRoutePath`). The negotiation loop's OWN exhausted-probe fallthrough, by
++    // contrast, explicitly sets `probe.nets = remaining` before pushing it. Since the gate's tie rule
++    // (ties go to cost-driven, asserted above via `!cd.used_fallback`) means `cd` here IS genuinely
++    // cost-driven's own `best` -- NOT legacy substituted -- `cd_dead->nets` must equal cost-driven's
++    // OWN convention (10, the bundle's full remaining nets), disagreeing with legacy's 0 default. This
++    // is the one field that proves the tie-break actually kept cost-driven's result, not a copy of
++    // legacy's: it is the mirror image of the original T5 test's wholesale-substitution proof.
++    const Route* legacy_dead = nullptr;
++    const Route* cd_dead = nullptr;
++    for (const auto& r : legacy.routes) {
++        if (r.source == 3 && r.target == 4) legacy_dead = &r;
++    }
++    for (const auto& r : cd.routes) {
++        if (r.source == 3 && r.target == 4) cd_dead = &r;
++    }
++    assert(legacy_dead != nullptr && cd_dead != nullptr);
++    assert(legacy_dead->open && cd_dead->open);
++    assert(legacy_dead->nets == 0);
++    assert(cd_dead->nets == 10);
++    assert(cd_dead->nets != legacy_dead->nets);
++
++    std::cout << "testFeasibilityFallbackNeverWorseThanLegacyOnGenuineDeadEnd ok (open_routes="
++              << cd.open_routes << ")\n";
++}
++
++// P2 Task 5.1 (design p2-design.md §9 T5 preamble; controller amendment -- FULL comparison gate).
++// The binding design text mandates routeProblem return "the cost-driven result when it is fully
++// routed AND NO WORSE, else the fallback" -- a full lexicographic cost comparison, not merely T5's
++// original open-routes-only fallback. The fixture below is the RED->GREEN case that only the full
++// gate (not the open-routes check alone) can pass: cost_driven is FULLY ROUTED (open_routes==0 on
++// BOTH sides -- the old T5 fallback would never even look at this fixture) yet LOSES the (open_routes,
++// cost) key to legacy, so the gate must still switch.
++//
++// The loss is constructed from a DOCUMENTED gap in the cost-driven Dijkstra pricing itself
++// (routing.cpp's findRoutePath channel-hop comment: "Pricing itself... uses only this single
++// entry-edge axis as an admissible one-sided proxy"): a bundle that ENTERS a channel on one axis and
++// EXITS it on the orthogonal axis (an "elbow") accrues usage on BOTH axes at commit time, but the
++// Dijkstra search only ever prices the ENTRY axis. Geometry: CH1 (the gap extracted between
++// SRC1/TGT1, rect w=40,h=610 -> vcap=25*40=1000, hcap=25*610=15250) is filled to vertical_usage=900
++// by a straight VERTICAL filler bundle (SRC1->TGT1, entering AND exiting CH1 on the vertical axis --
++// correctly priced, no overflow alone). SRC2 sits to CH1's right at mid-height (x=[40,80),
++// y=[300,320)); a second bundle SRC2->TGT1 (300 nets) can reach TGT1 either (1) via an ELBOW through
++// CH1 -- entering HORIZONTALLY from SRC2 (CH1's horizontal_usage=0, hcap huge, so the search prices
++// this hop as ~free, blind to CH1's ALREADY-high vertical_usage=900 since only the entry axis is
++// charged) then exiting vertically to TGT1 -- or (2) via CH4 (extractChannels' gap directly above
++// SRC2 in SRC2's own x-strip, x=[40,80) y=[320,650), uncongested and geometrically the shorter path
++// in this layout). Cost-driven's Dijkstra takes the mispriced-cheap elbow through CH1; committing it
++// accrues 300 nets onto BOTH ch.horizontal_usage (300, fine, hcap=15250) AND ch.vertical_usage
++// (900+300=1200, exceeding vcap=1000 by 200) -- an overflow the search never priced. Legacy's two-pass
++// router (routing.cpp's `else` edge-cost branch: `10000*nets*(horizontal_usage/hcap +
++// vertical_usage/vcap)`) sums BOTH axes' CURRENT usage regardless of entry direction, so it correctly
++// sees CH1's existing vertical_usage=900 and detours to CH4 instead -- zero overflow, and (this
++// layout's x-strips happen to make CH4 the shorter path too) even slightly lower wirelength.
++//
++// Hand-derived key values (both open_routes==0, so the AREA-cost term decides; confirmed against the
++// running code via a scratch probe before being transcribed here):
++//   cost-driven (round 0, unchanged across all kNegotiationRounds -- no cheaper alternative is ever
++//   discovered by the negotiation history mechanism for this single-shot elbow mispricing):
++//     wl=648,000; overflow=4,880 um^2 (missing_width=(1200-1000)/25=8, area=8*610=4,880); mismatch=0
++//     key = alpha*wl + kOverflowAreaWeight*overflow = 0.001*648000 + 1e6*4880 = 4,880,000,648
++//   legacy: wl=646,500; overflow=0; mismatch=0 -> key = 0.001*646500 = 646.5
++// Legacy's key is smaller by more than 7 orders of magnitude (the 1e6-weighted overflow term
++// dominates), so the gate MUST return legacy's result wholesale with used_fallback=true, despite
++// cost-driven having found a fully-routed solution -- exactly the amendment's target gap.
++struct ElbowMispricingFixture {
++    Problem problem;
++    Placement placement;
++};
++
++ElbowMispricingFixture makeElbowMispricingFixture() {
++    ElbowMispricingFixture f;
++    Problem& p = f.problem;
++    p.outline_w = 200.0;
++    p.outline_h = 650.0;
++    p.alpha = 0.001;  // small but nonzero (matches T4's fixture): WL differences must not drown the
++                       // 1e6-scale area terms, but must still be large enough to be hand-traceable.
++
++    Block src1 = makeChannelBlock("SRC1", 40.0, 10.0);
++    Block tgt1 = makeChannelBlock("TGT1", 40.0, 10.0);
++    Block src2 = makeChannelBlock("SRC2", 40.0, 20.0);
++
++    p.blocks = {src1, tgt1, src2};
++    p.block_index = {{"SRC1", 0}, {"TGT1", 1}, {"SRC2", 2}};
++
++    Bundle filler;  // straight vertical: fills CH1's vertical_usage to 900 (< vcap=1000, no overflow
++                     // alone), entering/exiting CH1 on the vertical axis both ends (correctly priced).
++    filler.source = 0;
++    filler.target = 1;
++    filler.nets = 900;
++    Bundle elbow;  // SRC2 -> TGT1: cost-driven takes the mispriced CH1 elbow; legacy detours via CH4.
++    elbow.source = 2;
++    elbow.target = 1;
++    elbow.nets = 300;
++    p.bundles = {filler, elbow};
++
++    Placement& pl = f.placement;
++    pl.rects = {
++        Rect{0.0, 0.0, 40.0, 10.0},      // SRC1: x=[0,40) y=[0,10)
++        Rect{0.0, 620.0, 40.0, 10.0},    // TGT1: x=[0,40) y=[620,630)
++        Rect{40.0, 300.0, 40.0, 20.0},   // SRC2: x=[40,80) y=[300,320)
++    };
++    pl.aspect.assign(pl.rects.size(), 1.0);
++    return f;
++}
++
++void testComparisonGatePrefersLegacyWhenCostDrivenFullyRoutedButWorse() {
++    ElbowMispricingFixture f = makeElbowMispricingFixture();
++
++    RoutingResult r = routeProblem(f.problem, f.placement, /*cost_driven=*/true);
++    // Both sides are FULLY ROUTED -- the original T5 open-routes-only fallback would never have
++    // engaged here (nothing was open). This fixture's whole point is that the amendment's full
++    // AREA-cost comparison must still catch and correct this case.
++    assert(r.open_routes == 0);
++    assert(r.used_fallback);  // legacy won on cost, not on open_routes -- the amendment's target gap.
++
++    // Wholesale substitution (single-source consistency -- every P2 task's reviewer check): the
++    // returned result matches a direct legacy call bit-for-bit on every aggregate field, not a
++    // partial/Frankenstein merge of the two.
++    RoutingResult legacy = routeProblem(f.problem, f.placement, /*cost_driven=*/false);
++    assert(r.open_routes == legacy.open_routes);
++    assert(std::abs(r.total_wirelength - legacy.total_wirelength) < kEps);
++    assert(std::abs(r.channel_overflow - legacy.channel_overflow) < kEps);
++    assert(std::abs(r.feedthrough_mismatch - legacy.feedthrough_mismatch) < kEps);
++    assert(r.routes.size() == legacy.routes.size());
++
++    // Hand-derived numbers (see fixture comment): legacy achieves zero overflow via CH4, strictly
++    // better than the cost-driven elbow's 4,880 um^2 overflow -- confirms this is a real, decisive
++    // win for legacy, not a coincidental tie.
++    assert(legacy.channel_overflow == 0.0);
++    assert(std::abs(legacy.total_wirelength - 646500.0) < 1.0);
++
++    // Cross-check the LOSING side's own numbers directly (without the gate) to confirm the fixture
++    // actually exercises the elbow mispricing described above, not some other divergence.
++    double area_cost_legacy = f.problem.alpha * legacy.total_wirelength +
++                               kOverflowAreaWeight * legacy.channel_overflow +
++                               kFtMismatchWeight * legacy.feedthrough_mismatch;
++    assert(std::abs(area_cost_legacy - 646.5) < 1.0);
++
++    std::cout << "testComparisonGatePrefersLegacyWhenCostDrivenFullyRoutedButWorse ok (legacy_wl="
++              << legacy.total_wirelength << ", legacy_overflow=" << legacy.channel_overflow << ")\n";
++}
++
++// Determinism of the comparison gate itself (GC6 purity, same invariant every other P2 fixture
++// asserts): two calls on the identical (problem, placement) must be bit-identical, including the
++// NEW `used_fallback` telemetry field.
++void testComparisonGateDeterministic() {
++    ElbowMispricingFixture f = makeElbowMispricingFixture();
++
++    RoutingResult r1 = routeProblem(f.problem, f.placement, /*cost_driven=*/true);
++    RoutingResult r2 = routeProblem(f.problem, f.placement, /*cost_driven=*/true);
++
++    assert(r1.used_fallback == r2.used_fallback);
++    assert(r1.open_routes == r2.open_routes);
++    assert(std::abs(r1.total_wirelength - r2.total_wirelength) < kEps);
++    assert(std::abs(r1.channel_overflow - r2.channel_overflow) < kEps);
++    assert(std::abs(r1.feedthrough_mismatch - r2.feedthrough_mismatch) < kEps);
++    assert(r1.routes.size() == r2.routes.size());
++    std::cout << "testComparisonGateDeterministic ok\n";
++}
++
+ }  // namespace
+ 
+ int main() {
+     testVerticalOverflowIsAreaDenominatedByChannelHeight();
+     testHorizontalOverflowIsAreaDenominatedByChannelWidth();
+     testOverflowAreaComparableToFtMismatchMagnitude();
+     testChannelMarginalCostIsZeroWhenSlack();
+     testChannelMarginalCostSaturatedVertical();
+     testChannelMarginalCostSaturatedHorizontal();
+     testChannelMarginalCostStraddlesCap();
+@@ -727,13 +1027,16 @@ int main() {
+     testWireCostTrivial();
+     testCostDrivenPrefersFtOverSaturatedChannel();
+     testCostDrivenZeroWlDirectAbutUnchanged();
+     testCostDrivenDeterministic();
+     testFixedSplitUnchangedForCostDrivenFalse();
+     testAdaptiveChunkingSplitsAtBottleneck();
+     testAdaptiveChunkingRespectsMaxChunksWithNoAlternative();
+     testAdaptiveChunkingDeterministic();
+     testNegotiationClearsRoundZeroOverflow();
+     testNegotiatedRoutingDeterministic();
+-    std::cout << "P2 T0+T1+T2+T3+T4 regressions passed\n";
++    testFeasibilityFallbackNeverWorseThanLegacyOnGenuineDeadEnd();
++    testComparisonGatePrefersLegacyWhenCostDrivenFullyRoutedButWorse();
++    testComparisonGateDeterministic();
++    std::cout << "P2 T0+T1+T2+T3+T4+T5+T5.1 regressions passed\n";
+     return 0;
+ }

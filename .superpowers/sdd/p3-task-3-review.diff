@@ -1,0 +1,315 @@
+== commits ==
+34ec8cf feat: demand-driven respace single pass
+
+== stat ==
+ src/respace.cpp                 |  57 +++++++++++++++++
+ src/respace.hpp                 |  10 +++
+ test/regression_p3_20260707.cpp | 138 +++++++++++++++++++++++++++++++++++++++-
+ 3 files changed, 204 insertions(+), 1 deletion(-)
+
+== diff ==
+diff --git a/src/respace.cpp b/src/respace.cpp
+index df47b88..479314b 100644
+--- a/src/respace.cpp
++++ b/src/respace.cpp
+@@ -1,17 +1,19 @@
+ #include "respace.hpp"
+ 
+ #include <algorithm>
+ #include <cmath>
+ #include <map>
+ #include <utility>
+ 
++#include "placement_engine.hpp"
++
+ namespace efgr {
+ namespace {
+ 
+ bool positiveOverlap(double a0, double a1, double b0, double b1) {
+     return std::min(a1, b1) - std::max(a0, b0) > kEps;
+ }
+ 
+ double overlapDepth(double a0, double a1, double b0, double b1) {
+     return std::min(a1, b1) - std::max(a0, b0);
+ }
+@@ -314,11 +316,66 @@ std::vector<StripDemand> channelDemands(const Problem& problem, const Placement&
+         // relief widens the HEIGHT -> charged to the (below,above) pair as need_h. Never read
+         // ch.usage (max aggregate) here -- the two directional fields are read separately.
+         if (has_v) demand.need_w = ch.vertical_usage / 25.0;
+         if (has_h) demand.need_h = ch.horizontal_usage / 25.0;
+ 
+         demands.push_back(demand);
+     }
+     return demands;
+ }
+ 
++namespace {
++
++// Explicit O(n^2) legality check mirroring placement_engine.cpp's file-local `placementLegalAt`
++// geometric semantics (containment in [0,w]x[0,h] + pairwise non-overlap over ALL rects, edge or
++// core). `placementLegalAt` itself is file-local to placement_engine.cpp and not exposed via
++// placement_engine.hpp, so per the task brief's "your choice" this is reproduced locally rather
++// than widening that file's public surface. Edge-block LOCATION legality (flush/thirds/corner)
++// is NOT re-checked here -- `shrinkWrapOutline`'s own commit path already gates edge rects on the
++// full `placementLegalAt` (containment + overlap + edge-location) before this function ever sees
++// them, so re-deriving that here would be redundant, not a gap.
++bool rectsLegalWithinOutline(const Placement& placement, double w, double h) {
++    for (std::size_t i = 0; i < placement.rects.size(); ++i) {
++        const Rect& r = placement.rects[i];
++        if (r.x < -kEps || r.y < -kEps || r.right() > w + kEps || r.top() > h + kEps) return false;
++        for (std::size_t j = i + 1; j < placement.rects.size(); ++j) {
++            if (overlaps(r, placement.rects[j])) return false;
++        }
++    }
++    return true;
++}
++
++}  // namespace
++
++bool respaceToDemand(const Problem& problem, Placement& placement, const RoutingResult& routing) {
++    std::vector<StripDemand> demands = channelDemands(problem, placement, routing);
++    if (demands.empty()) return false;  // nothing to relieve (design §3.5 degenerate no-op)
++
++    // Work on a local copy throughout; the caller's `placement` is only ever touched on success.
++    Placement candidate = placement;
++
++    relaxToDemand(problem, candidate, demands);
++
++    // Reset outline stamps to 0 before shrink-wrapping so shrinkWrapOutline's lower-bound
++    // arithmetic (lowerBoundNeeds) reads the freshly-relaxed core geometry, not a stale stamp from
++    // before the relax -- it re-anchors edge blocks and stamps a fresh outline for the widened
++    // core (task brief step 3).
++    candidate.outline_w = 0.0;
++    candidate.outline_h = 0.0;
++    OutlineFit fit = shrinkWrapOutline(problem, candidate);
++    if (!fit.legal) return false;  // caller's placement untouched
++
++    // Legality gate (task brief step 4): shrinkWrapOutline's own commit path already verified
++    // containment + pairwise overlap + edge-location legality via placementLegalAt internally
++    // (fit.legal == true means that gate passed at commit time) -- but re-verify pairwise overlap
++    // + containment explicitly here as well, since respaceToDemand is a public entry point that
++    // must not trust an internal callee's bookkeeping alone for its own legality contract.
++    if (!rectsLegalWithinOutline(candidate, candidate.outline_w, candidate.outline_h)) return false;
++    if (candidate.outline_w > problem.outline_w + kEps || candidate.outline_h > problem.outline_h + kEps) {
++        return false;
++    }
++
++    placement = candidate;
++    return true;
++}
++
+ }  // namespace efgr
+diff --git a/src/respace.hpp b/src/respace.hpp
+index 082dfdd..0809fdc 100644
+--- a/src/respace.hpp
++++ b/src/respace.hpp
+@@ -59,11 +59,21 @@ std::vector<StripDemand> channelDemands(const Problem& problem, const Placement&
+ // that legitimately grew past it. Edge-type blocks are not graph nodes and are left untouched
+ // (re-anchored elsewhere). If the unclamped relax would push an axis's extent past
+ // `problem.outline_w`/`outline_h` (MAX), the added demand slack is proportionally scaled back
+ // (never the base non-overlap terms) so the result never exceeds MAX; this is a partial-relief
+ // case, not a failure. Mutates `placement` in place and always returns true (per design
+ // failure-mode 1): true means "relaxed within MAX," not "every demand fully satisfied" -- a
+ // demand can still be left partially unsatisfied by the MAX scale-back, which is a graded penalty
+ // evaluated elsewhere, not a hard failure this return value encodes.
+ bool relaxToDemand(const Problem& problem, Placement& placement, const std::vector<StripDemand>& demands);
+ 
++// Single-pass demand-driven respace (design p3-design.md T3, §2.1 steps 1-5): reads the routed
++// result's per-channel demand, relaxes core-block coordinates to satisfy it (`relaxToDemand`),
++// re-anchors edge blocks + re-stamps the outline via `shrinkWrapOutline`, and gates the whole
++// result on legality (containment, pairwise non-overlap, edge-location rules) before committing.
++// Operates on a LOCAL copy of `placement`; on ANY failure (no demand, or the relaxed+re-anchored
++// result is illegal) the caller's `placement` is left completely untouched and this returns false.
++// On success, `placement` is overwritten with the legal, widened-where-needed result and this
++// returns true. Pure aside from the documented `placement` mutation; deterministic (no RNG).
++bool respaceToDemand(const Problem& problem, Placement& placement, const RoutingResult& routing);
++
+ }  // namespace efgr
+diff --git a/test/regression_p3_20260707.cpp b/test/regression_p3_20260707.cpp
+index d30e177..1c77953 100644
+--- a/test/regression_p3_20260707.cpp
++++ b/test/regression_p3_20260707.cpp
+@@ -1,17 +1,23 @@
+ #include <cassert>
+ #include <cmath>
+ #include <iostream>
++#include <memory>
++#include <random>
+ 
++#include "../src/eval.hpp"
++#include "../src/io.hpp"
+ #include "../src/model.hpp"
++#include "../src/placement_engine.hpp"
+ #include "../src/respace.hpp"
+ #include "../src/routing.hpp"
++#include "../src/validate.hpp"
+ 
+ namespace {
+ using namespace efgr;
+ 
+ Block makeBlock(const std::string& name, double w, double h) {
+     Block b;
+     b.name = name;
+     b.width = w;
+     b.height = h;
+     b.area = w * h;
+@@ -529,28 +535,158 @@ void testDemandKeyedPairAppliesEvenWhenAnotherBlockWinsPredecessorSlot() {
+         for (std::size_t j = i + 1; j < pl.rects.size(); ++j) {
+             assert(!overlaps(pl.rects[i], pl.rects[j]));
+         }
+     }
+     // EXPECTED with fix: R.x - (L.x+10) >= 25 - 1e-6 (buggy code drops the (L,R) demand because
+     // pred(R)=M -> RED).
+     assert(pl.rects[2].x - (pl.rects[0].x + 10.0) >= 25.0 - 1e-6);
+     std::cout << "testDemandKeyedPairAppliesEvenWhenAnotherBlockWinsPredecessorSlot ok\n";
+ }
+ 
++// --- T3: respaceToDemand single integrated pass + legality gate (design T3, p3-design.md §2.1) ---
++
++double sumStampedArea(double w, double h) { return w * h; }
++
++// (a) case1 bstar seed1: decode + exactScore (routes it), assert it is overflow-prone (as design
++// §6 predicts for case1), then respaceToDemand must succeed, produce a placement that
++// validateSolution accepts against ITS OWN freshly-stamped outline, whose stamped area is >= the
++// pre-respace stamped area (widening-only, never shrinks), and whose core (non-edge) blocks moved
++// only right/up (monotone widen) while preserving pairwise relative x/y order.
++void testRespaceToDemandCase1BStarSeed1() {
++    Problem problem = parseProblem("test/2026 ICCAD_case.case1.csv");
++    std::unique_ptr<PlacementEngine> engine = makePlacementEngine("bstar");
++    std::mt19937 rng(1);
++    PlacementState state = engine->initialState(problem, rng);
++    Placement placement = engine->decode(problem, state);
++
++    RoutingResult routing;
++    exactScore(problem, placement, &routing);
++    // case1 is overflow-prone per the P1 addendum / design §6 (bstar overflow ~38875 pre-P3) --
++    // assert the fixture actually exercises the overflow-relief path this test targets.
++    assert(routing.channel_overflow > kEps);
++
++    double pre_area = sumStampedArea(placement.outline_w, placement.outline_h);
++    std::vector<Rect> pre_core;
++    std::vector<int> core_indices;
++    for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
++        if (!isEdge(problem.blocks[i].type)) core_indices.push_back(static_cast<int>(i));
++    }
++    for (int i : core_indices) pre_core.push_back(placement.rects[i]);
++
++    Placement respaced = placement;
++    bool changed = respaceToDemand(problem, respaced, routing);
++    assert(changed);
++
++    // Stamped area must not shrink (widening-only per the monotone-widen design invariant).
++    double post_area = sumStampedArea(respaced.outline_w, respaced.outline_h);
++    assert(post_area + kEps >= pre_area);
++    assert(respaced.outline_w <= problem.outline_w + kEps);
++    assert(respaced.outline_h <= problem.outline_h + kEps);
++
++    // Legality: re-route the respaced placement and validate against its own fresh stamp.
++    Problem scoped = problem;
++    scoped.outline_w = respaced.outline_w;
++    scoped.outline_h = respaced.outline_h;
++    RoutingResult post_routing = routeProblem(scoped, respaced);
++    ValidationResult validation = validateSolution(scoped, respaced, post_routing);
++    if (!validation.ok) {
++        for (const auto& m : validation.messages) std::cout << "  validation: " << m << "\n";
++    }
++    assert(validation.ok);
++
++    // Core rects moved only right/up (monotone widen) and never left/down; relative order (a few
++    // spot-checked pairs by x and by y among core blocks) is preserved.
++    for (std::size_t k = 0; k < core_indices.size(); ++k) {
++        int idx = core_indices[k];
++        assert(respaced.rects[idx].x + kEps >= pre_core[k].x);
++        assert(respaced.rects[idx].y + kEps >= pre_core[k].y);
++    }
++    int pairs_checked = 0;
++    for (std::size_t a = 0; a < core_indices.size() && pairs_checked < 20; ++a) {
++        for (std::size_t b = a + 1; b < core_indices.size() && pairs_checked < 20; ++b) {
++            int ia = core_indices[a];
++            int ib = core_indices[b];
++            if (pre_core[a].x + kEps < pre_core[b].x) {
++                assert(respaced.rects[ia].x <= respaced.rects[ib].x + kEps);
++            } else if (pre_core[b].x + kEps < pre_core[a].x) {
++                assert(respaced.rects[ib].x <= respaced.rects[ia].x + kEps);
++            }
++            if (pre_core[a].y + kEps < pre_core[b].y) {
++                assert(respaced.rects[ia].y <= respaced.rects[ib].y + kEps);
++            } else if (pre_core[b].y + kEps < pre_core[a].y) {
++                assert(respaced.rects[ib].y <= respaced.rects[ia].y + kEps);
++            }
++            ++pairs_checked;
++        }
++    }
++    std::cout << "testRespaceToDemandCase1BStarSeed1 ok\n";
++}
++
++// (b) failure/no-op path: a placement whose routed result has zero channel_overflow and zero
++// directional usage everywhere -> channelDemands is empty -> respaceToDemand must return false and
++// leave the caller's placement byte-identical (design §3.5 degenerate no-op, task brief item (b)).
++void testRespaceToDemandNoDemandIsNoOp() {
++    Problem p;
++    Block a;
++    a.name = "A";
++    a.width = 100;
++    a.height = 100;
++    a.area = 100 * 100;
++    a.type = BlockType::Macro;
++    Block b;
++    b.name = "B";
++    b.width = 100;
++    b.height = 100;
++    b.area = 100 * 100;
++    b.type = BlockType::Macro;
++    p.blocks = {a, b};
++    p.block_index = {{"A", 0}, {"B", 1}};
++    p.outline_w = 200;
++    p.outline_h = 300;
++    p.alpha = 1.0;
++    // No bundles -- nothing routed, so every channel's usage stays at its zero default and
++    // channel_overflow is zero.
++
++    Placement placement;
++    placement.rects = {Rect{50, 0, 100, 100}, Rect{50, 200, 100, 100}};
++    placement.aspect = {1.0, 1.0};
++    placement.outline_w = 200;
++    placement.outline_h = 300;
++
++    RoutingResult routing = routeProblem(p, placement);
++    assert(routing.channel_overflow <= kEps);
++
++    Placement before = placement;
++    bool changed = respaceToDemand(p, placement, routing);
++    assert(!changed);
++    assert(placement.rects.size() == before.rects.size());
++    for (std::size_t i = 0; i < placement.rects.size(); ++i) {
++        assert(placement.rects[i].x == before.rects[i].x);
++        assert(placement.rects[i].y == before.rects[i].y);
++        assert(placement.rects[i].w == before.rects[i].w);
++        assert(placement.rects[i].h == before.rects[i].h);
++    }
++    assert(placement.outline_w == before.outline_w);
++    assert(placement.outline_h == before.outline_h);
++    std::cout << "testRespaceToDemandNoDemandIsNoOp ok\n";
++}
++
+ }  // namespace
+ 
+ int main() {
+     testVerticalUsageChargesNeedWOnLeftRight();
+     testHorizontalUsageChargesNeedHOnBelowAbove();
+     testWallBoundedChannelSideIsMinusOne();
+     testZeroUsageChannelsProduceNoDemand();
+     testThreeBlockRowShiftsByExactDeficit();
+     testThreeBlockColumnShiftsByExactDeficit();
+     testDemandExceedingMaxClampsToOutlineAndStaysLegal();
+     testOrderFreezeUnderVariedDemands();
+     testStaggeredDistractorDoesNotWinChannelBound();
+     testMixedDirectionChannelPopulatesBothNeeds();
+     testTieLosingCandidateCannotOverlapDiscardingBlock();
+     testDemandKeyedPairAppliesEvenWhenAnotherBlockWinsPredecessorSlot();
+-    std::cout << "P3 T1+T2 regressions passed\n";
++    testRespaceToDemandCase1BStarSeed1();
++    testRespaceToDemandNoDemandIsNoOp();
++    std::cout << "P3 T1+T2+T3 regressions passed\n";
+     return 0;
+ }

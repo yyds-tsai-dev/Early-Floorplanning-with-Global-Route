@@ -1,0 +1,504 @@
+== commits ==
+ba414f0 feat: exact scoring routes inside the declared outline
+
+== stat ==
+ .superpowers/sdd/p1-task-5-report.md | 87 ++++++++++++++++++++++++++++++++++++
+ src/eval.cpp                         | 80 +++++++++++++++++++++++++++++++--
+ src/search.cpp                       | 21 +++++++++
+ src/search.hpp                       |  5 +++
+ test/regression_p1_20260706.cpp      | 53 ++++++++++++++++++++++
+ test/run_20260608_regressions.sh     |  2 +-
+ 6 files changed, 243 insertions(+), 5 deletions(-)
+
+== diff ==
+diff --git a/.superpowers/sdd/p1-task-5-report.md b/.superpowers/sdd/p1-task-5-report.md
+new file mode 100644
+index 0000000..2a96322
+--- /dev/null
++++ b/.superpowers/sdd/p1-task-5-report.md
+@@ -0,0 +1,87 @@
++# P1 Task 5 Report — exactScore routes inside declared outline + 1-step corrective grow
++
++## Status: DONE (with scope note below)
++
++## Files changed
++- `src/eval.cpp` — `exactScore` now scopes routing to `placement.outline_w/h` (stamped) when set;
++  when unset, recomputes via `shrinkWrapOutline` on a local copy (never mutates the caller's
++  `placement`, per its `const&` signature). Extracted the route+score tail into a static
++  `routeAndScoreAt` helper shared by the stamped path, the unset-recompute path, and the one-step
++  corrective grow. Corrective grow: if `routing.open_routes > 0`, grow toward MAX by
++  `max(5%, channel_overflow/25/max(w,h))`, re-legalize edges via `shrinkWrapOutline` scoped to a
++  `Problem` whose ceiling *is* the grown target (so its bisection settles there rather than
++  re-shrinking), re-route once, and keep the grown result iff it has fewer open routes or (tied)
++  lower `score.value`.
++- `src/search.cpp` — `compactTowardOrigin` (line ~58-61): resets `placement.outline_w/h = 0.0`
++  after compaction (the required binding carry-over fix). **Scope note:** this alone left
++  `compacted`/`best_placement` inconsistent (stamp 0 falls back to MAX in `validateSolution`, but
++  the stored edge rects were never re-anchored to the smaller outline `exactScore` actually scored
++  against internally) — this surfaced as real `edge location violation` failures in
++  `run_placement_engine_regressions.sh` (sp engine, exit 1) once built. Fixed by re-stamping
++  `compacted` via `shrinkWrapOutline` immediately at both call sites (`finalizeFeedthrough` and the
++  elite pass) before it is cached/committed as `best_placement` — restores the "a placement's own
++  stamp is always consistent with its own rects" invariant every other caller relies on. This is a
++  second `search.cpp` change beyond the literally-scoped "only search.cpp change" (the outline_w/h
++  reset); flagging it explicitly since it wasn't pre-authorized, but it was required for the
++  smoke-test acceptance gate (`validation=ok`) and is minimal/mechanical (2 call sites, no new
++  logic, reuses `shrinkWrapOutline`).
++- `src/search.hpp` — exposed `compactTowardOrigin` (moved out of `search.cpp`'s anonymous
++  namespace) so the new regression test can call it directly.
++- `test/regression_p1_20260706.cpp` — two new tests (see below).
++- `test/run_20260608_regressions.sh` — added missing `src/placement_engine.cpp` to the link line;
++  this suite's g++ command didn't reference it before and now fails to link (`exactScore` calls
++  `shrinkWrapOutline`). Pure build-plumbing fix, no test logic changed.
++
++## Tests
++- `testExactScoreRoutesInsideStampedDeclaredOutlineCase0`: case0 bstar seed 1 + 50 mutations ⇒
++  stamped area < 0.95×MAX and `exactScore(...).outline_area == stamped W×H`. **Note:** verified
++  empirically that `usedOutline`'s bbox always equals the stamp after any real `decode()` call
++  (structurally guaranteed — `shrinkWrapOutline` re-anchors edges flush to the committed border,
++  so the bbox of committed rects equals the committed (W,H) by construction). This means the test
++  passes both before and after the `exactScore` fix on this specific input — it is a
++  characterization test proving the invariant holds, not a RED-before/GREEN-after regression for
++  the *natural decode* path. The genuine bug this task fixes (stamp vs. stale/recomputed geometry
++  diverging) only manifests via `compactTowardOrigin`-produced or hand-built placements, which is
++  exactly what test (b) below exercises, and what the `run_placement_engine_regressions.sh`
++  failure above confirmed empirically (validation=fail, edge location violation, pre-fix).
++- `testCompactTowardOriginResetsStampedOutline`: genuine RED→GREEN — asserts
++  `compactTowardOrigin(...).outline_w/h == 0`; failed before the `search.cpp` fix (stamp was
++  never reset), passes after.
++
++## Suite results (all green)
++- `run_p1_regressions.sh` — 15/15 ok
++- `run_p0_regressions.sh` — 8/8 ok
++- `run_case00.sh` — exit 0, both invocations `validation=ok`
++- `run_placement_engine_regressions.sh` — exit 0 (was exit 1 with `edge location violation:
++  BLK01/BLK04` on the `sp` engine before the search.cpp re-stamp fix)
++- `run_20260618_regressions.sh` — exit 0
++- `run_20260608_regressions.sh` — exit 0 (after adding `placement_engine.cpp` to its link line)
++
++## Smoke tests (case0, seed 1, 2000 iters)
++```
++engine=bstar iters=2000 exact_evals=402 blocks=7 bundles=11 channels=8 routes=13 score=9.20647e+06 outline_area=6.46288e+06 wirelength=7.30996e+06 channel_overflow=0 feedthrough_mismatch=0 open_routes=0 validation=ok
++engine=hybrid iters=2000 exact_evals=1177 blocks=7 bundles=11 channels=8 routes=13 score=1.26215e+07 outline_area=5.53447e+06 wirelength=4.77539e+06 channel_overflow=0 feedthrough_mismatch=0 open_routes=0 validation=ok
++```
++`hybrid` shows a real area win (5.53M vs 6.47M MAX, ~14.5% smaller). `bstar` at seed 1 lands at
++essentially MAX (`6.46288e+06`) with `channel_overflow=0` — spot-checked seeds 2/3 and both DO
++shrink substantially (`4.73e6`, `5.17e6`) but with nonzero `channel_overflow` (2643, 930). This
++matches the design doc's own §6 R1 caveat verbatim: the `1e6×` overflow penalty dominates any area
++term, so SA (without T7's elite outline sweep, explicitly out of scope for this task) settles at
++whatever zero-overflow local optimum it finds first, which for seed 1's specific tree topology
++happens to be near-MAX (same known pathology already documented in
++`testShrinkWrapOutlineBisectionFindsNearMinimalOutlineCase0Raw`'s comments re: BLK01 vs BLK07).
++Not a regression — T7 (elite-pass area↔overflow trade-off sweep) is the mechanism designed to fix
++this and is a separate task.
++
++## Concerns
++1. Scope: fixing the stamp/rects consistency gap required a second `search.cpp` change (2-line
++   re-stamp calls) beyond the pre-authorized outline reset. Flagged above; verified necessary via
++   direct repro (placement_engine regression failed without it) and minimal in nature.
++2. `bstar` seed-1 area win is negligible in this smoke run; real wins depend on T7 (not this task).
++3. `exactScore`'s corrective-grow path is exercised by the design's contract but not hit by any of
++   the 5 public cases at these seeds (`open_routes` was already 0 in every natural-decode
++   scenario tried) — it remains defense-in-depth per the design, not empirically load-bearing yet.
++
++## Report path
++`.superpowers/sdd/p1-task-5-report.md` (this file, WSL path
++`/home/yyds/Early-Floorplanning-with-Global-Route/.superpowers/sdd/p1-task-5-report.md`)
+diff --git a/src/eval.cpp b/src/eval.cpp
+index 2f27b32..81d6734 100644
+--- a/src/eval.cpp
++++ b/src/eval.cpp
+@@ -1,15 +1,17 @@
+ #include "eval.hpp"
+ 
++#include <algorithm>
+ #include <tuple>
+ 
+ #include "ft.hpp"
++#include "placement_engine.hpp"
+ 
+ namespace efgr {
+ 
+ std::pair<double, double> usedOutline(const Problem& problem, const Placement& placement) {
+     double w = 0.0;
+     double h = 0.0;
+     for (const auto& r : placement.rects) {
+         w = std::max(w, r.right());
+         h = std::max(h, r.top());
+     }
+@@ -117,27 +119,97 @@ Score cheapScore(const Problem& problem, const Placement& placement) {
+         const auto& a = placement.rects[b.source];
+         const auto& c = placement.rects[b.target];
+         wire_proxy += manhattan(a.cx(), a.cy(), c.cx(), c.cy()) * b.nets;
+     }
+     score.wirelength = wire_proxy;
+     score.penalty = penalty + routeAwareProxyPenalty(problem, placement);
+     score.value = score.outline_area + problem.alpha * wire_proxy + score.penalty;
+     return score;
+ }
+ 
+-Score exactScore(const Problem& problem, const Placement& placement, RoutingResult* routing_out) {
+-    auto [used_w, used_h] = usedOutline(problem, placement);
++namespace {
++
++// Builds the scoped Problem + score/routing for `placement` at declared outline (w,h) -- the
++// common tail shared by exactScore's stamped path, its unset-recompute path, and the one-step
++// corrective grow (design p1-design.md §1.4).
++Score routeAndScoreAt(const Problem& problem, const Placement& placement, double w, double h,
++                      RoutingResult* routing_out) {
+     Problem scoped = problem;
+-    scoped.outline_w = used_w;
+-    scoped.outline_h = used_h;
++    scoped.outline_w = w;
++    scoped.outline_h = h;
+     RoutingResult routing = routeProblem(scoped, placement);
+     Score score = cheapScore(scoped, placement);
+     score.wirelength = routing.total_wirelength;
+     score.penalty += routing.open_routes * 1e15;
+     score.penalty += routing.channel_overflow * 1e6;
+     score.penalty += routing.feedthrough_mismatch * 1e6;
+     score.value = score.outline_area + problem.alpha * score.wirelength + score.penalty;
+     if (routing_out) *routing_out = routing;
+     return score;
+ }
+ 
++}  // namespace
++
++Score exactScore(const Problem& problem, const Placement& placement, RoutingResult* routing_out) {
++    // Scope routing to the placement's STAMPED declared outline (design §1.4) -- not a bbox
++    // recomputed from usedOutline, which ignores the shrink-wrap entirely. When unset (0,0; e.g.
++    // a hand-built placement, or one whose stamp went stale -- see compactTowardOrigin's reset),
++    // recompute via the exact shrinkWrapOutline on a LOCAL copy: exactScore takes `placement` by
++    // const&, and shrinkWrapOutline mutates (re-anchors edge rects to the shrunk border), so it
++    // must never touch the caller's placement. Route/score the local copy's rects, since edge
++    // re-anchoring changes which rects touch which channels.
++    Placement local = placement;
++    double w = local.outline_w;
++    double h = local.outline_h;
++    if (w <= 0.0 || h <= 0.0) {
++        OutlineFit fit = shrinkWrapOutline(problem, local);
++        w = fit.w;
++        h = fit.h;
++    }
++
++    RoutingResult routing;
++    Score score = routeAndScoreAt(problem, local, w, h, &routing);
++
++    // One-step corrective grow (design §1.4): if the declared outline was too tight to route,
++    // grow once and re-route. Target size scales toward MAX by the worse of a flat +5% floor or a
++    // margin sized to the observed channel_overflow (overflow/25, matching channelMarginProxy's
++    // nets-per-25 capacity unit), clamped to MAX. shrinkWrapOutline only ever searches DOWN from
++    // whatever ceiling it is given (it never enlarges beyond it -- design §1.2.4), so to force a
++    // floor at the grown target we scope a Problem whose ceiling equals that target directly (not
++    // problem's real MAX) and re-legalize edges against it: the bisection's t=1 endpoint is then
++    // exactly the grown target, which becomes the trial actually committed unless the grown
++    // target ITSELF is infeasible (rare -- e.g. an edge/thirds conflict that isn't sized by
++    // overflow), in which case the ceiling call reports illegal and we keep the original result.
++    if (routing.open_routes > 0) {
++        double margin = std::max(0.05, routing.channel_overflow / 25.0 / std::max(w, h));
++        double grown_w = std::min(problem.outline_w, w * (1.0 + margin));
++        double grown_h = std::min(problem.outline_h, h * (1.0 + margin));
++
++        Problem ceiling = problem;
++        ceiling.outline_w = grown_w;
++        ceiling.outline_h = grown_h;
++        Placement regrow = local;
++        OutlineFit grown_fit = shrinkWrapOutline(ceiling, regrow);
++
++        if (grown_fit.legal) {
++            RoutingResult grown_routing;
++            Score grown_score = routeAndScoreAt(problem, regrow, grown_fit.w, grown_fit.h, &grown_routing);
++
++            bool prefer_grown;
++            if (routing.open_routes != grown_routing.open_routes) {
++                prefer_grown = grown_routing.open_routes == 0;
++            } else {
++                prefer_grown = grown_score.value < score.value;
++            }
++            if (prefer_grown) {
++                local = regrow;
++                score = grown_score;
++                routing = grown_routing;
++            }
++        }
++    }
++
++    if (routing_out) *routing_out = routing;
++    return score;
++}
++
+ }  // namespace efgr
+diff --git a/src/search.cpp b/src/search.cpp
+index df309cb..e3ab4b3 100644
+--- a/src/search.cpp
++++ b/src/search.cpp
+@@ -10,20 +10,22 @@
+ #include "ft.hpp"
+ #include "validate.hpp"
+ 
+ namespace efgr {
+ namespace {
+ 
+ bool axisOverlap(double a0, double a1, double b0, double b1) {
+     return std::min(a1, b1) - std::max(a0, b0) > kEps;
+ }
+ 
++}  // namespace
++
+ Placement compactTowardOrigin(const Problem& problem, Placement placement) {
+     std::vector<int> order;
+     for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
+         if (!isEdge(problem.blocks[i].type)) order.push_back(static_cast<int>(i));
+     }
+     std::sort(order.begin(), order.end(), [&](int a, int b) {
+         double ka = placement.rects[a].x + placement.rects[a].y;
+         double kb = placement.rects[b].x + placement.rects[b].y;
+         if (std::abs(ka - kb) > kEps) return ka < kb;
+         return a < b;
+@@ -46,23 +48,31 @@ Placement compactTowardOrigin(const Problem& problem, Placement placement) {
+             for (std::size_t j = 0; j < placement.rects.size(); ++j) {
+                 if (static_cast<int>(j) == idx) continue;
+                 const Rect& o = placement.rects[j];
+                 if (o.top() <= r.y + kEps && axisOverlap(r.x, r.right(), o.x, o.right())) {
+                     y = std::max(y, o.top());
+                 }
+             }
+             r.y = std::min(std::max(0.0, y), std::max(0.0, problem.outline_h - r.h));
+         }
+     }
++    // T5 carry-over fix (p1-design.md §1.4, binding on this task): compaction moves core rects,
++    // which invalidates any previously stamped shrink-wrap outline (it was computed for the
++    // pre-compaction rects). Reset so exactScore's unset-path recomputes a fresh shrink-wrap
++    // against the post-compaction geometry instead of scoring against a stale stamp.
++    placement.outline_w = 0.0;
++    placement.outline_h = 0.0;
+     return placement;
+ }
+ 
++namespace {
++
+ bool fitsOutlineWithoutOverlap(const Problem& problem, const Placement& placement) {
+     for (std::size_t i = 0; i < placement.rects.size(); ++i) {
+         const Rect& r = placement.rects[i];
+         if (r.x < -kEps || r.y < -kEps || r.right() > problem.outline_w + kEps || r.top() > problem.outline_h + kEps) {
+             return false;
+         }
+         for (std::size_t j = i + 1; j < placement.rects.size(); ++j) {
+             if (overlaps(r, placement.rects[j])) return false;
+         }
+     }
+@@ -129,20 +139,27 @@ void finalizeFeedthrough(const Problem& problem, const PlacementEngine& engine,
+         if (!grew) break;
+         PlacementState state = engine.seedFromPlacement(inflated, placement, rng);
+         placement = engine.decode(inflated, state);
+         RoutingResult new_routing;
+         Score exact = exactScore(inflated, placement, &new_routing);
+         routing = new_routing;
+         tryCommit(placement, exact, new_routing);
+         // Reclaim outline/overflow lost to the inflated re-decode: same dims, tighter packing.
+         Placement compacted = compactTowardOrigin(inflated, placement);
+         if (fitsOutlineWithoutOverlap(inflated, compacted)) {
++            // compactTowardOrigin resets outline_w/h to 0 (moved core rects invalidate any prior
++            // stamp). Re-stamp immediately so `compacted`, once committed as best_placement, is
++            // internally consistent with its OWN rects/outline for later validateSolution/writeCfg
++            // calls -- exactScore below would otherwise recompute the shrink-wrap on an internal
++            // copy for scoring only, leaving this stored `compacted` stale (edges not re-anchored,
++            // stamp 0 -> falls back to MAX) even though it was scored/routed at a smaller outline.
++            shrinkWrapOutline(inflated, compacted);
+             RoutingResult compacted_routing;
+             Score compacted_exact = exactScore(inflated, compacted, &compacted_routing);
+             tryCommit(compacted, compacted_exact, compacted_routing);
+         }
+         // A single re-decode of the inflated problem often spills past MAX (a legal
+         // arrangement may still exist -- other engines find one). Jiggle the inflated
+         // topology a bounded number of times; only geometrically legal candidates pay
+         // for exact routing, and all commits go through the same paydown gate.
+         constexpr int kFinalizeRepairAttempts = 32;
+         PlacementState repair = state;
+@@ -249,20 +266,24 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
+     for (const auto& candidate : top_candidates) {
+         RoutingResult routing;
+         Score exact = exactCached(candidate.placement, &routing);
+         if (exact.value < result.best_score.value) {
+             result.best_score = exact;
+             result.best_placement = candidate.placement;
+             result.best_routing = routing;
+         }
+ 
+         Placement compacted = compactTowardOrigin(problem, candidate.placement);
++        // Re-stamp immediately (see the matching comment in finalizeFeedthrough above): keeps
++        // `compacted` internally consistent before it is cached/stored as best_placement, and
++        // gives exactCached's placementKey the real declared outline instead of the reset 0x0.
++        shrinkWrapOutline(problem, compacted);
+         Score compact_exact = exactCached(compacted, &routing);
+         if (compact_exact.value < result.best_score.value) {
+             result.best_score = compact_exact;
+             result.best_placement = compacted;
+             result.best_routing = routing;
+         }
+     }
+ 
+     (void)best_state;
+     (void)current_place;
+diff --git a/src/search.hpp b/src/search.hpp
+index fc6b6a6..8b4e097 100644
+--- a/src/search.hpp
++++ b/src/search.hpp
+@@ -18,20 +18,25 @@ struct SearchOptions {
+ struct SearchResult {
+     std::string engine_name;
+     int iterations = 0;
+     int exact_evaluations = 0;
+     Score best_score;
+     Placement best_placement;
+     RoutingResult best_routing;
+ };
+ 
+ std::string placementKey(const Placement& placement);
++// Pushes non-edge blocks toward the origin against problem.outline_w/h (MAX), reclaiming slack
++// left by e.g. a feedthrough-inflation re-decode. Resets the returned placement's stamped declared
++// outline (outline_w/h = 0) since compaction moves core rects and invalidates any prior
++// shrink-wrap stamp -- callers (exactScore via the unset-path) recompute a fresh one.
++Placement compactTowardOrigin(const Problem& problem, Placement placement);
+ // finalizeFeedthrough commit rule: pay the FT-mismatch deduction down first (QA A1.2),
+ // independent of total score; between equal-mismatch candidates prefer the lower total.
+ bool acceptFeedthroughPaydown(const RoutingResult& candidate, double candidate_value,
+                               const RoutingResult& best, double best_value);
+ // Result arbitration (hybrid legs) under the same paydown-first ordering:
+ // fewer open routes, then lower feedthrough mismatch, then lower total score.
+ bool paydownBetter(const RoutingResult& a, double a_value, const RoutingResult& b, double b_value);
+ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& engine, const SearchOptions& options);
+ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& engine, const SearchOptions& options,
+                                 const PlacementState& initial_state);
+diff --git a/test/regression_p1_20260706.cpp b/test/regression_p1_20260706.cpp
+index fd3f21e..3c4c2a3 100644
+--- a/test/regression_p1_20260706.cpp
++++ b/test/regression_p1_20260706.cpp
+@@ -8,20 +8,21 @@
+ #include <sstream>
+ 
+ #include "../src/eval.hpp"
+ #include "../src/ft.hpp"
+ #include "../src/io.hpp"
+ #include "../src/model.hpp"
+ #include "../src/placement_engine.hpp"
+ #include "../src/routing.hpp"
+ #include "../src/search.hpp"
+ #include "../src/validate.hpp"
++// compactTowardOrigin (declared in search.hpp) is exercised directly below.
+ 
+ namespace {
+ using namespace efgr;
+ 
+ Placement twoRectPlacement() {
+     Placement pl;
+     pl.rects = {Rect{0.0, 0.0, 100.0, 200.0}, Rect{100.0, 0.0, 50.0, 200.0}};
+     pl.aspect = {1.0, 1.0};
+     return pl;
+ }
+@@ -500,29 +501,81 @@ void testShrinkWrapOutlineBisectionFindsNearMinimalOutlineCase0Raw() {
+     std::mt19937 rng(1);
+     PlacementState state = engine->initialState(problem, rng);
+     Placement placement = engine->decode(problem, state);
+ 
+     double max_area = problem.outline_w * problem.outline_h;
+     assert(placement.outline_w > 0.0 && placement.outline_h > 0.0);
+     assert(placement.outline_w * placement.outline_h <= 0.95 * max_area);
+     std::cout << "testShrinkWrapOutlineBisectionFindsNearMinimalOutlineCase0Raw ok\n";
+ }
+ 
++// T5 (design §1.4): exactScore must scope routing to the placement's STAMPED declared outline,
++// not the usedOutline(bbox) it reads today. case0 bstar decode seed 1 stamps a declared outline
++// strictly below MAX (per testDecodeStampsOutlineCase0BStarSeed1/T4.5, ~0.93x MAX after a handful
++// of mutations -- here we drive a few mutations for the same reason that test does, since the raw
++// unmutated chain hits the documented h-forced-to-MAX pathology). Asserts: (1) exactScore's
++// returned outline_area equals the stamped W*H exactly (routing scoped at the stamp, not
++// recomputed from a bbox that could differ), and (2) that stamped area is meaningfully below MAX
++// (case0 util ~55.6%), i.e. this is not a case where bbox==stamp trivially.
++void testExactScoreRoutesInsideStampedDeclaredOutlineCase0() {
++    Problem problem = parseProblem("test/2026 ICCAD_case.case0.csv");
++    std::unique_ptr<PlacementEngine> engine = makePlacementEngine("bstar");
++    std::mt19937 rng(1);
++    PlacementState state = engine->initialState(problem, rng);
++    for (int i = 0; i < 50; ++i) engine->mutate(problem, state, rng);
++    Placement placement = engine->decode(problem, state);
++
++    assert(placement.outline_w > 0.0 && placement.outline_h > 0.0);
++    double max_area = problem.outline_w * problem.outline_h;
++    double stamped_area = placement.outline_w * placement.outline_h;
++    assert(stamped_area < 0.95 * max_area);
++
++    RoutingResult routing;
++    Score score = exactScore(problem, placement, &routing);
++
++    assert(std::abs(score.outline_area - stamped_area) < 1e-6 * std::max(1.0, stamped_area));
++    std::cout << "testExactScoreRoutesInsideStampedDeclaredOutlineCase0 ok\n";
++}
++
++// T5 carry-over fix (binding, per task-5 brief): compactTowardOrigin moves core rects but must
++// reset the stamped declared outline to 0/0 so exactScore's unset-path recomputes a fresh
++// shrink-wrap -- otherwise the stale stamp (computed for the PRE-compaction rects) would be used
++// to scope routing for POST-compaction rects, which is wrong (and could even be illegal: compacted
++// rects fit inside a smaller box than the stale stamp describes, or in pathological cases larger).
++// search.cpp's compactTowardOrigin is declared in the efgr namespace (not anonymous), so it's
++// linkable from this test binary without a header change.
++void testCompactTowardOriginResetsStampedOutline() {
++    Problem problem = parseProblem("test/2026 ICCAD_case.case0.csv");
++    std::unique_ptr<PlacementEngine> engine = makePlacementEngine("bstar");
++    std::mt19937 rng(1);
++    PlacementState state = engine->initialState(problem, rng);
++    Placement placement = engine->decode(problem, state);
++    assert(placement.outline_w > 0.0 && placement.outline_h > 0.0);
++
++    Placement compacted = compactTowardOrigin(problem, placement);
++
++    assert(compacted.outline_w == 0.0);
++    assert(compacted.outline_h == 0.0);
++    std::cout << "testCompactTowardOriginResetsStampedOutline ok\n";
++}
++
+ }  // namespace
+ 
+ int main() {
+     testPlacementKeyDiffersWithOutline();
+     testPlacementKeyUnsetMatchesTodaysFormat();
+     testShrinkWrapEstimateCase0BStarSeed1();
+     testShrinkWrapEstimateCornerBlocksForceMaxHeightOnly();
+     testShrinkWrapEstimateNoEdgeBlocksEqualsCoreBbox();
+     testShrinkWrapOutlineAllCasesBStarSeed1();
+     testShrinkWrapOutlineCase0FuzzSeeds();
+     testShrinkWrapOutlineMidSideBlockLongerThanShrunkThird();
+     testValidateAndWriteCfgUseDeclaredOutlineOnShrunkCase0();
+     testOutlineConsistencyEvalVsCfgShrunkCase();
+     testDecodeStampsOutlineCase0BStarSeed1();
+     testCheapScoreOutlineAreaGradientCompactVsSpread();
+     testShrinkWrapOutlineBisectionFindsNearMinimalOutlineCase0Raw();
++    testExactScoreRoutesInsideStampedDeclaredOutlineCase0();
++    testCompactTowardOriginResetsStampedOutline();
+     std::cout << "p1 regressions passed\n";
+     return 0;
+ }
+diff --git a/test/run_20260608_regressions.sh b/test/run_20260608_regressions.sh
+index 6d170c1..962e843 100644
+--- a/test/run_20260608_regressions.sh
++++ b/test/run_20260608_regressions.sh
+@@ -1,18 +1,18 @@
+ #!/usr/bin/env bash
+ set -euo pipefail
+ 
+ make clean
+ make
+ g++ -std=c++17 -O2 -Wall -Wextra -pedantic \
+   -I. \
+   test/regression_20260608.cpp \
+-  src/io.cpp src/floorplan.cpp src/routing.cpp src/eval.cpp \
++  src/io.cpp src/floorplan.cpp src/routing.cpp src/eval.cpp src/placement_engine.cpp \
+   -o /tmp/regression_20260608
+ /tmp/regression_20260608
+ 
+ bin/efgr "test/E_testcase_20260608_port.csv" /tmp/case_20260608.cfg --iters 50 --seed 1 --exact-interval 10
+ test -s /tmp/case_20260608.cfg
+ grep -q '^OUTLINE' /tmp/case_20260608.cfg
+ grep -q '^BLOCK' /tmp/case_20260608.cfg
+ grep -q '^CHANNEL' /tmp/case_20260608.cfg
+ grep -q '^PATH' /tmp/case_20260608.cfg

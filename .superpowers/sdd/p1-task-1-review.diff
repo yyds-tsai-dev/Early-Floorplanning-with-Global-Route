@@ -1,0 +1,172 @@
+== commits ==
+06a830b feat: add declared outline fields to Placement and placementKey
+
+== stat ==
+ .gitignore                      |  1 +
+ src/model.hpp                   |  2 ++
+ src/search.cpp                  |  2 ++
+ test/regression_p1_20260706.cpp | 61 +++++++++++++++++++++++++++++++++++++++++
+ test/run_p1_regressions.sh      | 14 ++++++++++
+ 5 files changed, 80 insertions(+)
+
+== diff ==
+diff --git a/.gitignore b/.gitignore
+index 07164bd..fb7b2b0 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -1,13 +1,14 @@
+ # Build outputs
+ bin/
+ test/p0_regression_bin
++test/p1_regression_bin
+ 
+ # Object files
+ *.o
+ 
+ # Python virtual environments
+ .venv/
+ 
+ # Local worktrees
+ .worktrees/
+ 
+diff --git a/src/model.hpp b/src/model.hpp
+index 3ca8b4c..ec122ed 100644
+--- a/src/model.hpp
++++ b/src/model.hpp
+@@ -52,20 +52,22 @@ struct Problem {
+     std::map<std::string, int> block_index;
+     std::vector<Bundle> bundles;
+     double outline_w = 0.0;
+     double outline_h = 0.0;
+     double alpha = 1.0;
+ };
+ 
+ struct Placement {
+     std::vector<Rect> rects;
+     std::vector<double> aspect;
++    double outline_w = 0.0;
++    double outline_h = 0.0;
+ };
+ 
+ struct Channel {
+     std::string name;
+     Rect rect;
+     double usage = 0.0;
+     double horizontal_usage = 0.0;
+     double vertical_usage = 0.0;
+ };
+ 
+diff --git a/src/search.cpp b/src/search.cpp
+index 9721e89..6d4a4b2 100644
+--- a/src/search.cpp
++++ b/src/search.cpp
+@@ -58,20 +58,22 @@ Placement compactTowardOrigin(const Problem& problem, Placement placement) {
+ }  // namespace
+ 
+ std::string placementKey(const Placement& placement) {
+     std::ostringstream out;
+     for (const auto& r : placement.rects) {
+         out << std::llround(r.x * 1000.0) << ','
+             << std::llround(r.y * 1000.0) << ','
+             << std::llround(r.w * 1000.0) << ','
+             << std::llround(r.h * 1000.0) << ';';
+     }
++    out << ':' << std::llround(placement.outline_w * 1000.0) << 'x'
++        << std::llround(placement.outline_h * 1000.0);
+     return out.str();
+ }
+ 
+ void finalizeFeedthrough(const Problem& problem, const PlacementEngine& engine, SearchResult& result) {
+     if (result.best_routing.feedthrough_mismatch <= kEps) return;
+     Problem inflated = problem;
+     Placement placement = result.best_placement;
+     RoutingResult routing = result.best_routing;
+     std::mt19937 rng(0x9e3779b9u);
+     for (int pass = 0; pass < 3; ++pass) {
+diff --git a/test/regression_p1_20260706.cpp b/test/regression_p1_20260706.cpp
+new file mode 100644
+index 0000000..cebc57a
+--- /dev/null
++++ b/test/regression_p1_20260706.cpp
+@@ -0,0 +1,61 @@
++#include <cassert>
++#include <cmath>
++#include <cstdio>
++#include <iostream>
++#include <sstream>
++
++#include "../src/eval.hpp"
++#include "../src/ft.hpp"
++#include "../src/io.hpp"
++#include "../src/model.hpp"
++#include "../src/placement_engine.hpp"
++#include "../src/routing.hpp"
++#include "../src/search.hpp"
++#include "../src/validate.hpp"
++
++namespace {
++using namespace efgr;
++
++Placement twoRectPlacement() {
++    Placement pl;
++    pl.rects = {Rect{0.0, 0.0, 100.0, 200.0}, Rect{100.0, 0.0, 50.0, 200.0}};
++    pl.aspect = {1.0, 1.0};
++    return pl;
++}
++
++void testPlacementKeyDiffersWithOutline() {
++    Placement unset = twoRectPlacement();
++    Placement withOutline = twoRectPlacement();
++    withOutline.outline_w = 100.0;
++    withOutline.outline_h = 200.0;
++
++    std::string key_unset = placementKey(unset);
++    std::string key_with_outline = placementKey(withOutline);
++    assert(key_unset != key_with_outline);
++    std::cout << "testPlacementKeyDiffersWithOutline ok\n";
++}
++
++void testPlacementKeyUnsetMatchesTodaysFormat() {
++    Placement pl = twoRectPlacement();
++    assert(pl.outline_w == 0.0);
++    assert(pl.outline_h == 0.0);
++
++    std::ostringstream expected;
++    for (const auto& r : pl.rects) {
++        expected << std::llround(r.x * 1000.0) << ',' << std::llround(r.y * 1000.0) << ','
++                 << std::llround(r.w * 1000.0) << ',' << std::llround(r.h * 1000.0) << ';';
++    }
++    expected << ':' << std::llround(pl.outline_w * 1000.0) << 'x' << std::llround(pl.outline_h * 1000.0);
++
++    assert(placementKey(pl) == expected.str());
++    std::cout << "testPlacementKeyUnsetMatchesTodaysFormat ok\n";
++}
++
++}  // namespace
++
++int main() {
++    testPlacementKeyDiffersWithOutline();
++    testPlacementKeyUnsetMatchesTodaysFormat();
++    std::cout << "p1 regressions passed\n";
++    return 0;
++}
+diff --git a/test/run_p1_regressions.sh b/test/run_p1_regressions.sh
+new file mode 100755
+index 0000000..df1017e
+--- /dev/null
++++ b/test/run_p1_regressions.sh
+@@ -0,0 +1,14 @@
++#!/usr/bin/env bash
++set -euo pipefail
++cd "$(dirname "$0")/.."
++
++make >/dev/null
++
++g++ -std=c++17 -O2 -Wall -Wextra -pedantic \
++    test/regression_p1_20260706.cpp \
++    src/routing.cpp src/eval.cpp src/io.cpp src/validate.cpp \
++    src/placement_engine.cpp src/search.cpp src/floorplan.cpp \
++    -o test/p1_regression_bin
++
++./test/p1_regression_bin
++echo "P1 regressions passed"

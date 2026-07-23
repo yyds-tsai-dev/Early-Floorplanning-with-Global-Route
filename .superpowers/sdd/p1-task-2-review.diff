@@ -1,0 +1,301 @@
+== commits ==
+b269688 feat: add cheap shrink-wrap outline estimate
+
+== stat ==
+ src/placement_engine.cpp        |  96 +++++++++++++++++++++++++++++++++
+ src/placement_engine.hpp        |  10 ++++
+ test/regression_p1_20260706.cpp | 115 ++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 221 insertions(+)
+
+== diff ==
+diff --git a/src/placement_engine.cpp b/src/placement_engine.cpp
+index f6950c9..d78b2df 100644
+--- a/src/placement_engine.cpp
++++ b/src/placement_engine.cpp
+@@ -660,11 +660,107 @@ std::unique_ptr<PlacementEngine> makePlacementEngine(const std::string& name) {
+     if (name == "bstar" || name == "b-tree" || name == "btree") {
+         return std::unique_ptr<PlacementEngine>(new BStarEngine());
+     }
+     throw std::invalid_argument("unknown placement engine: " + name);
+ }
+ 
+ std::vector<std::string> placementEngineNames() {
+     return {"sp", "bstar", "hybrid"};
+ }
+ 
++namespace {
++
++// Cheap per-axis lower bound from core (non-edge) block extents and edge block width/height
++// needs (design p1-design.md §1.2.1). Does not consider thirds feasibility -- that is probed
++// separately in shrinkWrapEstimate.
++void lowerBoundNeeds(const Problem& problem, const Placement& placement, double* w_min, double* h_min) {
++    double w_core = 0.0;
++    double h_core = 0.0;
++    double w_edge = 0.0;
++    double h_edge = 0.0;
++    for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
++        const Rect& r = placement.rects[i];
++        if (!isEdge(problem.blocks[i].type)) {
++            w_core = std::max(w_core, r.right());
++            h_core = std::max(h_core, r.top());
++            continue;
++        }
++        // Edge block flush to its border occupies its own width/height regardless of anchor
++        // side; corner (multi-side) blocks force both axes simultaneously.
++        w_edge = std::max(w_edge, r.w);
++        h_edge = std::max(h_edge, r.h);
++    }
++    *w_min = std::max({w_core, w_edge, 1.0});
++    *h_min = std::max({h_core, h_edge, 1.0});
++}
++
++// Cheap feasibility probe: on a scoped Problem at candidate (W,H), verify every edge block can
++// find a legal slot via firstLegalEdgeSlot, without mutating the caller's placement. Mirrors the
++// existing legalizeEdgeBlocks ordering (multi-side/corner blocks first, then largest extent) so
++// it estimates the same feasibility as the exact re-anchor loop would find (design §1.2.2-1.2.4).
++bool edgeBlocksFeasibleAt(const Problem& problem, const Placement& placement, double w, double h) {
++    Problem scoped = problem;
++    scoped.outline_w = w;
++    scoped.outline_h = h;
++
++    std::vector<int> edges;
++    for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
++        if (isEdge(problem.blocks[i].type)) edges.push_back(static_cast<int>(i));
++    }
++    if (edges.empty()) return true;
++
++    std::sort(edges.begin(), edges.end(), [&](int a, int b) {
++        bool ac = hasMultipleBoundarySides(problem.blocks[a]);
++        bool bc = hasMultipleBoundarySides(problem.blocks[b]);
++        if (ac != bc) return ac > bc;
++        double as = std::max(placement.rects[a].w, placement.rects[a].h);
++        double bs = std::max(placement.rects[b].w, placement.rects[b].h);
++        if (std::abs(as - bs) > kEps) return as > bs;
++        return a < b;
++    });
++
++    std::vector<Rect> rects = placement.rects;
++    for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
++        if (isEdge(problem.blocks[i].type)) rects[i] = dimensionFor(problem.blocks[i], 1.0);
++    }
++    std::vector<bool> placed(problem.blocks.size(), false);
++    for (int idx : edges) {
++        Rect slot = firstLegalEdgeSlot(scoped, problem.blocks[idx], rects, placed, idx);
++        if (!edgeRectLegal(scoped, problem.blocks[idx], slot)) return false;
++        if (slot.x < -kEps || slot.y < -kEps || slot.right() > w + kEps || slot.top() > h + kEps) return false;
++        // firstLegalEdgeSlot's multi-side (corner) branch defers straight to placeEdge, which is
++        // a pure function of outline dims + block dims + locations with no awareness of
++        // already-placed rects -- unlike the single-side branch it never runs collidesWithPlaced
++        // itself. Gate on it explicitly so two opposite corner blocks whose footprints overlap at
++        // a tight (W,H) are correctly rejected here (forcing the grow loop), matching the exact
++        // shrinkWrapOutline's "no state emits overlap" invariant (design §3.1).
++        if (collidesWithPlaced(rects, placed, idx, slot)) return false;
++        rects[idx] = slot;
++        placed[idx] = true;
++    }
++    return true;
++}
++
++}  // namespace
++
++OutlineFit shrinkWrapEstimate(const Problem& problem, const Placement& placement) {
++    double w = 0.0;
++    double h = 0.0;
++    lowerBoundNeeds(problem, placement, &w, &h);
++    w = std::min(w, problem.outline_w);
++    h = std::min(h, problem.outline_h);
++
++    constexpr int kMaxGrowSteps = 6;
++    for (int guard = 0; guard < kMaxGrowSteps; ++guard) {
++        if (edgeBlocksFeasibleAt(problem, placement, w, h)) {
++            return OutlineFit{w, h, true};
++        }
++        w = std::min(problem.outline_w, w * 1.05 + kEps);
++        h = std::min(problem.outline_h, h * 1.05 + kEps);
++    }
++    if (edgeBlocksFeasibleAt(problem, placement, problem.outline_w, problem.outline_h)) {
++        return OutlineFit{problem.outline_w, problem.outline_h, true};
++    }
++    return OutlineFit{problem.outline_w, problem.outline_h, false};
++}
++
+ }  // namespace efgr
+diff --git a/src/placement_engine.hpp b/src/placement_engine.hpp
+index 8bd07ca..f62d9b6 100644
+--- a/src/placement_engine.hpp
++++ b/src/placement_engine.hpp
+@@ -32,11 +32,21 @@ public:
+     virtual PlacementState seedFromPlacement(const Problem& problem, const Placement& placement,
+                                              std::mt19937& rng) const;
+     virtual void mutate(const Problem& problem, PlacementState& state, std::mt19937& rng) const = 0;
+     virtual Placement decode(const Problem& problem, const PlacementState& state) const = 0;
+     virtual bool isValidState(const Problem& problem, const PlacementState& state) const = 0;
+ };
+ 
+ std::unique_ptr<PlacementEngine> makePlacementEngine(const std::string& name);
+ std::vector<std::string> placementEngineNames();
+ 
++struct OutlineFit {
++    double w = 0.0;
++    double h = 0.0;
++    bool legal = true;
++};
++
++// Cheap: O(n) lower-bound arithmetic + thirds feasibility probe only, no edge relegalization loop.
++// Does NOT mutate placement; returns the estimated (W,H) for cheapScore.
++OutlineFit shrinkWrapEstimate(const Problem& problem, const Placement& placement);
++
+ }  // namespace efgr
+diff --git a/test/regression_p1_20260706.cpp b/test/regression_p1_20260706.cpp
+index cebc57a..359e64f 100644
+--- a/test/regression_p1_20260706.cpp
++++ b/test/regression_p1_20260706.cpp
+@@ -1,14 +1,16 @@
+ #include <cassert>
+ #include <cmath>
+ #include <cstdio>
+ #include <iostream>
++#include <memory>
++#include <random>
+ #include <sstream>
+ 
+ #include "../src/eval.hpp"
+ #include "../src/ft.hpp"
+ #include "../src/io.hpp"
+ #include "../src/model.hpp"
+ #include "../src/placement_engine.hpp"
+ #include "../src/routing.hpp"
+ #include "../src/search.hpp"
+ #include "../src/validate.hpp"
+@@ -44,18 +46,131 @@ void testPlacementKeyUnsetMatchesTodaysFormat() {
+     for (const auto& r : pl.rects) {
+         expected << std::llround(r.x * 1000.0) << ',' << std::llround(r.y * 1000.0) << ','
+                  << std::llround(r.w * 1000.0) << ',' << std::llround(r.h * 1000.0) << ';';
+     }
+     expected << ':' << std::llround(pl.outline_w * 1000.0) << 'x' << std::llround(pl.outline_h * 1000.0);
+ 
+     assert(placementKey(pl) == expected.str());
+     std::cout << "testPlacementKeyUnsetMatchesTodaysFormat ok\n";
+ }
+ 
++double coreBboxArea(const Problem& problem, const Placement& placement) {
++    double w = 0.0;
++    double h = 0.0;
++    for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
++        if (isEdge(problem.blocks[i].type)) continue;
++        w = std::max(w, placement.rects[i].right());
++        h = std::max(h, placement.rects[i].top());
++    }
++    return std::max(1.0, w) * std::max(1.0, h);
++}
++
++void testShrinkWrapEstimateCase0BStarSeed1() {
++    Problem problem = parseProblem("test/2026 ICCAD_case.case0.csv");
++    std::unique_ptr<PlacementEngine> engine = makePlacementEngine("bstar");
++    std::mt19937 rng(1);
++    PlacementState state = engine->initialState(problem, rng);
++    Placement placement = engine->decode(problem, state);
++
++    OutlineFit fit = shrinkWrapEstimate(problem, placement);
++    double max_area = problem.outline_w * problem.outline_h;
++    double core_area = coreBboxArea(problem, placement);
++
++    assert(fit.w * fit.h < max_area);
++    assert(fit.w * fit.h + 1e-6 >= core_area);
++    assert(fit.w <= problem.outline_w + kEps);
++    assert(fit.h <= problem.outline_h + kEps);
++    std::cout << "testShrinkWrapEstimateCase0BStarSeed1 ok\n";
++}
++
++// Synthetic problem with two opposite-corner edge blocks (TL,LT and RB,BR) sized so their
++// combined footprint forces the shrink-wrap lower bound to ~MAX on both axes.
++void testShrinkWrapEstimateCornerBlocksForceMax() {
++    Problem problem;
++    auto addBlock = [&](const std::string& name, double w, double h, BlockType type,
++                         std::vector<std::string> locs) {
++        Block b;
++        b.name = name;
++        b.width = w;
++        b.height = h;
++        b.area = w * h;
++        b.ar_min = 1.0;
++        b.ar_max = 1.0;
++        b.type = type;
++        b.locations = std::move(locs);
++        b.ft_rates = {0.2, 0.4, 0.8, 1.0};
++        problem.block_index[name] = static_cast<int>(problem.blocks.size());
++        problem.blocks.push_back(b);
++    };
++
++    problem.outline_w = 1000.0;
++    problem.outline_h = 800.0;
++    // Corner blocks sized so their footprints overlap at any (W,H) short of MAX but are
++    // disjoint exactly at MAX: TL occupies [0,500]x[H-500,H], BR occupies [W-500,W]x[0,300].
++    // At MAX (1000x800) the x-ranges [0,500]/[500,1000] and y-ranges [300,800]/[0,300] both
++    // touch with zero positive overlap; at any smaller candidate they genuinely overlap ->
++    // forces the feasibility probe to grow all the way to MAX on both axes.
++    addBlock("BLK_TL", 500.0, 500.0, BlockType::Edge, {"TL", "LT"});
++    addBlock("BLK_BR", 500.0, 300.0, BlockType::Edge, {"RB", "BR"});
++    problem.alpha = 0.2;
++
++    Placement placement;
++    placement.rects.resize(problem.blocks.size());
++    placement.aspect.assign(problem.blocks.size(), 1.0);
++    // Seed rough corner positions; shrinkWrapEstimate must not depend on exact input coords
++    // for edge blocks beyond their declared dimensions/locations.
++    placement.rects[0] = Rect{0.0, problem.outline_h - 500.0, 500.0, 500.0};
++    placement.rects[1] = Rect{problem.outline_w - 500.0, 0.0, 500.0, 300.0};
++
++    OutlineFit fit = shrinkWrapEstimate(problem, placement);
++    assert(std::abs(fit.w - problem.outline_w) < 1e-6);
++    assert(std::abs(fit.h - problem.outline_h) < 1e-6);
++    std::cout << "testShrinkWrapEstimateCornerBlocksForceMax ok\n";
++}
++
++// No-edge synthetic: two macro blocks only -> estimate must equal the core bbox (floored at 1).
++void testShrinkWrapEstimateNoEdgeBlocksEqualsCoreBbox() {
++    Problem problem;
++    auto addBlock = [&](const std::string& name, double w, double h) {
++        Block b;
++        b.name = name;
++        b.width = w;
++        b.height = h;
++        b.area = w * h;
++        b.ar_min = 1.0;
++        b.ar_max = 1.0;
++        b.type = BlockType::Macro;
++        problem.block_index[name] = static_cast<int>(problem.blocks.size());
++        problem.blocks.push_back(b);
++    };
++
++    problem.outline_w = 2000.0;
++    problem.outline_h = 1500.0;
++    addBlock("BLK_A", 300.0, 200.0);
++    addBlock("BLK_B", 150.0, 100.0);
++    problem.alpha = 0.2;
++
++    Placement placement;
++    placement.rects.resize(problem.blocks.size());
++    placement.aspect.assign(problem.blocks.size(), 1.0);
++    placement.rects[0] = Rect{0.0, 0.0, 300.0, 200.0};
++    placement.rects[1] = Rect{300.0, 0.0, 150.0, 100.0};
++
++    OutlineFit fit = shrinkWrapEstimate(problem, placement);
++    double expected_w = std::max(1.0, 450.0);
++    double expected_h = std::max(1.0, 200.0);
++    assert(std::abs(fit.w - expected_w) < 1e-6);
++    assert(std::abs(fit.h - expected_h) < 1e-6);
++    std::cout << "testShrinkWrapEstimateNoEdgeBlocksEqualsCoreBbox ok\n";
++}
++
+ }  // namespace
+ 
+ int main() {
+     testPlacementKeyDiffersWithOutline();
+     testPlacementKeyUnsetMatchesTodaysFormat();
++    testShrinkWrapEstimateCase0BStarSeed1();
++    testShrinkWrapEstimateCornerBlocksForceMax();
++    testShrinkWrapEstimateNoEdgeBlocksEqualsCoreBbox();
+     std::cout << "p1 regressions passed\n";
+     return 0;
+ }

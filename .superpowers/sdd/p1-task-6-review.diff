@@ -1,0 +1,237 @@
+== commits ==
+853bd51 fix: validate and emit against the declared outline
+
+== stat ==
+ src/io.cpp                      | 13 +++++-
+ src/validate.cpp                | 12 ++++-
+ test/regression_p1_20260706.cpp | 99 +++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 120 insertions(+), 4 deletions(-)
+
+== diff ==
+diff --git a/src/io.cpp b/src/io.cpp
+index cef2e7a..fea0cbd 100644
+--- a/src/io.cpp
++++ b/src/io.cpp
+@@ -192,22 +192,31 @@ Problem parseProblem(const std::string& path) {
+     if (p.blocks.empty()) throw std::runtime_error("no blocks parsed from " + path);
+     if (p.outline_w <= 0.0 || p.outline_h <= 0.0) throw std::runtime_error("outline MAX missing or invalid");
+     return p;
+ }
+ 
+ void writeCfg(const std::string& path, const Problem& problem, const Placement& placement,
+               const RoutingResult& routing) {
+     std::ofstream out(path);
+     if (!out) throw std::runtime_error("cannot open output cfg: " + path);
+     out << std::fixed << std::setprecision(3);
+-    auto [used_w, used_h] = usedOutline(problem, placement, routing);
+-    out << "OUTLINE " << used_w << " " << used_h << "\nEND\n";
++    // Emit the placement's declared (shrink-wrapped) outline when stamped -- design
++    // p1-design.md §1.6 -- falling back to the MAX-clamped usedOutline bbox when unset (0),
++    // which reproduces today's behavior for placements that never shrink-wrapped.
++    double out_w = placement.outline_w;
++    double out_h = placement.outline_h;
++    if (out_w <= 0.0 || out_h <= 0.0) {
++        auto [used_w, used_h] = usedOutline(problem, placement, routing);
++        out_w = used_w;
++        out_h = used_h;
++    }
++    out << "OUTLINE " << out_w << " " << out_h << "\nEND\n";
+     out << "BLOCK\n";
+     for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
+         const auto& r = placement.rects[i];
+         out << problem.blocks[i].name << " " << r.x << " " << r.y << " " << r.w << " " << r.h << "\n";
+     }
+     out << "END\n";
+     out << "CHANNEL\n";
+     for (const auto& ch : routing.channels) {
+         out << ch.name << " " << ch.rect.x << " " << ch.rect.y << " " << ch.rect.w << " " << ch.rect.h << "\n";
+     }
+diff --git a/src/validate.cpp b/src/validate.cpp
+index 938f4d7..5146441 100644
+--- a/src/validate.cpp
++++ b/src/validate.cpp
+@@ -64,32 +64,40 @@ bool portAllows(const Block& block, int edge) {
+ }
+ 
+ }  // namespace
+ 
+ ValidationResult validateSolution(const Problem& problem, const Placement& placement, const RoutingResult& routing) {
+     ValidationResult vr;
+     auto fail = [&](const std::string& msg) {
+         vr.ok = false;
+         vr.messages.push_back(msg);
+     };
++    // Validate containment/thirds/flush against the placement's declared (shrink-wrapped)
++    // outline when stamped, falling back to the problem's outline (MAX) when unset (0) --
++    // design p1-design.md §1.6. The declared outline is always <= MAX, so this scoped Problem
++    // is strictly tighter than (or equal to) `problem`, never looser.
++    Problem scoped = problem;
++    if (placement.outline_w > 0.0) scoped.outline_w = placement.outline_w;
++    if (placement.outline_h > 0.0) scoped.outline_h = placement.outline_h;
++
+     for (std::size_t i = 0; i < placement.rects.size(); ++i) {
+         const auto& r = placement.rects[i];
+-        if (r.x < -kEps || r.y < -kEps || r.right() > problem.outline_w + kEps || r.top() > problem.outline_h + kEps) {
++        if (r.x < -kEps || r.y < -kEps || r.right() > scoped.outline_w + kEps || r.top() > scoped.outline_h + kEps) {
+             fail("outline violation: " + problem.blocks[i].name);
+         }
+         if (!isSoft(problem.blocks[i].type)) {
+             if (!near(r.w, problem.blocks[i].width) || !near(r.h, problem.blocks[i].height)) {
+                 fail("fixed block dimension violation: " + problem.blocks[i].name);
+             }
+         }
+         if (isEdge(problem.blocks[i].type)) {
+-            if (!satisfiesEdgeLocations(r, problem, problem.blocks[i].locations)) {
++            if (!satisfiesEdgeLocations(r, scoped, problem.blocks[i].locations)) {
+                 fail("edge location violation: " + problem.blocks[i].name);
+             }
+         }
+         for (std::size_t j = i + 1; j < placement.rects.size(); ++j) {
+             if (overlaps(r, placement.rects[j])) fail("block overlap: " + problem.blocks[i].name + " " + problem.blocks[j].name);
+         }
+     }
+     for (const auto& route : routing.routes) {
+         if (route.open) fail("open route");
+         if (!route.open && !route.steps.empty()) {
+diff --git a/test/regression_p1_20260706.cpp b/test/regression_p1_20260706.cpp
+index 1f23e9e..bdcb760 100644
+--- a/test/regression_p1_20260706.cpp
++++ b/test/regression_p1_20260706.cpp
+@@ -1,13 +1,14 @@
+ #include <cassert>
+ #include <cmath>
+ #include <cstdio>
++#include <fstream>
+ #include <iostream>
+ #include <memory>
+ #include <random>
+ #include <sstream>
+ 
+ #include "../src/eval.hpp"
+ #include "../src/ft.hpp"
+ #include "../src/io.hpp"
+ #include "../src/model.hpp"
+ #include "../src/placement_engine.hpp"
+@@ -278,24 +279,122 @@ void testShrinkWrapOutlineMidSideBlockLongerThanShrunkThird() {
+     ValidationResult vr = validateSolution(scoped, placement, empty_routing);
+     if (!vr.ok) {
+         for (const auto& msg : vr.messages) std::cerr << "validate: " << msg << "\n";
+     }
+     assert(vr.ok);
+     // Core block coordinates must be untouched by the shrink.
+     assert(placement.rects[1].x == 0.0 && placement.rects[1].y == 0.0);
+     std::cout << "testShrinkWrapOutlineMidSideBlockLongerThanShrunkThird ok\n";
+ }
+ 
++// T6 (design §1.6): validateSolution/writeCfg must read the placement's declared (stamped)
++// outline internally -- not the caller's (MAX) problem outline -- so a genuinely shrunk, legal
++// solution validates ok and is emitted at its declared W,H, not the MAX-clamped usedOutline bbox.
++// Before T6's fix this fails with a false "edge location violation" because validateSolution
++// checks flush/thirds against problem.outline_w/h == MAX while the edge block is flush to the
++// shrunk border (x = W < MAX_w).
++void testValidateAndWriteCfgUseDeclaredOutlineOnShrunkCase0() {
++    Problem problem = parseProblem("test/2026 ICCAD_case.case0.csv");
++    std::unique_ptr<PlacementEngine> engine = makePlacementEngine("bstar");
++    std::mt19937 rng(1);
++    PlacementState state = engine->initialState(problem, rng);
++    Placement placement = engine->decode(problem, state);
++
++    OutlineFit fit = shrinkWrapOutline(problem, placement);
++    assert(fit.legal);
++    // Confirm this case actually shrinks (otherwise the test wouldn't exercise the bug).
++    assert(placement.outline_w < problem.outline_w - kEps || placement.outline_h < problem.outline_h - kEps);
++
++    Problem scoped = scopedAtDeclaredOutline(problem, placement.outline_w, placement.outline_h);
++    RoutingResult routing = routeProblem(scoped, placement);
++
++    // Called with the ORIGINAL (MAX) problem, exactly as main.cpp does -- validateSolution must
++    // internally scope to placement.outline_w/h, the caller should not have to.
++    ValidationResult vr = validateSolution(problem, placement, routing);
++    if (!vr.ok) {
++        for (const auto& msg : vr.messages) std::cerr << "validate: " << msg << "\n";
++    }
++    assert(vr.ok);
++
++    const std::string tmp = "test/p1_outline_tmp.cfg";
++    writeCfg(tmp, problem, placement, routing);
++    std::ifstream in(tmp);
++    assert(in.good());
++    std::string tok;
++    double cfg_w = -1.0, cfg_h = -1.0;
++    while (in >> tok) {
++        if (tok == "OUTLINE" || tok == "Outline") {
++            in >> cfg_w >> cfg_h;
++            break;
++        }
++    }
++    in.close();
++    std::remove(tmp.c_str());
++
++    assert(cfg_w > 0.0 && cfg_h > 0.0);
++    assert(std::abs(cfg_w - placement.outline_w) < 1e-2);
++    assert(std::abs(cfg_h - placement.outline_h) < 1e-2);
++    std::cout << "testValidateAndWriteCfgUseDeclaredOutlineOnShrunkCase0 ok\n";
++}
++
++// Extends the P0 outline-consistency invariant (exactScore.outline_area == emitted OUTLINE w*h) to
++// the shrunk case: exactScore's outline handling is a LATER task (T5), so here we hand-build the
++// same scoped-routing + cheapScore combination exactScore would produce and assert its
++// outline_area matches both the emitted OUTLINE and the stamped declared W,H.
++void testOutlineConsistencyEvalVsCfgShrunkCase() {
++    Problem problem = parseProblem("test/2026 ICCAD_case.case0.csv");
++    std::unique_ptr<PlacementEngine> engine = makePlacementEngine("bstar");
++    std::mt19937 rng(1);
++    PlacementState state = engine->initialState(problem, rng);
++    Placement placement = engine->decode(problem, state);
++
++    OutlineFit fit = shrinkWrapOutline(problem, placement);
++    assert(fit.legal);
++
++    Problem scoped = scopedAtDeclaredOutline(problem, placement.outline_w, placement.outline_h);
++    RoutingResult routing = routeProblem(scoped, placement);
++    Score score = cheapScore(scoped, placement);
++    double expected_area = placement.outline_w * placement.outline_h;
++    assert(std::abs(score.outline_area - expected_area) < 1e-6);
++
++    const std::string tmp = "test/p1_outline_consistency_tmp.cfg";
++    writeCfg(tmp, problem, placement, routing);
++    std::ifstream in(tmp);
++    assert(in.good());
++    std::string tok;
++    double cfg_w = -1.0, cfg_h = -1.0;
++    while (in >> tok) {
++        if (tok == "OUTLINE" || tok == "Outline") {
++            in >> cfg_w >> cfg_h;
++            break;
++        }
++    }
++    in.close();
++    std::remove(tmp.c_str());
++
++    // Per-dimension 2-decimal tolerance (writeCfg emits setprecision(3)): the emitted OUTLINE
++    // dims must match the stamped declared W,H to within cfg's own text-precision rounding.
++    // (Comparing the *product* against expected_area at a fixed absolute tolerance is too tight
++    // for case0's ~2900x2180 magnitude: per-dimension truncation of ~5e-4 each compounds to an
++    // area delta of ~1 via w*dh + h*dw, unrelated to any real inconsistency.)
++    assert(std::abs(cfg_w - placement.outline_w) < 1e-2);
++    assert(std::abs(cfg_h - placement.outline_h) < 1e-2);
++    (void)expected_area;
++    std::cout << "testOutlineConsistencyEvalVsCfgShrunkCase ok\n";
++}
++
+ }  // namespace
+ 
+ int main() {
+     testPlacementKeyDiffersWithOutline();
+     testPlacementKeyUnsetMatchesTodaysFormat();
+     testShrinkWrapEstimateCase0BStarSeed1();
+     testShrinkWrapEstimateCornerBlocksForceMax();
+     testShrinkWrapEstimateNoEdgeBlocksEqualsCoreBbox();
+     testShrinkWrapOutlineAllCasesBStarSeed1();
+     testShrinkWrapOutlineCase0FuzzSeeds();
+     testShrinkWrapOutlineMidSideBlockLongerThanShrunkThird();
++    testValidateAndWriteCfgUseDeclaredOutlineOnShrunkCase0();
++    testOutlineConsistencyEvalVsCfgShrunkCase();
+     std::cout << "p1 regressions passed\n";
+     return 0;
+ }

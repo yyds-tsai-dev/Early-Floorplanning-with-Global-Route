@@ -1,0 +1,391 @@
+== commits ==
+9127759 fix: relax over all constraint-graph predecessors, not a selected chain
+
+== stat ==
+ src/respace.cpp                 | 111 ++++++++++++++++++++++++++++------------
+ src/respace.hpp                 |  30 +++++++----
+ test/regression_p3_20260707.cpp | 107 ++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 203 insertions(+), 45 deletions(-)
+
+== diff ==
+diff --git a/src/respace.cpp b/src/respace.cpp
+index 0dbd205..df47b88 100644
+--- a/src/respace.cpp
++++ b/src/respace.cpp
+@@ -105,27 +105,45 @@ std::map<std::pair<int, int>, double> mergeDemandsMax(const std::vector<StripDem
+         // pairwise edge with here (that degenerates to "grow the outline", §3.5, out of scope for
+         // this pairwise pass) so skip it defensively.
+         if (from == -1 && to == -1) continue;
+         auto key = std::make_pair(from, to);
+         auto it = merged.find(key);
+         if (it == merged.end() || need > it->second) merged[key] = need;
+     }
+     return merged;
+ }
+ 
+-// Relaxes one axis (H: x using need_w/width; V: y using need_h/height) via longest-path over the
+-// frozen immediate-neighbor adjacency, folding each node's OLD coordinate in as a virtual edge
+-// from the wall so the relax can only ever raise a coordinate (design p3-design.md §2.2, monotone
+-// increase; see p3-task-2 review: folding x_old in during the same topological pass, rather than
+-// clamping post-hoc, is required for correctness on non-origin-compacted input and keeps every
+-// downstream min-gap edge satisfied). Returns the new coordinate per core block (indexed by
+-// problem.blocks index; edge blocks and unused entries are left at their input value).
++// Relaxes one axis (H: x using need_w/width; V: y using need_h/height) via longest-path over
++// ALL constraint-graph predecessors (not a single selected one -- p3-task-2 review, 2 Critical
++// findings), folding each node's OLD coordinate in as a virtual edge from the wall so the relax
++// can only ever raise a coordinate (design p3-design.md §2.2, monotone increase; folding the old
++// coordinate in during the same topological pass, rather than clamping post-hoc, is required for
++// correctness on non-origin-compacted input and keeps every downstream min-gap edge satisfied).
++// Returns the new coordinate per core block (indexed by problem.blocks index; edge blocks and
++// unused entries are left at their input value).
++//
++// Per-block relax (frozen order, current-coord + index tie-break):
++//   new_coord[b] = max( coord[b],                                                  // monotone
++//                       max over EVERY earlier-in-frozen-order a with crossOverlap(a,b):
++//                           new_coord[a] + size[a] + scale*demandOrZero(a,b),
++//                       max over EVERY merged demand pair (a,b), a earlier in frozen order,
++//                           regardless of crossOverlap(a,b):
++//                           new_coord[a] + size[a] + scale*need(a,b) )
++// A single selected predecessor is not enough: (Critical 1) a demand keyed (L,R) must still apply
++// even when some other block M -- not L -- is R's nearest geometric neighbor (the demand pair
++// itself is charged regardless of crossOverlap, the third max-term above); (Critical 2) a block
++// that legitimately wins its OWN predecessor edge (and so is pushed forward by a real demand) must
++// still be checked against by every OTHER block that geometrically cross-overlaps it, not just the
++// one block that happens to win that other block's nearest-neighbor tie-break -- otherwise the
++// tie-loser can be left behind and the tie-winner's stale position ends up overlapping the pushed
++// block (the second max-term above, over ALL cross-overlapping a, not just the nearest one).
++// O(n^2) per axis, which is fine at the contest's n<50.
+ //
+ // `scale` multiplies every DEMAND contribution (not the base non-overlap term); passing 1.0 is
+ // the unclamped relax, values < 1.0 implement the proportional partial-widening fallback when the
+ // unclamped result would exceed MAX (design failure-mode 1, §2.3/§3.1).
+ std::vector<double> relaxAxis(const Problem& problem, const Placement& placement, bool horizontal,
+                                const std::map<std::pair<int, int>, double>& merged, double scale) {
+     std::size_t n = problem.blocks.size();
+     std::vector<double> coord(n, 0.0);
+     std::vector<double> size(n, 0.0);
+     std::vector<int> core;
+@@ -134,62 +152,74 @@ std::vector<double> relaxAxis(const Problem& problem, const Placement& placement
+         coord[i] = horizontal ? r.x : r.y;
+         size[i] = horizontal ? r.w : r.h;
+         if (!isEdge(problem.blocks[i].type)) core.push_back(static_cast<int>(i));
+     }
+ 
+     // Frozen topological order: ascending current coordinate, index tie-break (design §2.2/§2.7).
+     std::sort(core.begin(), core.end(), [&](int a, int b) {
+         if (std::abs(coord[a] - coord[b]) > kEps) return coord[a] < coord[b];
+         return a < b;
+     });
++    // Position of each core block within the frozen order, so "earlier in frozen order" can be
++    // tested in O(1) rather than by re-deriving it from coord/index each time.
++    std::vector<int> order_rank(n, -1);
++    for (std::size_t pos = 0; pos < core.size(); ++pos) order_rank[core[pos]] = static_cast<int>(pos);
+ 
+-    // Immediate-predecessor lookup, mirroring compactTowardOrigin's axisOverlap-based adjacency
+-    // (search.cpp:16-18,41,51): among all core blocks whose far edge coincides with (or sits at
+-    // or before) `b`'s near edge and whose cross-range overlaps, keep only the one with the
+-    // greatest far edge (the true immediate neighbor).
++    // Cross-range overlap, mirroring compactTowardOrigin's axisOverlap predicate (search.cpp:16-
++    // 18,41,51): true iff a and b's CROSS axis ranges (y for the H-pass, x for the V-pass) overlap
++    // by more than kEps. No longer used to pick a single nearest predecessor -- every crossing pair
++    // earlier-in-frozen-order now contributes its own non-overlap edge (see block comment above).
+     auto crossOverlap = [&](int a, int b) {
+         const Rect& ra = placement.rects[a];
+         const Rect& rb = placement.rects[b];
+         if (horizontal) return std::min(ra.top(), rb.top()) - std::max(ra.y, rb.y) > kEps;
+         return std::min(ra.right(), rb.right()) - std::max(ra.x, rb.x) > kEps;
+     };
+ 
+     std::vector<double> new_coord(n, 0.0);
+     for (std::size_t i = 0; i < n; ++i) new_coord[i] = coord[i];
+ 
+     for (int b : core) {
+-        double far_b = coord[b];  // near edge of b along this axis
+-        int pred = -1;            // -1 == wall
+-        double pred_far = 0.0;    // predecessor's far edge (wall's far edge is 0)
++        // Monotone virtual edge: a block never moves left of where it already was.
++        double best = coord[b];
++
++        // Term 1: every earlier-in-frozen-order block that cross-overlaps b contributes its own
++        // non-overlap (+ demand, if this exact pair is charged) edge -- not just the single
++        // nearest one. This is what stops a tie-losing candidate's stale position (never
++        // re-checked against the block that actually grew) from ending up overlapped (Critical 2).
+         for (int a : core) {
+-            if (a == b) continue;
+-            double far_a = coord[a] + size[a];
+-            if (far_a <= far_b + kEps && crossOverlap(a, b)) {
+-                if (pred == -1 || far_a > pred_far) {
+-                    pred = a;
+-                    pred_far = far_a;
+-                }
+-            }
++            if (order_rank[a] >= order_rank[b]) continue;
++            if (!crossOverlap(a, b)) continue;
++            double demand = 0.0;
++            auto it = merged.find(std::make_pair(a, b));
++            if (it != merged.end()) demand = it->second;
++            best = std::max(best, new_coord[a] + size[a] + scale * demand);
++        }
++
++        // Term 2: every demand pair keyed EXACTLY (a,b) applies regardless of crossOverlap(a,b) --
++        // a demand charged to a specific bounding pair must be honored even when some other block
++        // won the immediate-neighbor slot between them (Critical 1). `a == -1` is the low-side
++        // wall (size/new_coord both 0 by convention); demand pairs keyed (b, -1) (b -> the high-
++        // side wall) are a "grow the outline" constraint, not a per-block coordinate raise, and are
++        // deliberately left unread here, same as the prior single-predecessor code (out of scope
++        // for this pairwise pass -- design p3-design.md §3.5).
++        for (const auto& entry : merged) {
++            int a = entry.first.first;
++            int to = entry.first.second;
++            if (to != b) continue;
++            if (a != -1 && (order_rank[a] < 0 || order_rank[a] >= order_rank[b])) continue;
++            double a_new = (a == -1) ? 0.0 : new_coord[a];
++            double a_size = (a == -1) ? 0.0 : size[a];
++            best = std::max(best, a_new + a_size + scale * entry.second);
+         }
+ 
+-        double base_weight = (pred == -1) ? 0.0 : size[pred];
+-        double demand = 0.0;
+-        auto it = merged.find(std::make_pair(pred, b));
+-        if (it != merged.end()) demand = it->second;
+-
+-        double pred_new = (pred == -1) ? 0.0 : new_coord[pred];
+-        double via_edge = pred_new + base_weight + scale * demand;
+-        // Fold the old coordinate in as a virtual wall edge in the SAME pass so raises propagate
+-        // to successors immediately (task-2 review point 1): a block never moves left of where it
+-        // already was, and gap-safety holds because raising `b` only ever raises what its own
+-        // successors compute from it.
+-        new_coord[b] = std::max(coord[b], via_edge);
++        new_coord[b] = best;
+     }
+     return new_coord;
+ }
+ 
+ double axisSpan(const Problem& problem, const Placement& placement, bool horizontal, const std::vector<double>& coord) {
+     double span = 0.0;
+     for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
+         if (isEdge(problem.blocks[i].type)) continue;
+         double size = horizontal ? placement.rects[i].w : placement.rects[i].h;
+         span = std::max(span, coord[i] + size);
+@@ -238,22 +268,35 @@ void relaxOneAxis(const Problem& problem, Placement& placement, bool horizontal,
+             placement.rects[i].x = result[i];
+         } else {
+             placement.rects[i].y = result[i];
+         }
+     }
+ }
+ 
+ }  // namespace
+ 
+ bool relaxToDemand(const Problem& problem, Placement& placement, const std::vector<StripDemand>& demands) {
++    // H before V is deliberate, not incidental (p3-task-2 review, Important finding): the V-pass's
++    // crossOverlap predicate reads x-ranges from `placement`, so running H first means V collides
++    // against the POST-H-PASS x-geometry -- i.e. where blocks actually sit after horizontal
++    // widening, not their stale pre-relax x. That is the CORRECT semantics: real vertical collision
++    // is governed by the blocks' actual (post-move) x-extents, not by geometry that no longer
++    // exists once the H-pass has run. Do not reorder these two calls or make them read a shared
++    // "original" snapshot instead of `placement`'s live state.
+     relaxOneAxis(problem, placement, /*horizontal=*/true, demands);
+     relaxOneAxis(problem, placement, /*horizontal=*/false, demands);
++    // Always true: per design failure-mode 1, this call never hard-fails. With the all-predecessor
++    // fix, demand pairs can no longer be silently DROPPED (every merged pair is applied regardless
++    // of who wins a geometric neighbor slot) -- but a demand can still be left PARTIALLY unsatisfied
++    // when MAX forces the secant scale-back (`scale < 1`, see relaxOneAxis). true therefore means
++    // "relaxed within MAX," not "every demand fully satisfied"; residual unsatisfied demand after
++    // scaling is a graded penalty evaluated elsewhere, not a failure this return value encodes.
+     return true;
+ }
+ 
+ std::vector<StripDemand> channelDemands(const Problem& problem, const Placement& placement,
+                                          const RoutingResult& routing) {
+     std::vector<StripDemand> demands;
+     for (const auto& ch : routing.channels) {
+         bool has_h = ch.horizontal_usage > kEps;
+         bool has_v = ch.vertical_usage > kEps;
+         if (!has_h && !has_v) continue;
+diff --git a/src/respace.hpp b/src/respace.hpp
+index 1b181d5..082dfdd 100644
+--- a/src/respace.hpp
++++ b/src/respace.hpp
+@@ -38,24 +38,32 @@ ChannelBounds channelBounds(const Problem& problem, const Placement& placement,
+ // usage in both directions produce no entry. Pure; no mutation of problem/placement/routing.
+ // NOTE: entries are one-per-channel and NOT pre-merged -- when multiple channels stack on the
+ // same (left,right) or (below,above) pair (design p3-design.md §1.2 "Multiple channels per
+ // strip"), callers MUST max-merge need_w/need_h across all entries sharing that pair before
+ // using them as a single edge weight; the graph works in absolute per-pair gaps, so summing or
+ // using an arbitrary single entry would under- or mis-size the gap.
+ std::vector<StripDemand> channelDemands(const Problem& problem, const Placement& placement,
+                                          const RoutingResult& routing);
+ 
+ // Relaxes CORE (non-edge) block coordinates to satisfy the strip demands via two independent
+-// longest-path constraint-graph passes (design p3-design.md §1-2, decision 4): an H-pass over
+-// x-coordinates using need_w on (left,right) pairs, then a V-pass over y-coordinates using
+-// need_h on (below,above) pairs. Node order per axis is frozen from `placement`'s CURRENT
+-// coordinates (immediate-neighbor adjacency, like `compactTowardOrigin`); the relax only ever
+-// increases a core block's coordinate (monotone widen), so relative order can never flip.
+-// Edge-type blocks are not graph nodes and are left untouched (re-anchored elsewhere). If the
+-// unclamped relax would push an axis's extent past `problem.outline_w`/`outline_h` (MAX), the
+-// added demand slack is proportionally scaled back (never the base non-overlap terms) so the
+-// result never exceeds MAX; this is a partial-relief case, not a failure. Mutates `placement`
+-// in place and always returns true (per design failure-mode 1, residual unsatisfied demand is a
+-// graded penalty elsewhere, not a hard failure here).
++// longest-path constraint-graph passes (design p3-design.md §1-2, decision 4; p3-task-2 review
++// fix): an H-pass over x-coordinates using need_w on (left,right) pairs, then a V-pass over
++// y-coordinates using need_h on (below,above) pairs -- deliberately in that order, since the
++// V-pass's cross-overlap predicate reads the POST-H-PASS x-geometry, which is the real geometry
++// that governs vertical collision. Node order per axis is frozen from `placement`'s CURRENT
++// coordinates; the relax only ever increases a core block's coordinate (monotone widen), so
++// relative order can never flip. Each block's new coordinate is the max over its OLD coordinate,
++// EVERY earlier-in-frozen-order block it cross-overlaps (not just the nearest one), and EVERY
++// demand pair keyed to it (regardless of cross-overlap with the demand's other endpoint) -- a
++// single selected predecessor is not enough to avoid both silently dropping a demand keyed to a
++// non-nearest pair and letting a tie-losing candidate's stale position get overlapped by a block
++// that legitimately grew past it. Edge-type blocks are not graph nodes and are left untouched
++// (re-anchored elsewhere). If the unclamped relax would push an axis's extent past
++// `problem.outline_w`/`outline_h` (MAX), the added demand slack is proportionally scaled back
++// (never the base non-overlap terms) so the result never exceeds MAX; this is a partial-relief
++// case, not a failure. Mutates `placement` in place and always returns true (per design
++// failure-mode 1): true means "relaxed within MAX," not "every demand fully satisfied" -- a
++// demand can still be left partially unsatisfied by the MAX scale-back, which is a graded penalty
++// evaluated elsewhere, not a hard failure this return value encodes.
+ bool relaxToDemand(const Problem& problem, Placement& placement, const std::vector<StripDemand>& demands);
+ 
+ }  // namespace efgr
+diff --git a/test/regression_p3_20260707.cpp b/test/regression_p3_20260707.cpp
+index b899035..d30e177 100644
+--- a/test/regression_p3_20260707.cpp
++++ b/test/regression_p3_20260707.cpp
+@@ -424,26 +424,133 @@ void testMixedDirectionChannelPopulatesBothNeeds() {
+         if (d.left == 2 && d.right == 3 && d.below == 0 && d.above == 1) {
+             found = true;
+             assert(d.need_w > kEps);  // vertical_usage -> need_w on (left,right)
+             assert(d.need_h > kEps);  // horizontal_usage -> need_h on (below,above)
+         }
+     }
+     assert(found);
+     std::cout << "testMixedDirectionChannelPopulatesBothNeeds ok\n";
+ }
+ 
++// --- P3-T2 review fixes (2 Critical): relaxAxis must relax over ALL constraint-graph
++// predecessors, not a single selected one. ---
++
++// TEST C2 (discarded-predecessor overlap; fixture verified legal + empirically reproduces the
++// bug): idx0 "P" Rect{0,0,10,4}; idx1 "A2" Rect{10,0,1,4}; idx2 "A2P" Rect{27,4,2,4}; idx3 "B"
++// Rect{29,0,5,8} (spans both y-bands: [0,4] where A2 sits and [4,8] where A2P sits). One demand,
++// keyed (P,A2)=20, is the only correct edge into A2; A2's true predecessor is P, so A2 legitimately
++// leaps to new_x = P.right()+20 = 30, landing at [30,31]. Under the single-predecessor bug, B's
++// nearest-neighbor search ties between A2 (far=11) and A2P (far=29... via its own far edge) and
++// picks whichever wins the tie-break, discarding the other -- so B can be left at its old x=29,
++// which then overlaps A2's grown [30,31]. The fix (relax over ALL cross-overlapping predecessors)
++// must have B consider both A2 and A2P, landing at x=31 (A2's new_right()), clearing A2 exactly.
++void testTieLosingCandidateCannotOverlapDiscardingBlock() {
++    Problem p;
++    p.blocks = {makeBlock("P", 10, 4), makeBlock("A2", 1, 4), makeBlock("A2P", 2, 4), makeBlock("B", 5, 8)};
++    p.block_index = {{"P", 0}, {"A2", 1}, {"A2P", 2}, {"B", 3}};
++    p.outline_w = 100;
++    p.outline_h = 100;
++    p.alpha = 1.0;
++
++    Placement pl;
++    pl.rects = {Rect{0, 0, 10, 4}, Rect{10, 0, 1, 4}, Rect{27, 4, 2, 4}, Rect{29, 0, 5, 8}};
++    pl.aspect = {1.0, 1.0, 1.0, 1.0};
++
++    // Sanity: the starting placement is legal (no pairwise overlap) before relaxing -- all 6 pairs.
++    for (std::size_t i = 0; i < pl.rects.size(); ++i) {
++        for (std::size_t j = i + 1; j < pl.rects.size(); ++j) {
++            assert(!overlaps(pl.rects[i], pl.rects[j]));
++        }
++    }
++
++    StripDemand d;
++    d.left = 0;   // P
++    d.right = 1;  // A2
++    d.need_w = 20.0;
++    std::vector<StripDemand> demands = {d};
++
++    bool changed = relaxToDemand(p, pl, demands);
++    assert(changed);
++
++    // EXPECTED with the fix: new x = {0, 30, 27, 31}.
++    assert(std::abs(pl.rects[0].x - 0.0) < kEps);
++    assert(std::abs(pl.rects[1].x - 30.0) < kEps);
++    assert(std::abs(pl.rects[2].x - 27.0) < kEps);
++    assert(std::abs(pl.rects[3].x - 31.0) < kEps);
++    // B must clear A2's new position; A2 must clear P's new position.
++    assert(pl.rects[3].x + kEps >= 31.0 - kEps);
++    assert(pl.rects[1].x + kEps >= 30.0 - kEps);
++
++    // No pair may overlap after the relax (the buggy code yields B.x==29 with A2 at [30,31),
++    // which overlaps B -- that's the RED this test catches).
++    for (std::size_t i = 0; i < pl.rects.size(); ++i) {
++        for (std::size_t j = i + 1; j < pl.rects.size(); ++j) {
++            assert(!overlaps(pl.rects[i], pl.rects[j]));
++        }
++    }
++    std::cout << "testTieLosingCandidateCannotOverlapDiscardingBlock ok\n";
++}
++
++// TEST C1 (dropped keyed demand): full-height L idx0 Rect{0,0,10,100}; partial wedge M idx1
++// Rect{10,60,4,20}; R idx2 Rect{14,0,6,100}; outline 200x100. One demand keyed directly (L,R)
++// with need_w=25 -- NOT (M,R) -- because the real constraint is on the L<->R gap, independent of
++// the M wedge sitting between them. Under the single-predecessor bug, R's immediate x-predecessor
++// is M (M's far edge, 14, meets R's near edge), so the lookup merged.find({M,R}) misses (the
++// demand is keyed {L,R}) and the (L,R) demand is silently dropped; R never moves past its old
++// x=14, leaving only a 4-unit gap to L, not the demanded 25. The fix must apply the (L,R)
++// merged-demand-pair edge regardless of who wins the immediate-predecessor slot.
++void testDemandKeyedPairAppliesEvenWhenAnotherBlockWinsPredecessorSlot() {
++    Problem p;
++    p.blocks = {makeBlock("L", 10, 100), makeBlock("M", 4, 20), makeBlock("R", 6, 100)};
++    p.block_index = {{"L", 0}, {"M", 1}, {"R", 2}};
++    p.outline_w = 200;
++    p.outline_h = 100;
++    p.alpha = 1.0;
++
++    Placement pl;
++    pl.rects = {Rect{0, 0, 10, 100}, Rect{10, 60, 4, 20}, Rect{14, 0, 6, 100}};
++    pl.aspect = {1.0, 1.0, 1.0};
++
++    for (std::size_t i = 0; i < pl.rects.size(); ++i) {
++        for (std::size_t j = i + 1; j < pl.rects.size(); ++j) {
++            assert(!overlaps(pl.rects[i], pl.rects[j]));
++        }
++    }
++
++    StripDemand d;
++    d.left = 0;   // L
++    d.right = 2;  // R
++    d.need_w = 25.0;
++    std::vector<StripDemand> demands = {d};
++
++    bool changed = relaxToDemand(p, pl, demands);
++    assert(changed);
++
++    for (std::size_t i = 0; i < pl.rects.size(); ++i) {
++        for (std::size_t j = i + 1; j < pl.rects.size(); ++j) {
++            assert(!overlaps(pl.rects[i], pl.rects[j]));
++        }
++    }
++    // EXPECTED with fix: R.x - (L.x+10) >= 25 - 1e-6 (buggy code drops the (L,R) demand because
++    // pred(R)=M -> RED).
++    assert(pl.rects[2].x - (pl.rects[0].x + 10.0) >= 25.0 - 1e-6);
++    std::cout << "testDemandKeyedPairAppliesEvenWhenAnotherBlockWinsPredecessorSlot ok\n";
++}
++
+ }  // namespace
+ 
+ int main() {
+     testVerticalUsageChargesNeedWOnLeftRight();
+     testHorizontalUsageChargesNeedHOnBelowAbove();
+     testWallBoundedChannelSideIsMinusOne();
+     testZeroUsageChannelsProduceNoDemand();
+     testThreeBlockRowShiftsByExactDeficit();
+     testThreeBlockColumnShiftsByExactDeficit();
+     testDemandExceedingMaxClampsToOutlineAndStaysLegal();
+     testOrderFreezeUnderVariedDemands();
+     testStaggeredDistractorDoesNotWinChannelBound();
+     testMixedDirectionChannelPopulatesBothNeeds();
++    testTieLosingCandidateCannotOverlapDiscardingBlock();
++    testDemandKeyedPairAppliesEvenWhenAnotherBlockWinsPredecessorSlot();
+     std::cout << "P3 T1+T2 regressions passed\n";
+     return 0;
+ }
