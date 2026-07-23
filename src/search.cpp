@@ -623,6 +623,44 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
     (void)best_state;
     (void)current_place;
     finalizeFeedthrough(problem, engine, result);
+
+    // B3.1 (b3-report.md "Concerns" #1, honest finding carried forward as a follow-on task):
+    // maybeAdoptRespace (inside the elite loop above) and finalizeFeedthrough above can both move
+    // result.best_placement AFTER the elite loop's own last outlineSweep call, so B3's pad rungs
+    // never get a chance to try the FINAL committed geometry -- b3-report.md measured this leaves
+    // real, substantial value unclaimed on cases 1/2/4 (pads-on vs pads-off probed directly on the
+    // final rects: -0.06%/-6.02%/-2.08%). ONE additional sweep pass here (raw + compacted variant,
+    // mirroring the elite loop's own two adoptions above) closes that gap, gated by the SAME
+    // outlineSweepBetter rule (legality-first, then value) the elite loop already uses -- Pareto-safe
+    // by construction: outlineSweep's own m=0.0/tight rung alone reproduces a single exact-eval of
+    // whatever it is handed, so the sweep as a whole can only match or improve result.best_*, never
+    // regress it. Deliberately a SINGLE extra pass, not a fixed-point loop: no further
+    // respaceFixedPoint or finalizeFeedthrough call after it, per this task's explicit scope.
+    // legacy_paydown_* is left untouched -- this pass concerns the real (value-gated) best only.
+    // The placement at this point may carry FT-inflated soft-block dims (finalizeFeedthrough's
+    // grow); verified safe by reading placement_engine.cpp's commitOutlineAt/shrinkWrapOutline:
+    // both only ever re-derive an EDGE block's rect from `problem.blocks[i]` (dimensionFor), never a
+    // soft/macro block's -- non-edge rects are carried through exactly as given, so an
+    // already-inflated soft block sweeps like any other placement's rect, and exactScore's own FT
+    // mismatch accounting can only look BETTER (or the same) against a larger existing placed area,
+    // never worse.
+    OutlineSweepResult post_finalize_swept = outlineSweep(problem, result.best_placement, exactCached);
+    if (outlineSweepBetter(post_finalize_swept.routing, post_finalize_swept.score.value, result.best_routing,
+                           result.best_score.value)) {
+        result.best_score = post_finalize_swept.score;
+        result.best_placement = post_finalize_swept.placement;
+        result.best_routing = post_finalize_swept.routing;
+    }
+
+    Placement post_finalize_compacted = compactTowardOrigin(problem, result.best_placement);
+    OutlineSweepResult post_finalize_swept_compacted = outlineSweep(problem, post_finalize_compacted, exactCached);
+    if (outlineSweepBetter(post_finalize_swept_compacted.routing, post_finalize_swept_compacted.score.value,
+                           result.best_routing, result.best_score.value)) {
+        result.best_score = post_finalize_swept_compacted.score;
+        result.best_placement = post_finalize_swept_compacted.placement;
+        result.best_routing = post_finalize_swept_compacted.routing;
+    }
+
     return result;
 }
 

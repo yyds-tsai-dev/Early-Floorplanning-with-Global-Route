@@ -7,9 +7,12 @@ make >/dev/null
 # outlineSweep (search.hpp/.cpp) needs the same proven sibling set as run_b1_regressions.sh, minus
 # floorplan.cpp (verified unneeded for this file -- it links and runs clean without it; floorplan.cpp
 # is the legacy order-only placement path CLAUDE.md documents as unused by search.cpp/main.cpp).
-g++ -std=c++17 -O2 -Wall -Wextra -pedantic \
+# B3.1: cfg_score.cpp added -- testPostFinalizeSweepNeverExceedsPreB31Case2Default re-scores through
+# the golden rescorer (cfg_score.hpp), the same oracle run_cfg_score_regressions.sh/bin/efgr_rescore
+# use.
+g++ -std=c++17 -O2 -Wall -Wextra -pedantic -I. \
     test/regression_b3_20260724.cpp \
-    src/routing.cpp src/eval.cpp src/io.cpp src/validate.cpp \
+    src/cfg_score.cpp src/routing.cpp src/eval.cpp src/io.cpp src/validate.cpp \
     src/placement_engine.cpp src/search.cpp src/respace.cpp \
     -o test/b3_regression_bin
 

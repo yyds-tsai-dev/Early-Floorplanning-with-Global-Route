@@ -2,8 +2,11 @@
 // tests for outlineSweep's new integer-µm capacity-denominator micro-pad rungs (W-only/H-only/both,
 // added to the tight frontier, alongside the pre-existing margin ladder). See
 // .superpowers/sdd/b3-brief.md and .superpowers/sdd/b3-report.md for the full narrative.
+// B3.1 (.superpowers/sdd/b31-report.md): also pins the post-finalize sweep pass's end-to-end effect
+// on case2 (golden-rescored, the same oracle bin/efgr_rescore/run_cfg_score_regressions.sh use).
 #include <cassert>
 #include <cmath>
+#include <cstdio>
 #include <iostream>
 #include <memory>
 #include <random>
@@ -13,6 +16,7 @@
 #include <utility>
 #include <vector>
 
+#include "../src/cfg_score.hpp"
 #include "../src/eval.hpp"
 #include "../src/io.hpp"
 #include "../src/model.hpp"
@@ -183,11 +187,47 @@ void testOutlineSweepPadRungsNeverWorseCase2Default() {
                << " without_pads=" << without_pads.score.value << ")\n";
 }
 
+// B3.1 (.superpowers/sdd/b31-report.md): end-to-end pin. Runs the SAME default search bin/efgr's
+// default flags use on case2 (hybrid, iters=1000, seed=1), writes the resulting cfg, and re-scores
+// it through the golden rescorer (cfg_score.hpp -- the SAME oracle bin/efgr_rescore and
+// run_cfg_score_regressions.sh use) -- asserting the OFFICIAL checker_cost never exceeds the
+// pre-B3.1 baseline. Constant measured at HEAD 8e82204 (post-B1.1, pre-B3.1, i.e. before
+// runPlacementSearch's post-finalize sweep pass existed): 65,625,655.415, identical to
+// b3-report.md's own case2 "after" row and b1-report.md's sweep-matrix hybrid@0 case2 row. Small
+// epsilon headroom (1.0 absolute, ~1.5e-8 relative at this magnitude) for 3-decimal .cfg rounding
+// noise on the round-trip -- the same rounding-awareness run_selfconsistency_regressions.sh already
+// documents, and far tighter than any real regression this pin exists to catch (measured deltas on
+// this lever are in the hundreds-of-thousands to millions).
+constexpr double kPreB31Case2DefaultCheckerCost = 65625655.42;
+
+void testPostFinalizeSweepNeverExceedsPreB31Case2Default() {
+    Problem problem = parseProblem("test/2026 ICCAD_case.case2.csv");
+    SearchOptions options;  // defaults: iters=1000, seed=1, exact_interval=50, budget off
+    SearchResult result = runHybridPlacementSearch(problem, options);
+    assert(result.best_routing.open_routes == 0);
+
+    const std::string tmp = "test/b31_case2_tmp.cfg";
+    writeCfg(tmp, problem, result.best_placement, result.best_routing);
+    CfgSolution cfg = parseCfg(tmp);
+    OfficialBreakdown breakdown = officialScoreCfg(problem, cfg);
+    std::remove(tmp.c_str());
+
+    if (breakdown.checker_cost > kPreB31Case2DefaultCheckerCost + 1.0) {
+        std::cerr << "testPostFinalizeSweepNeverExceedsPreB31Case2Default: checker_cost="
+                  << breakdown.checker_cost << " exceeds pre-B3.1 baseline "
+                  << kPreB31Case2DefaultCheckerCost << "\n";
+    }
+    assert(breakdown.checker_cost <= kPreB31Case2DefaultCheckerCost + 1.0);
+    std::cout << "testPostFinalizeSweepNeverExceedsPreB31Case2Default ok (checker_cost="
+               << breakdown.checker_cost << " <= " << kPreB31Case2DefaultCheckerCost << ")\n";
+}
+
 }  // namespace
 
 int main() {
     testOutlineSweepPadRungsGenerated();
     testOutlineSweepPadRungsNeverWorseCase2Default();
+    testPostFinalizeSweepNeverExceedsPreB31Case2Default();
     std::cout << "b3 regressions passed\n";
     return 0;
 }
