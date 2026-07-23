@@ -9,6 +9,7 @@
 
 #include "eval.hpp"
 #include "ft.hpp"
+#include "rank_stats.hpp"
 #include "respace.hpp"
 #include "validate.hpp"
 
@@ -540,6 +541,20 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
 
     double temp = std::max(1.0, options.initial_temperature);
     int exact_interval = std::max(1, options.exact_interval);
+    // B6 (flag-gated adaptive interval, .superpowers/sdd/b6-brief.md; research doc 2026-07-23 §2
+    // lit, saACM-ES GECCO 2012: "adapt surrogate trust to measured Kendall tau between cheap and
+    // exact rankings, computed from pairs already paid for"). `cli_exact_interval` is the
+    // immutable options/CLI value the growth cap below is measured against; `exact_interval`
+    // above is the LIVE value the loop actually reads, which the block below may shrink/grow once
+    // options.adaptive_interval is on (default off -- these constants then go unread, and
+    // exact_interval never changes after this point, exactly as before B6).
+    const int cli_exact_interval = exact_interval;
+    constexpr std::size_t kAdaptiveWindow = kDefaultFidelityWindow;  // rank_stats.hpp; same window tau_w reports
+    constexpr double kAdaptiveHighTau = 0.7;           // tau_w >= this: proxy still trustworthy, widen the interval
+    constexpr double kAdaptiveLowTau = 0.4;            // tau_w < this: proxy has rotted, narrow back down
+    constexpr double kAdaptiveGrowthFactor = 1.5;      // widen multiplier on high fidelity
+    constexpr int kAdaptiveShrinkDivisor = 2;          // narrow divisor on low fidelity
+    constexpr int kAdaptiveIntervalCapMultiplier = 4;  // live interval never exceeds 4x the CLI value
     // Beta Task 5: wall-clock budget. When enabled, time (not the iter default) is the binding
     // stop -- raise the iteration ceiling so the steady_clock check below is what ends the loop.
     // Budget off (== 0) leaves the bound and reported iteration count byte-identical to the
@@ -574,6 +589,26 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
             RoutingResult routing;
             Placement effective;
             Score exact = exactCached(cand_place, &routing, &effective);
+            // B6 (rank-fidelity instrumentation): record this (cheap, exact) pair for EVERY
+            // exactCached call at this site, cache hit or miss -- pure observation, read by
+            // nothing below. Must run before any return/continue this block could take, and
+            // never touches `rng`, so it cannot perturb the mutate stream or any later decision.
+            result.fidelity_pairs.emplace_back(cand_score.value, exact.value);
+            // B6 (flag-gated adaptive interval, default off -- see options.adaptive_interval's
+            // doc comment in search.hpp). Recomputes windowed tau every kAdaptiveWindow recorded
+            // pairs and adapts the LIVE exact_interval; off, this whole block is skipped and
+            // exact_interval is never reassigned, so the loop's periodic-eval cadence is
+            // byte-identical to pre-B6.
+            if (options.adaptive_interval && result.fidelity_pairs.size() % kAdaptiveWindow == 0) {
+                double tau_w = windowedTauB(result.fidelity_pairs, kAdaptiveWindow);
+                if (tau_w >= kAdaptiveHighTau) {
+                    exact_interval = std::min(
+                        static_cast<int>(std::llround(exact_interval * kAdaptiveGrowthFactor)),
+                        cli_exact_interval * kAdaptiveIntervalCapMultiplier);
+                } else if (tau_w < kAdaptiveLowTau) {
+                    exact_interval = std::max(1, exact_interval / kAdaptiveShrinkDivisor);
+                }
+            }
             if (exact.value < result.best_score.value) {
                 result.best_score = exact;
                 best_state = candidate;
@@ -586,6 +621,23 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
     // Report the iterations actually executed when time bounded the run; budget off keeps the
     // options.iters value stamped above, preserving the existing --iters summary line verbatim.
     if (options.time_budget_sec > 0.0) result.iterations = iters_run;
+
+    // B6 (rank-fidelity instrumentation, .superpowers/sdd/b6-brief.md): snapshot the elite pool's
+    // cheap-vs-exact rank fidelity BEFORE the elite loop below's own sweep/compaction/respace
+    // adoptions can move any candidate's placement -- top_candidates is already cheap-value
+    // sorted ascending (rememberCandidate's std::sort above), so this preserves "pool order =
+    // cheap rank" (search.hpp's SearchResult.elite_pairs contract) exactly. Reuses exactCached
+    // (memoized by placementKey): a pool member the SA loop above already exact-scored at this
+    // exact (rects, outline) is a cache hit here (no new eval); a pool member the SA loop never
+    // happened to trigger an exact eval for pays a genuinely new one here -- one the elite loop's
+    // own outlineSweep(m=0.0 tight rung) below would otherwise pay for a few lines later anyway.
+    // Pure recording: never touches result.best_*/best_state, never touches `rng`.
+    for (const auto& candidate : top_candidates) {
+        RoutingResult elite_routing;
+        Placement elite_effective;
+        Score elite_exact = exactCached(candidate.placement, &elite_routing, &elite_effective);
+        result.elite_pairs.emplace_back(candidate.value, elite_exact.value);
+    }
 
     for (const auto& candidate : top_candidates) {
         // T7 (design §1.4 elite path): replaces the single tight-stamp exactCached call with a
@@ -720,6 +772,11 @@ SearchResult runHybridPlacementSearch(const Problem& problem, const SearchOption
     // Picking the mismatch-0 leg regardless of value was the pre-T3-fossil behavior this rule
     // replaces; paydownBetter is a valid (transitive) total preorder, so pairwise folding in any
     // order yields the same winner as comparing all three at once.
+    // B6: each `result = <leg>_result` assignment below is a whole-struct copy, so
+    // fidelity_pairs/elite_pairs come along with it -- the fold keeps only the PICKED leg's
+    // vectors; the other legs' recorded pairs are simply discarded, never merged. main.cpp's
+    // stderr tau=/pool_tau= fields therefore describe the picked leg's own SA run, not a
+    // combination of all three (search.hpp's SearchResult field comments document the same).
     SearchResult result = sp_result;
     if (paydownBetter(bstar_a_result.best_routing, bstar_a_result.best_score.value, result.best_routing,
                        result.best_score.value)) {
@@ -776,6 +833,10 @@ SearchResult runPricingPortfolio(const Problem& problem, const std::string& engi
     SearchResult official_result = runLeg(official_problem);
     SearchResult legacy_result = runLeg(legacy_problem);
 
+    // B6: same fold-keeps-picked-leg-only behavior as runHybridPlacementSearch's leg pick above --
+    // `result = official_result`/`= legacy_result` are whole-struct copies, so the picked leg's
+    // fidelity_pairs/elite_pairs come along; the other leg's are discarded, never merged. main.cpp
+    // reports whichever leg `pricing_official` below says won.
     SearchResult result = official_result;
     bool official_won = true;
     if (paydownBetter(legacy_result.best_routing, legacy_result.best_score.value, result.best_routing,

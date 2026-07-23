@@ -2,6 +2,8 @@
 
 #include <functional>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "model.hpp"
 #include "placement_engine.hpp"
@@ -15,6 +17,15 @@ struct SearchOptions {
     double initial_temperature = 1000000.0;
     double cooling = 0.995;
     double time_budget_sec = 0.0;  // 0 = disabled; wall-clock stop, checked every 64 iters
+    // B6 (rank-fidelity instrumentation + adaptive interval, .superpowers/sdd/b6-brief.md;
+    // research doc 2026-07-23 §2 lit, saACM-ES GECCO 2012): when true, runPlacementSearch
+    // recomputes windowed Kendall tau (rank_stats.hpp) every kAdaptiveWindow recorded SA-loop
+    // fidelity pairs and adapts the LIVE exact_interval (widen on high fidelity, narrow on low --
+    // see search.cpp's kAdaptive* constants). DEFAULT OFF: off must reproduce today's
+    // exact_interval-is-constant behavior byte-identically (hard acceptance gate, like B1's
+    // original gate). An experiment hook for B5's sweep, not a production default -- flipping the
+    // default is B5's budget-gate decision, not this one's.
+    bool adaptive_interval = false;
 };
 
 struct SearchResult {
@@ -39,6 +50,26 @@ struct SearchResult {
     // for any SearchResult not produced by runPricingPortfolio, so existing direct callers of
     // runPlacementSearch/runHybridPlacementSearch are unaffected.
     bool pricing_official = true;
+    // B6 (rank-fidelity instrumentation, .superpowers/sdd/b6-brief.md): observation-only -- never
+    // READ by any decision in runPlacementSearch/finalizeFeedthrough/outlineSweep, purely reporting
+    // data for main.cpp's stderr summary (tau=/tau_w= fields) and the flag-gated adaptive-interval
+    // control (SearchOptions.adaptive_interval). One (cand_score.value, exact.value) pair recorded
+    // at the SA loop's existing exact-eval trigger site (periodic interval OR cheap-beats-best), in
+    // iteration order, for EVERY exactCached call there regardless of cache hit/miss (a cache hit is
+    // still a valid, if duplicate, rank-fidelity observation of that placement). Like
+    // legacy_paydown_*/pricing_official above, a hybrid/portfolio fold (runHybridPlacementSearch,
+    // runPricingPortfolio) does a whole-struct copy of the PICKED leg only -- the other legs'
+    // recorded pairs are simply discarded, never merged, so main.cpp's stderr line reports the
+    // picked leg's rank fidelity only.
+    std::vector<std::pair<double, double>> fidelity_pairs;
+    // B6: elite-pool ranking snapshot, captured once at the start of the elite loop (before its own
+    // sweep/compaction/respace adoptions can move any candidate's placement) -- one (cheap, exact)
+    // pair per top-K cheap candidate, in POOL ORDER = CHEAP RANK ASCENDING (index 0 = best/lowest
+    // cheap value, matching top_candidates' own sort in runPlacementSearch). Exact values come from
+    // exactCached (memoized by placementKey), so a pool member the SA loop already exact-scored is a
+    // cache hit here, not a new eval. Same fold behavior as fidelity_pairs above: picked leg's vector
+    // only.
+    std::vector<std::pair<double, double>> elite_pairs;
 };
 
 // Exact-scoring callback shape used by the elite pass's exact_cache (search.cpp's `exactCached`

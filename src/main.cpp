@@ -7,6 +7,7 @@
 
 #include "io.hpp"
 #include "placement_engine.hpp"
+#include "rank_stats.hpp"
 #include "search.hpp"
 #include "validate.hpp"
 
@@ -57,7 +58,7 @@ int main(int argc, char** argv) {
     if (argc < 2) {
         std::cerr << "usage: " << argv[0]
                   << " input.csv [output.cfg] [--engine sp|bstar|hybrid] [--iters N] [--seed N] [--alpha X]"
-                  << " [--exact-interval N] [--time-budget S]\n";
+                  << " [--exact-interval N] [--time-budget S] [--adaptive-interval]\n";
         return 2;
     }
 
@@ -89,6 +90,10 @@ int main(int argc, char** argv) {
         options.time_budget_sec = (has_iters && !has_budget)
                                       ? 0.0
                                       : argDouble(argc, argv, "--time-budget", kDefaultTimeBudgetSec);
+        // B6 (flag-gated adaptive interval, .superpowers/sdd/b6-brief.md): DEFAULT OFF -- absent,
+        // runPlacementSearch's exact_interval stays constant exactly as before B6 (hard byte-
+        // identity acceptance gate). See SearchOptions.adaptive_interval's doc comment (search.hpp).
+        options.adaptive_interval = hasFlag(argc, argv, "--adaptive-interval");
         double alpha = argDouble(argc, argv, "--alpha", problem.alpha);
         problem.alpha = alpha;
         std::string engine_name = argString(argc, argv, "--engine", "hybrid");
@@ -103,12 +108,27 @@ int main(int argc, char** argv) {
         auto validation = validateSolution(problem, result.best_placement, result.best_routing);
         writeCfg(output_path, problem, result.best_placement, result.best_routing);
 
+        // B6 (rank-fidelity instrumentation, .superpowers/sdd/b6-brief.md): overall/windowed
+        // Kendall tau over the SA-loop's recorded (cheap, exact) pairs, tau over the elite pool's
+        // own snapshot, and where in the cheap-sorted pool the exact-best member actually sits.
+        // `result` is whichever leg runPricingPortfolio/runHybridPlacementSearch picked (see their
+        // fold-site comments in search.cpp), so these describe the PICKED leg's rank fidelity only,
+        // not a combination across legs.
+        double tau = kendallTauB(result.fidelity_pairs);
+        double tau_w = windowedTauB(result.fidelity_pairs);
+        double pool_tau = kendallTauB(result.elite_pairs);
+        EliteDiagnostics elite_diag = eliteDiagnostics(result.elite_pairs);
+
         // Beta Task 3: 12 significant figures (was the ostream default 6) so the self-consistency
         // regression can compare solver-reported score/wirelength/overflow against efgr_rescore's
         // output at <=1e-6 relative without display quantization masking the true agreement.
         std::cerr << std::setprecision(12)
                   << "engine=" << result.engine_name
                   << " pricing=" << (result.pricing_official ? "official" : "legacy")
+                  << " tau=" << tau
+                  << " tau_w=" << tau_w
+                  << " pool_tau=" << pool_tau
+                  << " exact_best_cheap_rank=" << elite_diag.exact_best_cheap_rank << "/" << elite_diag.pool_size
                   << " iters=" << result.iterations
                   << " exact_evals=" << result.exact_evaluations
                   << " blocks=" << problem.blocks.size()
