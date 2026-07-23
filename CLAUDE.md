@@ -20,9 +20,9 @@ make clean           # removes src/*.o and both binaries
 
 Run the solver:
 ```bash
-bin/efgr input.csv [output.cfg] [--engine sp|bstar|hybrid] [--iters N] [--seed N] [--alpha X] [--exact-interval N]
+bin/efgr input.csv [output.cfg] [--engine sp|bstar|hybrid] [--iters N] [--seed N] [--alpha X] [--exact-interval N] [--time-budget S]
 ```
-- Default engine is `bstar`; default iters `1000`, seed `1`, exact-interval `50`.
+- Default engine is `hybrid` (sweep-selected beta default, 2026-07-23); default iters `1000`, seed `1`, exact-interval `50`. `--time-budget S` enables a wall-clock stop (default off — measured to degrade results until the elite-pass cheap-score mis-ranking under integer geometry is fixed; see `.superpowers/sdd/beta-task-5-report.md`).
 - If `output.cfg` is omitted it defaults to the input path with a `.cfg` extension.
 - `main.cpp` prints a one-line summary to **stderr** (engine, iters, score, overflow, validation, …). Exit code is `0` only when validation passes **and** there are no open routes; otherwise `1`.
 
@@ -32,7 +32,12 @@ bash test/run_case00.sh                        # smoke test: builds, runs case00
 bash test/run_placement_engine_regressions.sh  # compiles test/placement_engine_regression.cpp, exercises sp/bstar/hybrid
 bash test/run_20260618_regressions.sh          # compiles + runs test/regression_20260618.cpp
 bash test/run_20260608_regressions.sh          # compiles + runs test/regression_20260608.cpp
+bash test/run_cfg_score_regressions.sh         # GOLDEN: rescorer vs official alpha-test report.json (≤1e-6, 5 cases)
+bash test/run_selfconsistency_regressions.sh   # solver score == golden rescorer checker_cost on its own output
+bash test/run_integer_output_regressions.sh    # QA A43: all-integer decode (bstar + hybrid)
+bash test/run_testdata_regressions.sh          # 20260712 testcase facts + diagonal-entry guard
 ```
+(The P0–P3 suites `test/run_p{0..3}_regressions.sh` cover the placement-margin, cost-driven-routing, and respacing phases.)
 Regression `.cpp` files are compiled directly (not via the Makefile), each linking only the specific `src/*.cpp` it needs — see the `g++` line in the corresponding `run_*.sh` when adding sources.
 
 **On Windows, run these from a WSL shell at `/home/yyds/Early-Floorplanning-with-Global-Route`** (not the `\\wsl.localhost\...` UNC path) to avoid Git ownership issues and so `make`/`bash` behave.
