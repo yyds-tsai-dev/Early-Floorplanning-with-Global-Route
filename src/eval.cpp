@@ -46,6 +46,34 @@ bool intersectsOpen(const Rect& a, const Rect& b) {
            a.y + kEps < b.top() && b.y + kEps < a.top();
 }
 
+// B5b (abutment-credit cheap-score upgrade, .superpowers/sdd/b5-design.md §3.2): ramp width, as a
+// fraction of one block side, over which the credit rises from 0 (gap == d_thr) to 1 (gap == 0). A
+// named tunable per the design's own recommendation ("partial credit (ramp), width one block side").
+constexpr double kAbutRampFrac = 1.0;
+
+// B5b (b5-design.md §3.2): bundle-weighted abutment credit in [0,1] -- 1.0 at exact
+// "positiveTouch"-consistent abutment (a shared edge with positive perpendicular overlap, matching
+// routing.cpp:17-23's adjacency test), ramping linearly down to 0.0 at a separation of d_thr (one
+// block side away), so cheapScore's SA gradient rewards closing the gap all the way to the A31
+// zero-WL/zero-demand cliff (design §3.3's monotonicity argument) instead of bottoming out at the
+// un-credited center-manhattan floor. Diagonal pairs (no shared-edge axis at all, i.e. neither x nor
+// y overlaps) cap at 0.5 -- they cannot truly abut without sliding onto a shared axis first. Pure
+// function of the two rects; deterministic, no mutation, no problem-level state.
+double abutmentCredit(const Rect& a, const Rect& b) {
+    double x_overlap = std::min(a.right(), b.right()) - std::max(a.x, b.x);
+    double y_overlap = std::min(a.top(), b.top()) - std::max(a.y, b.y);
+    double dx_gap = std::max(0.0, -x_overlap);  // horizontal separation (0 if x-overlap)
+    double dy_gap = std::max(0.0, -y_overlap);  // vertical separation (0 if y-overlap)
+    bool has_abut_axis = (y_overlap > kEps) || (x_overlap > kEps);
+    double g = (y_overlap > kEps) ? dx_gap             // can abut on a vertical edge
+             : (x_overlap > kEps) ? dy_gap             // can abut on a horizontal edge
+             : (dx_gap + dy_gap);                      // diagonal: corner approach, capped credit
+    double d_thr = kAbutRampFrac * 0.5 * (std::min(a.w, b.w) + std::min(a.h, b.h));
+    double credit = d_thr > kEps ? std::clamp(1.0 - g / d_thr, 0.0, 1.0) : (g <= kEps ? 1.0 : 0.0);
+    if (!has_abut_axis) credit = std::min(credit, 0.5);
+    return credit;
+}
+
 double routeAwareProxyPenalty(const Problem& problem, const Placement& placement) {
     double penalty = 0.0;
     for (const auto& bundle : problem.bundles) {
@@ -64,7 +92,14 @@ double routeAwareProxyPenalty(const Problem& problem, const Placement& placement
         // C1 milestone: gentle LINEAR proxy (was overflow^2 * 100) so the cheap tier's overflow
         // gradient is the same order as the exact tier's kBetaLin-weighted global penalty, instead
         // of a quadratic that swamped everything else in the cheap score.
-        penalty += overflow * kBetaLin;
+        double congestion = overflow * kBetaLin;
+        // B5b (b5-design.md §3.2): scale the congestion term toward zero as (a,b) approach
+        // abutment. Gated behind problem.abutment_credit so credit-off reproduces the un-credited
+        // arithmetic exactly (an `if`, not a multiply-by-1) -- this function is called identically
+        // from cheapScore's addend and routeAndScoreAt's subtraction (design §3.4), so whatever this
+        // returns cancels out exactly regardless of the flag, keeping exactScore unaffected.
+        if (problem.abutment_credit) congestion *= (1.0 - abutmentCredit(a, b));
+        penalty += congestion;
 
         Rect bbox{std::min(a.cx(), b.cx()), std::min(a.cy(), b.cy()),
                   std::max(1.0, std::abs(a.cx() - b.cx())), std::max(1.0, std::abs(a.cy() - b.cy()))};
@@ -131,7 +166,13 @@ Score cheapScore(const Problem& problem, const Placement& placement) {
     for (const auto& b : problem.bundles) {
         const auto& a = placement.rects[b.source];
         const auto& c = placement.rects[b.target];
-        wire_proxy += manhattan(a.cx(), a.cy(), c.cx(), c.cy()) * b.nets;
+        double term = manhattan(a.cx(), a.cy(), c.cx(), c.cy()) * b.nets;
+        // B5b (abutment-credit cheap-score upgrade, .superpowers/sdd/b5-design.md §3.2): scale the
+        // WL proxy toward zero as (a,c) approach abutment. Gated behind problem.abutment_credit so
+        // credit-off reproduces cheapScore's pre-B5b arithmetic BYTE-IDENTICALLY -- the multiplier
+        // is skipped entirely via `if`, never merely multiplied by 1.0.
+        if (problem.abutment_credit) term *= (1.0 - abutmentCredit(a, c));
+        wire_proxy += term;
     }
     score.wirelength = wire_proxy;
     score.penalty = penalty + routeAwareProxyPenalty(problem, placement);

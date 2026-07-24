@@ -72,6 +72,20 @@ struct Problem {
     // copies and fold the results, restoring the per-case Pareto floor a changed search trajectory
     // can otherwise miss (design b4-design.md's own R4/R6 risk).
     bool route_pricing_official = true;
+    // B5b (abutment-credit cheap-score upgrade, .superpowers/sdd/b5-design.md §3): solver-internal
+    // knob enabling cheapScore's bundle-weighted abutment credit -- a ramp (eval.cpp's
+    // abutmentCredit) that discounts the WL proxy and the route-aware congestion proxy toward zero
+    // as a bundle's source/target rects approach "positiveTouch" abutment (routing.cpp:17-23's
+    // adjacency test), so the cheap tier's SA gradient can find the A31 zero-WL/zero-demand cliff by
+    // local moves instead of bottoming out at the un-credited center-manhattan floor. Same precedent
+    // as route_pricing_official above: NEVER parsed from the input CSV (io.cpp does not touch this
+    // field; every parsed Problem keeps the default false) -- exists purely so search.cpp's
+    // runPricingPortfolio can run the credit as its own registry-variant dimension (SearchVariant.
+    // abutment_credit) and fold the results, the same flag-gated-variant pattern B5a's own STOP
+    // (b5a-report.md) established as the hard lesson: false (default) reproduces cheapScore's
+    // pre-B5b arithmetic BYTE-IDENTICALLY -- the credit multiplier is gated by an `if`, never merely
+    // multiplied by 1.0.
+    bool abutment_credit = false;
 };
 
 struct Placement {

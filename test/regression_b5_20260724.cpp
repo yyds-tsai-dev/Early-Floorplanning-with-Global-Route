@@ -41,8 +41,10 @@
 #include <vector>
 
 #include "../src/cfg_score.hpp"
+#include "../src/eval.hpp"
 #include "../src/io.hpp"
 #include "../src/model.hpp"
+#include "../src/route_cost.hpp"
 #include "../src/search.hpp"
 
 namespace {
@@ -262,6 +264,193 @@ void testBuildEliteFullSetPrefersLegalOverLowerTightValue() {
     std::cout << "testBuildEliteFullSetPrefersLegalOverLowerTightValue ok\n";
 }
 
+// ---- B5b: abutment-credit cheap-score upgrade (.superpowers/sdd/b5-design.md §3) -----------------
+//
+// Two 10x10 blocks, A at the origin and B offset horizontally by `gap`, sharing a y-overlap (so they
+// can abut on a vertical edge, design §3.2's g=dx_gap branch) -- a fixed two-block fixture the design
+// doc's own §3.3 monotonicity argument (credited_WL(g) = M(g)*(g/d_thr)*nets, strictly increasing in
+// g) is derived against verbatim. d_thr = kAbutRampFrac*0.5*(10+10) = 10.0 for this fixture. nets is
+// chosen large enough (1000) that routeAwareProxyPenalty's congestion term is also exercised
+// (capacity = min(a.h,b.h)*25 = 250 < 1000), so both credited terms (WL, congestion) are visible.
+// Placement.outline_w/h are pinned well above MAX so cheapScore never calls usedOutline -- outline_area
+// stays fixed regardless of `gap`, isolating the credit's own effect on score.value.
+Problem makeAbutmentPairProblem(int nets) {
+    Problem problem;
+    // MAX outline (the containment bound cheapScore's legality penalty checks) -- separate from
+    // Placement.outline_w/h (the declared/stamped outline used only for the outline_area term).
+    // Must be large enough to hold every `gap` this fixture's tests sweep.
+    problem.outline_w = 1000.0;
+    problem.outline_h = 1000.0;
+    Block a;
+    a.name = "A";
+    a.width = 10.0;
+    a.height = 10.0;
+    a.area = 100.0;
+    problem.blocks.push_back(a);
+    Block b;
+    b.name = "B";
+    b.width = 10.0;
+    b.height = 10.0;
+    b.area = 100.0;
+    problem.blocks.push_back(b);
+    problem.bundles.push_back(Bundle{0, 1, nets});
+    return problem;
+}
+
+Placement makeAbutmentPairPlacement(double gap) {
+    Placement placement;
+    placement.rects.push_back(Rect{0.0, 0.0, 10.0, 10.0});
+    placement.rects.push_back(Rect{10.0 + gap, 0.0, 10.0, 10.0});
+    placement.outline_w = 1000.0;
+    placement.outline_h = 1000.0;
+    return placement;
+}
+
+// (a) abutting pair (positive overlap segment -- here a full shared vertical edge -- gap 0) -> full
+// credit -> BOTH the WL proxy and the congestion proxy contribute ZERO for that bundle. With only
+// one bundle and no other blocks, score.penalty is entirely that bundle's (now-zeroed) congestion
+// term, so asserting it is exactly 0.0 pins the congestion side too, not just wirelength.
+void testAbutmentCreditFullAtExactTouch() {
+    Problem problem = makeAbutmentPairProblem(1000);
+    problem.abutment_credit = true;
+    Placement placement = makeAbutmentPairPlacement(0.0);  // gap == 0: exact positiveTouch-style abut
+    Score score = cheapScore(problem, placement);
+    assert(score.wirelength == 0.0);
+    assert(score.penalty == 0.0);
+    std::cout << "testAbutmentCreditFullAtExactTouch ok\n";
+}
+
+// (b) gap == d_thr -> credit == 0 -> byte-SAME as credit-off for that bundle. credit = clamp(1 -
+// g/d_thr, 0, 1) = clamp(1-1, 0, 1) = 0.0 exactly (g/d_thr == 1.0 exactly, no rounding, since both
+// are the same double literal 10.0), so (1-credit) == 1.0 exactly and multiplying by it changes
+// nothing bit-for-bit (IEEE754 x*1.0 == x) -- the two Scores must compare EQUAL in every field.
+void testAbutmentCreditZeroAtRampThreshold() {
+    Problem problem_on = makeAbutmentPairProblem(1000);
+    problem_on.abutment_credit = true;
+    Problem problem_off = problem_on;
+    problem_off.abutment_credit = false;
+    Placement placement = makeAbutmentPairPlacement(10.0);  // gap == d_thr exactly
+    Score on = cheapScore(problem_on, placement);
+    Score off = cheapScore(problem_off, placement);
+    assert(on.wirelength == off.wirelength);
+    assert(on.penalty == off.penalty);
+    assert(on.outline_area == off.outline_area);
+    assert(on.value == off.value);
+    std::cout << "testAbutmentCreditZeroAtRampThreshold ok\n";
+}
+
+// (c) mid-ramp monotonicity: shrinking the gap strictly reduces the credited cheap value (both the
+// WL term alone and the full score.value) on this fixed two-block fixture -- the design §3.3 claim,
+// checked numerically at 3 points strictly inside (0, d_thr).
+void testAbutmentCreditMidRampMonotonicity() {
+    Problem problem = makeAbutmentPairProblem(1000);
+    problem.abutment_credit = true;
+    Score wide = cheapScore(problem, makeAbutmentPairPlacement(8.0));
+    Score mid = cheapScore(problem, makeAbutmentPairPlacement(5.0));
+    Score narrow = cheapScore(problem, makeAbutmentPairPlacement(2.0));
+    assert(wide.wirelength > mid.wirelength);
+    assert(mid.wirelength > narrow.wirelength);
+    assert(wide.value > mid.value);
+    assert(mid.value > narrow.value);
+    std::cout << "testAbutmentCreditMidRampMonotonicity ok (wl@8=" << wide.wirelength
+              << " wl@5=" << mid.wirelength << " wl@2=" << narrow.wirelength << ")\n";
+}
+
+// (d) flag-off byte-identity on a nontrivial (3-block, 2-bundle) fixture: cheapScore with
+// abutment_credit=false must reproduce the pre-B5b arithmetic EXACTLY, independently recomputed here
+// from the same public helpers (manhattan, kBetaLin) cheapScore/routeAwareProxyPenalty themselves
+// use -- not merely "close". Block A-B sit at EXACT geometric abutment (gap 0, the case that would
+// be fully credited if the flag were on); flag-off must still charge the FULL uncredited manhattan
+// distance/congestion for that pair, proving the credit is skipped via an `if` gate, never merely
+// multiplied by 1.0.
+void testAbutmentCreditFlagOffByteIdenticalOnNontrivialFixture() {
+    Problem problem;
+    problem.alpha = 1.0;
+    problem.abutment_credit = false;
+    problem.outline_w = 500.0;
+    problem.outline_h = 500.0;
+    Block a;
+    a.width = 10.0;
+    a.height = 10.0;
+    a.area = 100.0;
+    problem.blocks.push_back(a);
+    Block b;
+    b.width = 8.0;
+    b.height = 6.0;
+    b.area = 48.0;
+    problem.blocks.push_back(b);
+    Block c;
+    c.width = 12.0;
+    c.height = 12.0;
+    c.area = 144.0;
+    problem.blocks.push_back(c);
+    problem.bundles.push_back(Bundle{0, 1, 200});  // A-B: exact abutment (gap 0)
+    problem.bundles.push_back(Bundle{1, 2, 50});   // B-C: separated, both under capacity
+
+    Placement placement;
+    placement.rects.push_back(Rect{0.0, 0.0, 10.0, 10.0});   // A
+    placement.rects.push_back(Rect{10.0, 2.0, 8.0, 6.0});    // B -- abuts A's right edge exactly
+    placement.rects.push_back(Rect{25.0, 0.0, 12.0, 12.0});  // C -- separated from B
+    placement.outline_w = 500.0;
+    placement.outline_h = 500.0;
+
+    Score score = cheapScore(problem, placement);
+
+    const Rect& ra = placement.rects[0];
+    const Rect& rb = placement.rects[1];
+    const Rect& rc = placement.rects[2];
+
+    double expected_wire = manhattan(ra.cx(), ra.cy(), rb.cx(), rb.cy()) * 200.0 +
+                          manhattan(rb.cx(), rb.cy(), rc.cx(), rc.cy()) * 50.0;
+    assert(score.wirelength == expected_wire);
+    assert(expected_wire > 0.0);  // sharp check: A-B's uncredited WL is NOT zeroed despite gap==0
+
+    double expected_outline_area = 500.0 * 500.0;
+    assert(score.outline_area == expected_outline_area);
+
+    // Independently recompute the congestion (routeAwareProxyPenalty) term the same way
+    // eval.cpp does, using the same public kBetaLin constant (route_cost.hpp) -- neither bundle's
+    // bbox intersects the third (non-source/target) block here, so no FT-proxy term applies and
+    // congestion is the WHOLE penalty.
+    auto congestionFor = [](const Rect& x, const Rect& y, int nets) {
+        double dx = std::abs(x.cx() - y.cx());
+        double dy = std::abs(x.cy() - y.cy());
+        double narrow = dx >= dy ? std::max(1.0, std::min(x.h, y.h)) : std::max(1.0, std::min(x.w, y.w));
+        double overflow = std::max(0.0, static_cast<double>(nets) - narrow * 25.0);
+        return overflow * kBetaLin;
+    };
+    double expected_penalty = congestionFor(ra, rb, 200) + congestionFor(rb, rc, 50);
+    assert(score.penalty == expected_penalty);
+
+    double expected_value = expected_outline_area + problem.alpha * expected_wire + expected_penalty;
+    assert(score.value == expected_value);
+    std::cout << "testAbutmentCreditFlagOffByteIdenticalOnNontrivialFixture ok (wirelength="
+              << score.wirelength << ", penalty=" << score.penalty << ")\n";
+}
+
+// Registry shape (b5-design.md §3, coordinator adjudication applying B5a's flag-gated-variant
+// lesson): defaultVariants() must hold exactly 6 legs -- the pre-existing 4 (B5a.1/B5a.2, UNCHANGED,
+// all credit-off) first, then B5b's 2 new legs (both official-pricing, credit-on: admission-v2 then
+// admission-v1) -- in this exact order, since runPricingPortfolio's fold/telemetry stamping and the
+// budget-mode phase split both depend on iterating this registry, not a hardcoded leg count.
+void testDefaultVariantsRegistryHasSixLegsInOrder() {
+    std::vector<SearchVariant> variants = defaultVariants();
+    assert(variants.size() == 6);
+    assert(variants[0].pricing_official == true && variants[0].elite_admission_v2 == false &&
+          variants[0].abutment_credit == false);
+    assert(variants[1].pricing_official == false && variants[1].elite_admission_v2 == false &&
+          variants[1].abutment_credit == false);
+    assert(variants[2].pricing_official == true && variants[2].elite_admission_v2 == true &&
+          variants[2].abutment_credit == false);
+    assert(variants[3].pricing_official == false && variants[3].elite_admission_v2 == true &&
+          variants[3].abutment_credit == false);
+    assert(variants[4].pricing_official == true && variants[4].elite_admission_v2 == true &&
+          variants[4].abutment_credit == true);
+    assert(variants[5].pricing_official == true && variants[5].elite_admission_v2 == false &&
+          variants[5].abutment_credit == true);
+    std::cout << "testDefaultVariantsRegistryHasSixLegsInOrder ok\n";
+}
+
 // ---- End-to-end determinism smoke ---------------------------------------------------------------
 
 std::string readFile(const std::string& path) {
@@ -347,6 +536,11 @@ int main() {
     testBuildEliteFullSetPrefersLegalOverLowerTightValue();
     testB5aFullPipelineDeterministicAcrossInvocations();
     testPortfolioRestoresCase3FloorPostB5a1();
+    testAbutmentCreditFullAtExactTouch();
+    testAbutmentCreditZeroAtRampThreshold();
+    testAbutmentCreditMidRampMonotonicity();
+    testAbutmentCreditFlagOffByteIdenticalOnNontrivialFixture();
+    testDefaultVariantsRegistryHasSixLegsInOrder();
     std::cout << "b5a regressions passed\n";
     return 0;
 }

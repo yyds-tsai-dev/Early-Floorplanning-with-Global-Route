@@ -953,24 +953,35 @@ SearchResult runHybridPlacementSearch(const Problem& problem, const SearchOption
 }
 
 // B5a.2 (variant registry, coordinator adjudication after B5a.1's sweep report,
-// .superpowers/sdd/b5a-report.md "B5a.2 addendum"): the current 4-leg portfolio, in the current leg
-// order -- (official,v1), (legacy,v1) [the floor pair], (official,v2), (legacy,v2). Extracted from
+// .superpowers/sdd/b5a-report.md "B5a.2 addendum") + B5b (abutment-credit variant,
+// .superpowers/sdd/b5-design.md §3, coordinator adjudication applying B5a's own flag-gated-variant
+// lesson): the current 6-leg portfolio, in the current leg order -- (official,v1), (legacy,v1) [the
+// floor pair], (official,v2), (legacy,v2) [B5a.1's original 4, unchanged, all credit-off], then
+// (official,v2,credit-on), (official,v1,credit-on) [B5b's 2 new legs]. Extracted from
 // runPricingPortfolio's former hardcoded 4-variable body (B5a.1) so a future dimension is one more
 // field on `SearchVariant` and one more entry (or a small cross-product loop) here, not a new
-// hardcoded leg at every call site.
+// hardcoded leg at every call site. B5b's 2 new legs are both official-pricing only -- see this
+// function's own doc comment in search.hpp for why the credit dimension is not also crossed with
+// the legacy-pricing leg.
 std::vector<SearchVariant> defaultVariants() {
     return {
-        SearchVariant{true, false},
-        SearchVariant{false, false},
-        SearchVariant{true, true},
-        SearchVariant{false, true},
+        SearchVariant{true, false, false},
+        SearchVariant{false, false, false},
+        SearchVariant{true, true, false},
+        SearchVariant{false, true, false},
+        // B5b: 2 new legs, both official pricing, credit-on -- admission-v2 first, then
+        // admission-v1, per the coordinator's specified order.
+        SearchVariant{true, true, true},
+        SearchVariant{true, false, true},
     };
 }
 
 // B4.1 (route-pricing portfolio, b4-report.md) + B5a.1 (elite-admission dimension, b5a-report.md)
 // + B5a.2 (variant registry + default-first budget mode, coordinator adjudication,
-// b5a-report.md "B5a.2 addendum"): see the doc comment in search.hpp for the full contract. Summary:
-// budget-off runs `defaultVariants()` once (byte-identical to B5a.1/HEAD 70d8f38 -- md5-verified);
+// b5a-report.md "B5a.2 addendum") + B5b (abutment-credit variant, b5-design.md §3): see the doc
+// comment in search.hpp for the full contract. Summary:
+// budget-off runs `defaultVariants()` once (byte-identical to B5a.1/HEAD 70d8f38 for the first 4
+// legs -- md5-verified -- with 2 additional credit-on legs folded in by B5b);
 // budget-on runs the registry TWICE -- phase 1 at the full `options.iters`, budget forced off (i.e.
 // exactly the default run, wall-clock measured as `t0`), then phase 2 (skipped if the remaining
 // budget `options.time_budget_sec - t0` does not clear a small floor) re-runs the registry with
@@ -988,6 +999,7 @@ SearchResult runPricingPortfolio(const Problem& problem, const std::string& engi
     auto runLeg = [&](const SearchVariant& variant, const SearchOptions& leg_options) {
         Problem p = problem;
         p.route_pricing_official = variant.pricing_official;
+        p.abutment_credit = variant.abutment_credit;
         SearchOptions opts = leg_options;
         opts.elite_admission_v2 = variant.elite_admission_v2;
         if (engine == "hybrid") return runHybridPlacementSearch(p, opts);
@@ -1064,6 +1076,7 @@ SearchResult runPricingPortfolio(const Problem& problem, const std::string& engi
 
     result.pricing_official = winner.pricing_official;
     result.elite_admission_v2 = winner.elite_admission_v2;
+    result.abutment_credit = winner.abutment_credit;
     result.budget_phase2 = budget_phase2;
     result.iterations = total_iterations;
     result.exact_evaluations = total_exact_evaluations;

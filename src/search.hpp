@@ -85,6 +85,15 @@ struct SearchResult {
     // result). Telemetry only -- surfaced in main.cpp's stderr summary as `budget_phase2=yes|no`.
     // Defaults false for any SearchResult not produced by runPricingPortfolio.
     bool budget_phase2 = false;
+    // B5b (abutment-credit registry variant, .superpowers/sdd/b5-design.md §3, coordinator
+    // adjudication applying B5a's own flag-gated-variant lesson): true iff the WINNING leg of
+    // runPricingPortfolio's fold carried Problem.abutment_credit=true (model.hpp). Telemetry only
+    // (never read by scoring/caching logic) -- surfaced in main.cpp's stderr summary as
+    // `credit=on|off`, immediately after `admission=`. Defaults false (matches
+    // SearchVariant.abutment_credit's floor-leg default) for any SearchResult not produced by
+    // runPricingPortfolio's own explicit fold-tracking -- same precedent pricing_official/
+    // elite_admission_v2/budget_phase2 above already established.
+    bool abutment_credit = false;
     // B6 (rank-fidelity instrumentation, .superpowers/sdd/b6-brief.md): observation-only -- never
     // READ by any decision in runPlacementSearch/finalizeFeedthrough/outlineSweep, purely reporting
     // data for main.cpp's stderr summary (tau=/tau_w= fields) and the flag-gated adaptive-interval
@@ -253,22 +262,35 @@ void finalizeFeedthrough(const Problem& problem, const PlacementEngine& engine, 
 struct SearchVariant {
     bool pricing_official;
     bool elite_admission_v2;
+    // B5b (abutment-credit cheap-score upgrade, .superpowers/sdd/b5-design.md §3, coordinator
+    // adjudication applying B5a's own flag-gated-variant lesson -- .superpowers/sdd/b5a-report.md):
+    // whether this leg's Problem copy carries abutment_credit=true (model.hpp). The pre-existing 4
+    // legs (defaultVariants()) keep this false -- their behavior must stay bit-exact with pre-B5b
+    // history; the credit is exercised only by the 2 legs B5b appends.
+    bool abutment_credit;
 };
 
-// The CURRENT portfolio's 4 legs, in the CURRENT leg order (B5a.1: (official,v1), (legacy,v1) --
-// the floor pair -- then (official,v2), (legacy,v2)). Extracted from runPricingPortfolio's former
-// hardcoded 4-variable body so both the default (budget-off) and phase-1/phase-2 (budget-on) paths
-// below iterate the SAME registry -- adding a variant later means editing this one function, not
-// every call site that used to enumerate legs by hand.
+// The CURRENT portfolio's 6 legs, in the CURRENT leg order (B5a.1/B5a.2: (official,v1,credit-off),
+// (legacy,v1,credit-off) -- the floor pair -- then (official,v2,credit-off), (legacy,v2,credit-off);
+// B5b appends (official,v2,credit-on), (official,v1,credit-on)). Extracted from runPricingPortfolio's
+// former hardcoded 4-variable body so both the default (budget-off) and phase-1/phase-2 (budget-on)
+// paths below iterate the SAME registry -- adding a variant later means editing this one function,
+// not every call site that used to enumerate legs by hand. B5b's 2 new legs are both OFFICIAL
+// pricing only -- the credit is a cheap-score/SA-gradient change, not a pricing change, so crossing
+// it with the legacy-pricing leg too would double the registry again (4 new legs) for no evidenced
+// benefit; the existing (official,*)/(legacy,*) floor legs already hold the per-case Pareto floor
+// the credit legs are folded against.
 std::vector<SearchVariant> defaultVariants();
 
 // B4.1 (route-pricing portfolio, b4-report.md) + B5a.1 (elite-admission dimension,
 // b5a-report.md) + B5a.2 (variant registry + default-first budget mode, b5a-report.md "B5a.2
-// addendum"): runs the FULL requested engine search ("sp", "bstar", or "hybrid" -- same dispatch
-// main.cpp used to do inline) over `defaultVariants()` (currently 4 legs: the cross product of
-// `route_pricing_official` {true,false} x `elite_admission_v2` {false,true}), folding every
-// executed leg with the existing value-gated `paydownBetter` (legality-first, then value; a
-// transitive total preorder, so fold order never changes the winner).
+// addendum") + B5b (abutment-credit registry variant, b5-design.md §3): runs the FULL requested
+// engine search ("sp", "bstar", or "hybrid" -- same dispatch main.cpp used to do inline) over
+// `defaultVariants()` (currently 6 legs: the cross product of `route_pricing_official` {true,false}
+// x `elite_admission_v2` {false,true}, ALWAYS with `abutment_credit=false`, PLUS 2 credit-on legs at
+// `pricing_official=true` -- see defaultVariants()'s own doc comment for the exact leg list/order),
+// folding every executed leg with the existing value-gated `paydownBetter` (legality-first, then
+// value; a transitive total preorder, so fold order never changes the winner).
 //
 // BUDGET-OFF (`options.time_budget_sec == 0`): runs the registry ONCE at `options.iters`,
 // time-budget off -- byte-identical to B5a.1/HEAD 70d8f38 (verified: md5-identical .cfg on all 5
@@ -288,10 +310,11 @@ std::vector<SearchVariant> defaultVariants();
 // phase 2 fires or what it finds: budget's contract is now "never worse than default, spend any
 // surplus wall-clock exploring further." `SearchResult.budget_phase2` reports whether phase 2 ran.
 //
-// `pricing_official`/`elite_admission_v2` on the returned result are stamped FRESH from the
-// WINNING variant (never read from any leg's own copy of those fields -- same precedent B4.1/B5a.1
-// established). Existing direct callers of runPlacementSearch/runHybridPlacementSearch keep
-// single-leg semantics unchanged (elite_admission_v2 defaults false on SearchOptions).
+// `pricing_official`/`elite_admission_v2`/`abutment_credit` on the returned result are stamped
+// FRESH from the WINNING variant (never read from any leg's own copy of those fields -- same
+// precedent B4.1/B5a.1 established). Existing direct callers of runPlacementSearch/
+// runHybridPlacementSearch keep single-leg semantics unchanged (elite_admission_v2 defaults false
+// on SearchOptions; abutment_credit defaults false on Problem).
 SearchResult runPricingPortfolio(const Problem& problem, const std::string& engine, const SearchOptions& options);
 
 }  // namespace efgr
