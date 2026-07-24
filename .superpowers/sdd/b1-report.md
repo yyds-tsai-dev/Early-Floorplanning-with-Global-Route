@@ -225,6 +225,66 @@ One commit, staged exactly the files above (never `git add -A`); message:
   harness) — the research doc's own attribution for the remaining elite-pass cheap-score mis-ranking
   mechanism. **Budget stays defaulted OFF** (`main.cpp`'s `kDefaultTimeBudgetSec = 0.0`, unchanged by
   B1/B1.1) until that gate passes; B1/B1.1 make no default-changing claim and none is made now.
+
+  **UPDATE (2026-07-24, B5a.2): the budget gate is now CLOSED**, on a metric-alignment ruling made
+  and recorded here, superseding the two prior notes in this section (kept above for the audit
+  trail; do not delete). `runPricingPortfolio` was rebuilt as a default-first, two-phase
+  variant-registry portfolio (phase 1 = the ENTIRE registry at `options.iters` with the time budget
+  forced off, i.e. exactly the default/budget-0 run; phase 2, gated by a 2s floor, re-runs the
+  registry under the residual wall-clock budget and folds in alongside phase 1) -- see
+  `.superpowers/sdd/b5a-report.md`'s "B5a.2 addendum" for the full mechanism and both re-measured
+  sweep matrices. Because phase 1's own legs are unconditionally part of the fold, the portfolio's
+  result can never be worse than the plain default run **under the metric the fold actually
+  optimizes** -- the solver's own internal `score.value`.
+
+  The prior note above measured the gate on the golden rescorer's `checker_cost` alone and found one
+  residual failure: `bstar case3 @45` at +1.0785% (checker_cost 52,353,204.607 -> 52,917,851.466).
+  Diagnosis (direct probe, unchanged from the prior note): phase 2 there traded a lower feedthrough
+  mismatch (413,340.50 -> 97,755.38) for a *worse* checker-relevant geometry, because `paydownBetter`
+  folds on `score.value`, not `checker_cost`, and the golden rescorer's `checker_cost` does not price
+  mismatch at all (`ft_penalty=0`, an uncalibrated fallback -- see `cfg_score.cpp` -- because every
+  alpha-test golden case happens to carry mismatch 0, so the fallback was never exercised, which is
+  evidence of *no alpha coverage*, not evidence of *no official deduction*).
+
+  **Ruling: `checker_cost`-only is the wrong gate metric.** Official QA A1.2 declares a proportional
+  feedthrough-mismatch deduction as part of the contest cost function, and the alpha-test
+  `report.json` itself carries a constant `β_ft = 3.0` for exactly this term (see
+  `official-cost-function.md` in project memory). The contest-defensible metric is therefore
+  `official_expected = checker_cost + β_ft * feedthrough_mismatch`, which — verified exactly (to
+  ~0.1 out of ~5e7, i.e. floating-point-only slack) on every one of the 30 sweep cells below — equals
+  the solver's own internal `score.value` on every legal (`open_routes=0`) output in this sweep.
+  `paydownBetter` folding by `score.value` is therefore already folding by the aligned, official-
+  expected metric; the golden rescorer's `checker_cost` was the outlier, not the fold.
+
+  **Re-measured under the aligned metric** (`score.value`, i.e. `checker_cost + 3.0*mismatch`; full
+  30-row data in `.superpowers/sdd/b5a-report.md`'s "B5a.2 addendum"): all 20 non-baseline sweep
+  cells ({15,45} x {hybrid,bstar} x 5 cases, vs. their own budget=0 baseline) now satisfy result <=
+  baseline (several exactly equal -- phase 2 found nothing better and the fold degenerates to phase
+  1 verbatim; several strictly improve). **The previously-failing cell flips sign**: `bstar case3
+  @45` aligned score 53,211,117.6061 vs. baseline 53,593,226.1073 = **-0.7130%**, an actual
+  improvement (matches the coordinator's own "becomes -0.7%-ish" prediction almost exactly) -- because
+  under the metric `paydownBetter` actually optimizes, phase 2's mismatch paydown *is* a net win once
+  its official-expected cost is priced in. 30/30 cells pass under the aligned metric. **Disclosed,
+  not hidden:** the golden-`checker_cost`-only (ft0) view of that same cell still shows +1.0785% --
+  the two metrics genuinely disagree on this one cell, by construction (that disagreement is exactly
+  what motivated the ruling above), and this note does not paper over it.
+
+  **Honesty check on the "actual submissions are unaffected" framing, and where it did NOT hold**:
+  the ruling's supporting rationale suggested shipped defaults carry mismatch 0 (so the metric choice
+  is low-stakes in practice). The full 30-cell sweep contradicts this for the current 5 test cases:
+  **every one of the 10 budget=0 cells -- both engines, all 5 cases, including the literal
+  no-flags-overridden `hybrid`/`--iters 1000`/`--seed 1` default -- carries nonzero feedthrough
+  mismatch**, from 1,048.21 (bstar case0) up to 1,584,582.01 (hybrid case4); see the full table in
+  `b5a-report.md`. This does NOT undermine the ruling itself (the fold-correctness and
+  metric-alignment argument above hold independent of whether mismatch happens to be exactly 0 --
+  A1.2/β_ft apply regardless of magnitude), but it does mean `checker_cost` and `score.value` are
+  materially different numbers on every one of today's 5 real cases, not just a theoretical
+  edge case reserved for pathological inputs. Flagged here for visibility rather than silently
+  asserted away.
+
+  Budget stays defaulted OFF in `main.cpp` (`kDefaultTimeBudgetSec = 0.0`) regardless of this gate's
+  status -- closing the gate licenses turning the default on in a future task, it does not itself
+  flip it.
 - **[Important]** the `bstar_b` skip predicate compared `placementKey` strings (rounds every
   coordinate to 3 decimals, `llround(x*1000)`), but `BStarEngine::seedFromPlacement`
   (`placement_engine.cpp:622`) sorts nodes by comparing RAW `x` (then `y`) with a `kEps=1e-6`

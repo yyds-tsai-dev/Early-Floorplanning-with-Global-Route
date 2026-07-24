@@ -76,6 +76,15 @@ struct SearchResult {
     // won with its OWN local bookkeeping and stamps this field fresh at the end; it is never read
     // from any individual leg's own copy of the field).
     bool elite_admission_v2 = false;
+    // B5a.2 (variant-registry portfolio + default-first budget mode, coordinator adjudication after
+    // B5a.1's sweep report -- .superpowers/sdd/b5a-report.md "B5a.2 addendum"): true iff
+    // runPricingPortfolio's phase 2 (the continued-SA, time-budgeted re-run of the registry) actually
+    // executed for this result -- i.e. `options.time_budget_sec` exceeded phase 1's own measured
+    // wall-clock cost by more than the phase-2 floor. False whenever time_budget_sec is 0 (budget
+    // off) OR the requested budget could not clear phase 1 (the run degenerates to the default
+    // result). Telemetry only -- surfaced in main.cpp's stderr summary as `budget_phase2=yes|no`.
+    // Defaults false for any SearchResult not produced by runPricingPortfolio.
+    bool budget_phase2 = false;
     // B6 (rank-fidelity instrumentation, .superpowers/sdd/b6-brief.md): observation-only -- never
     // READ by any decision in runPlacementSearch/finalizeFeedthrough/outlineSweep, purely reporting
     // data for main.cpp's stderr summary (tau=/tau_w= fields) and the flag-gated adaptive-interval
@@ -236,30 +245,53 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
                                 const PlacementState& initial_state);
 SearchResult runHybridPlacementSearch(const Problem& problem, const SearchOptions& options);
 void finalizeFeedthrough(const Problem& problem, const PlacementEngine& engine, SearchResult& result);
+// B5a.2 (variant-registry portfolio, coordinator adjudication after B5a.1's sweep report --
+// .superpowers/sdd/b5a-report.md "B5a.2 addendum"): one point in the portfolio's search space --
+// which router pricing (B4.1) and which elite-admission mechanism (B5a.1) a leg runs under. Room to
+// grow: a future dimension (e.g. a seed variant for B2's multi-restart portfolio) is another field
+// here, not a new hardcoded leg.
+struct SearchVariant {
+    bool pricing_official;
+    bool elite_admission_v2;
+};
+
+// The CURRENT portfolio's 4 legs, in the CURRENT leg order (B5a.1: (official,v1), (legacy,v1) --
+// the floor pair -- then (official,v2), (legacy,v2)). Extracted from runPricingPortfolio's former
+// hardcoded 4-variable body so both the default (budget-off) and phase-1/phase-2 (budget-on) paths
+// below iterate the SAME registry -- adding a variant later means editing this one function, not
+// every call site that used to enumerate legs by hand.
+std::vector<SearchVariant> defaultVariants();
+
 // B4.1 (route-pricing portfolio, b4-report.md) + B5a.1 (elite-admission dimension,
-// .superpowers/sdd/b5a-report.md): runs the FULL requested engine search ("sp", "bstar", or
-// "hybrid" -- same dispatch main.cpp used to do inline) as FOUR legs -- the cross product of
-// `route_pricing_official` {true,false} (model.hpp) x `elite_admission_v2` {false,true}
-// (SearchOptions) -- then folds all four SearchResults with the existing value-gated
-// `paydownBetter` (legality-first, then value; a transitive total preorder, so pairwise folding in
-// any order picks the same overall winner). Leg order: (official,v1) and (legacy,v1) first (the
-// FLOOR legs -- v1 is byte-identical to pre-B5a/HEAD 408a297 on each pricing, so this pair alone
-// reproduces exactly what the pre-B5a 2-leg portfolio produced), then (official,v2), (legacy,v2)
-// (B5a's new tight-exact-reranked admission, which B5a's own measurement found wins substantially
-// on some cases -- e.g. case2/case4 -- and regresses others -- case1/case3, via a shared-search-path
-// interaction with the v1 floor's own legacy-leg bit-exact-replay premise and the hybrid bstar-seed
-// cascade; see b5a-report.md). Folding all four by value means the v1 floor legs structurally
-// guarantee per-case <= the pre-B5a/B4.1 baseline (same "legacy leg reproduces old behavior
-// bit-exactly" argument B4.1 already established, now doubled for the (v1) pricing pair), while the
-// v2 legs are pure upside where they happen to win. `options` is shared by all four legs (same
-// seed, same iters) except `elite_admission_v2`, which each leg's own copy overrides explicitly
-// regardless of the incoming `options.elite_admission_v2` value; a wall-clock time_budget, if set,
-// is split 4 ways (was 2, halved again since B5a.1 doubles the leg count) -- budget-off (0.0)
-// divides to 0.0 either way, unaffected. `pricing_official`/`elite_admission_v2` on the returned
-// result are stamped FRESH from this function's own fold bookkeeping (never read from any
-// individual leg's own copy of those fields -- same precedent as B4.1's `pricing_official`).
-// Existing direct callers of runPlacementSearch/runHybridPlacementSearch keep single-leg semantics
-// unchanged (elite_admission_v2 defaults false on SearchOptions).
+// b5a-report.md) + B5a.2 (variant registry + default-first budget mode, b5a-report.md "B5a.2
+// addendum"): runs the FULL requested engine search ("sp", "bstar", or "hybrid" -- same dispatch
+// main.cpp used to do inline) over `defaultVariants()` (currently 4 legs: the cross product of
+// `route_pricing_official` {true,false} x `elite_admission_v2` {false,true}), folding every
+// executed leg with the existing value-gated `paydownBetter` (legality-first, then value; a
+// transitive total preorder, so fold order never changes the winner).
+//
+// BUDGET-OFF (`options.time_budget_sec == 0`): runs the registry ONCE at `options.iters`,
+// time-budget off -- byte-identical to B5a.1/HEAD 70d8f38 (verified: md5-identical .cfg on all 5
+// default cases).
+//
+// BUDGET-ON (`options.time_budget_sec > 0`) is now DEFAULT-FIRST, closing the budget gate
+// STRUCTURALLY rather than empirically: **phase 1** runs the ENTIRE registry at `options.iters`
+// with the time budget forced OFF -- i.e. phase 1 IS the default run, byte-identical to what
+// budget-off computes, and its own wall-clock cost is measured as `t0`. **Phase 2** (continued-SA,
+// today's pre-B5a.2 budgeted behavior) re-runs the ENTIRE registry with
+// `time_budget_sec = (options.time_budget_sec - t0) / defaultVariants().size()` per leg, but ONLY
+// if that remaining budget clears a small floor (2s) -- otherwise phase 2 is skipped entirely and
+// the result degenerates to phase 1 alone (a requested budget smaller than the default run's own
+// cost cannot buy anything phase 1 didn't already compute). Every leg from BOTH phases that ran is
+// folded together by the same `paydownBetter` -- since phase 1's own legs are ALWAYS in the folded
+// set, the portfolio's result can never be worse than the plain default run, regardless of whether
+// phase 2 fires or what it finds: budget's contract is now "never worse than default, spend any
+// surplus wall-clock exploring further." `SearchResult.budget_phase2` reports whether phase 2 ran.
+//
+// `pricing_official`/`elite_admission_v2` on the returned result are stamped FRESH from the
+// WINNING variant (never read from any leg's own copy of those fields -- same precedent B4.1/B5a.1
+// established). Existing direct callers of runPlacementSearch/runHybridPlacementSearch keep
+// single-leg semantics unchanged (elite_admission_v2 defaults false on SearchOptions).
 SearchResult runPricingPortfolio(const Problem& problem, const std::string& engine, const SearchOptions& options);
 
 }  // namespace efgr

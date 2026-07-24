@@ -131,6 +131,7 @@ int main(int argc, char** argv) {
                   << "engine=" << result.engine_name
                   << " pricing=" << (result.pricing_official ? "official" : "legacy")
                   << " admission=" << (result.elite_admission_v2 ? "v2" : "v1")
+                  << " budget_phase2=" << (result.budget_phase2 ? "yes" : "no")
                   << " tau=" << tau
                   << " tau_w=" << tau_w
                   << " pool_tau=" << pool_tau

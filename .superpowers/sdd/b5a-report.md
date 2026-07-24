@@ -1,10 +1,16 @@
-# B5a / B5a.1 Report — Elite-pool rework, its regression, and the flag-gated variant-portfolio fix
+# B5a / B5a.1 / B5a.2 Report — Elite-pool rework, its regression, the flag-gated variant-portfolio
+# fix, and the structural budget-gate closure
 
-Status: **B5a.1 DONE** (flag-gated variant portfolio); **budget-gate (item 5) does NOT pass** — 8 of 20
-non-baseline sweep cells still exceed +1% vs their own budget-0 (down from a much worse pre-fix
-picture; see §5). Per the coordinator's explicit instruction, the §5 structural-snapshot backstop is
-**not** built here — that decision is reserved for the coordinator. Everything else (byte-identity
-gate item 1, per-case pins item 3, all 17 suites item 4) passes.
+Status: **B5a.1 DONE** (flag-gated variant portfolio, §1–§9, historical record, kept as-is below);
+**B5a.2 DONE, budget gate now CLOSED** (§10) — `runPricingPortfolio` rebuilt as a variant registry
+with a default-first, two-phase budget mode, closing the gate **structurally**: every budgeted run
+folds in the full deterministic default run (phase 1) alongside a wall-clock-bounded continuation
+(phase 2), so the result can never be worse than the default under the metric the fold actually
+optimizes (`score.value`). Re-measured under that aligned metric, 30/30 sweep cells pass (§10.6);
+under the golden rescorer's `checker_cost` alone, 29/30 pass, with one cell (`bstar case3@45`,
++1.0785%) disclosed rather than hidden (§10.4/§10.7) — see §10.5 for the metric-alignment ruling
+that resolves this in favor of `score.value` as the gate metric. Byte-identity (item 1) and all 17
+suites (item 4) re-verified green against the B5a.2 code.
 
 ---
 
@@ -289,4 +295,327 @@ One commit, staging exactly: `src/search.cpp`, `src/search.hpp`, `src/main.cpp`,
 `.superpowers/sdd/b5-design.md` (untracked, staged per instruction), `.superpowers/sdd/b5a-report.md`,
 `.superpowers/sdd/progress.md`; message:
 `feat(search): elite admission v2 as a 4-leg variant-portfolio dimension (B5a)` +
+`Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
+
+This commit landed as `70d8f38`. Everything below is new (B5a.2, same commit boundary the
+coordinator asked to close with).
+
+---
+
+## 10. B5a.2 addendum — variant-registry portfolio, default-first budget mode, gate closure
+
+Adjudication that authorized this addendum (§6's gate report was accepted, then acted on): close the
+budget gate **structurally** — make every budgeted run a strict superset of the default run — and
+generalize the hardcoded 4-leg fold into a variant registry while in there, since B2's future
+seed-variant dimension will want the same shape. One commit. Byte-identity for the budget-off path
+is a hard, re-verified gate (§10.2); so is the full 17-suite battery (§10.3).
+
+### 10.1 What changed
+
+**10.1.1 Registry refactor** (`src/search.hpp`, `src/search.cpp`) — B5a.1's hardcoded 4 local
+variables (`(official,v1)`, `(legacy,v1)`, `(official,v2)`, `(legacy,v2)`) are now data:
+
+```cpp
+struct SearchVariant {
+    bool pricing_official;
+    bool elite_admission_v2;
+};
+
+std::vector<SearchVariant> defaultVariants();  // same 4 legs, same order, as data
+```
+
+`defaultVariants()` returns the identical cross product in the identical order B5a.1 used — this
+half of the refactor is a pure extraction, no behavior change (confirmed by the byte-identity gate,
+§10.2, and by every per-case pin in §4 still holding unchanged since no leg's own semantics moved).
+
+**10.1.2 Default-first, two-phase budget mode** (`runPricingPortfolio`, `src/search.cpp`) — the
+part that actually closes the gate:
+
+- **Phase 1**: run the *entire* registry (all of `defaultVariants()`) at `options.iters`, with
+  `time_budget_sec` forced to `0.0` regardless of what the caller asked for. This is, by
+  construction, *exactly* the default/budget-off computation — same code path, same iters, same
+  seed. Its wall-clock cost is measured (`std::chrono::steady_clock`) as `t0`.
+- **Phase 2** (conditional): only if `remaining = options.time_budget_sec - t0` clears a small floor
+  (`kPhase2Floor = 2.0s`), re-run the *entire* registry again, this time with
+  `time_budget_sec = remaining / defaultVariants().size()` per leg (the existing wall-clock-bounded
+  continued-SA behavior, unchanged in itself). If the floor isn't cleared — a requested budget
+  smaller than the default run's own cost — phase 2 is skipped outright and the result is phase 1
+  alone.
+- **Fold**: every leg that ran, from both phases, is folded together with the existing
+  `paydownBetter` (legality-first, then `score.value`; a transitive total preorder, so fold order
+  never changes the winner). Because phase 1's legs are *unconditionally* part of this fold, the
+  portfolio's result can never be worse than the plain default run, under the metric
+  `paydownBetter` optimizes (`score.value`) — this is what makes the guarantee structural rather
+  than an empirical property of any particular sweep.
+- Budget-off (`options.time_budget_sec == 0.0`): phase 1 runs once, `remaining` is negative, phase 2
+  never fires. Single registry pass, identical cost/behavior to B5a.1.
+- `SearchResult.budget_phase2` (new field, `search.hpp`) reports whether phase 2 actually executed
+  — `main.cpp`'s stderr summary gained `budget_phase2=yes|no` immediately after `admission=`.
+
+### 10.2 Byte-identity gate (item 1 — HARD, re-verified against HEAD `70d8f38`)
+
+`git stash` the B5a.2 working tree, rebuild HEAD (`70d8f38`, the committed B5a.1 code), run all 5
+default-flag cases, md5-compare, restore:
+
+```
+case0: MATCH (8814c8771d96eb0d63ffe8ca797c2c43)
+case1: MATCH (bb738dc520417e0a60412dab0a2687b5)
+case2: MATCH (967cb149537f7b345b03849dd22469fe)
+case3: MATCH (3388a0a277109fd7fb28469e22e4b8b7)
+case4: MATCH (675558297c2d6e5cb8d3f1e1c9d2c5ec)
+```
+
+**All 5 MATCH.** The budget-off path is byte-identical to `70d8f38`; the registry refactor and the
+phase-1/phase-2 restructuring change nothing about what the default flags produce. (Note: these
+hashes differ from §3's pre-B5a.1 hashes for case2/case4, as expected — §3 compared v1-only against
+*pre-B5a*; this gate compares the real 4-leg default result, where v2 legitimately wins case2/case4,
+against `70d8f38`, which already has that behavior. The relevant claim here is B5a.2 vs. B5a.1, not
+B5a.2 vs. pre-B5a.)
+
+### 10.3 Suite battery (item 4 — HARD, all 17 must pass)
+
+```
+PASS test/run_case00.sh (15s)
+PASS test/run_placement_engine_regressions.sh (24s)
+PASS test/run_20260618_regressions.sh (19s)
+PASS test/run_20260608_regressions.sh (18s)
+PASS test/run_cfg_score_regressions.sh (10s)
+PASS test/run_selfconsistency_regressions.sh (138s)
+PASS test/run_integer_output_regressions.sh (30s)
+PASS test/run_testdata_regressions.sh (10s)
+PASS test/run_p0_regressions.sh (9s)
+PASS test/run_p1_regressions.sh (28s)
+PASS test/run_p2_regressions.sh (10s)
+PASS test/run_p3_regressions.sh (14s)
+PASS test/run_b1_regressions.sh (45s)
+PASS test/run_b3_regressions.sh (23s)
+PASS test/run_b4_regressions.sh (59s)
+PASS test/run_b6_regressions.sh (10s)
+PASS test/run_b5_regressions.sh (46s)
+
+=== SUMMARY: 17 passed, 0 failed (of 17) ===
+```
+
+This is the commit-time re-run (run immediately before staging, against the exact working tree being
+committed). `test/run_b5_regressions.sh`'s
+8th test, `testPortfolioRestoresCase3FloorPostB5a1`, still passes unchanged — it calls
+`runPricingPortfolio` at budget-off, which is exactly phase 1 alone, so the registry refactor is
+invisible to it. No test file changes were needed for B5a.2 — the registry produces the same legs
+in the same order as B5a.1's hardcoded body.
+
+### 10.4 Budget sweep matrix — golden-`checker_cost`-only view (the ft0 view)
+
+Same sweep configuration as §6 (`ENGINES="bstar hybrid" BUDGETS="0 15 45" SEEDS="1" CASES="0 1 2 3 4"
+REF_ITERS=1000`), re-run against the B5a.2 default-first mechanism:
+
+| engine | case | @0 (base) | @15 | Δ%@15 | @45 | Δ%@45 |
+|---|---|---:|---:|---:|---:|---:|
+| bstar | 0 | 5,202,230.000 | 5,202,230.000 | 0.000% | 5,202,230.000 | 0.000% |
+| bstar | 1 | 12,509,317.480 | 10,191,746.900 | −18.531% | 10,021,092.900 | −19.897% |
+| bstar | 2 | 52,962,157.808 | 52,962,157.808 | 0.000% | 49,217,165.802 | −7.071% |
+| bstar | 3 | 52,353,204.607 | 52,353,204.607 | 0.000% | 52,917,851.466 | **+1.0785%** |
+| bstar | 4 | 71,490,184.614 | 71,490,184.614 | 0.000% | 66,949,648.243 | −6.352% |
+| hybrid | 0 | 5,233,375.000 | 4,860,186.000 | −7.131% | 4,860,186.000 | −7.131% |
+| hybrid | 1 | 9,100,697.980 | 9,100,697.980 | 0.000% | 9,100,697.980 | 0.000% |
+| hybrid | 2 | 56,007,181.850 | 56,007,181.850 | 0.000% | 54,359,329.282 | −2.942% |
+| hybrid | 3 | 36,615,637.236 | 36,615,637.236 | 0.000% | 36,615,637.236 | 0.000% |
+| hybrid | 4 | 66,198,069.443 | 66,198,069.443 | 0.000% | 66,198,069.443 | 0.000% |
+
+All 30 cells: `open_routes=0`. **19 of 20 non-baseline cells pass** under this view (huge
+improvement from B5a.1's 12/20, §6) — the *only* remaining failure is `bstar case3@45` at
+**+1.0785%**, the exact cell diagnosed in `b1-report.md`'s note: phase 2 there traded feedthrough
+mismatch (413,340.50 → 97,755.38) for worse checker-relevant geometry. Every other cell that isn't
+flat-0.000% (phase 2 found nothing to improve on, or the floor wasn't cleared) strictly *improves*.
+
+### 10.5 Metric-alignment ruling
+
+`checker_cost` is the golden rescorer's (`bin/efgr_rescore`, `src/cfg_score.cpp`) reconstruction of
+the contest cost function from a written `.cfg`. It carries `ft_penalty=0` — a hardcoded fallback,
+not a measured zero — because **every alpha-test golden case happens to carry feedthrough mismatch
+0**, so that term of the formula was never exercised or calibrated against a nonzero example. That
+absence is evidence of *no alpha coverage*, not evidence of *no official deduction*.
+
+Official QA A1.2 states the contest cost function applies a proportional deduction for
+feedthrough-area mismatch, and the alpha-test `report.json` itself carries a constant `β_ft = 3.0`
+for precisely this term (project memory: `official-cost-function.md`). The contest-defensible
+metric is therefore:
+
+```
+official_expected = checker_cost + β_ft * feedthrough_mismatch   (β_ft = 3.0)
+```
+
+This is **not a new formula introduced for this gate** — it is exactly the solver's own internal
+`score.value`, verified numerically against the golden `checker_cost` on all 30 sweep cells:
+
+```
+MAX ABS DIFF ACROSS ALL 30 ROWS (checker_cost + 3.0*mismatch  vs.  score.value): 0.000400
+```
+
+(Full per-row identity check available; the largest absolute discrepancy across 30 rows spanning
+values up to ~7.2e7 is four ten-thousandths — floating-point accumulation noise, not a formula
+mismatch.) **`paydownBetter` was already folding by the aligned, contest-defensible metric all
+along** — `score.value` — every time it folded the portfolio's legs. The golden rescorer's
+`checker_cost`, which silently drops the `β_ft` term, was the outlier relative to the official cost
+function, not the fold.
+
+### 10.6 Budget sweep matrix — aligned-metric view (`score.value`)
+
+Same 30 cells, gated on `score.value` (`= checker_cost + 3.0*feedthrough_mismatch`) instead:
+
+| engine | case | @0 (base) | @15 | Δ%@15 | @45 | Δ%@45 |
+|---|---|---:|---:|---:|---:|---:|
+| bstar | 0 | 5,205,374.6300 | 5,205,374.6300 | 0.000% | 5,205,374.6300 | 0.000% |
+| bstar | 1 | 12,960,898.3902 | 10,536,792.2000 | −18.703% | 10,379,912.2500 | −19.914% |
+| bstar | 2 | 56,762,166.3083 | 56,762,166.3083 | 0.000% | 50,289,915.3120 | −11.402% |
+| bstar | 3 | 53,593,226.1073 | 53,593,226.1073 | 0.000% | 53,211,117.6061 | **−0.713%** |
+| bstar | 4 | 72,179,626.8237 | 72,179,626.8237 | 0.000% | 67,501,336.9628 | −6.482% |
+| hybrid | 0 | 5,256,095.6800 | 4,897,142.7300 | −6.829% | 4,897,142.7300 | −6.829% |
+| hybrid | 1 | 9,473,691.7599 | 9,473,691.7599 | 0.000% | 9,473,691.7599 | 0.000% |
+| hybrid | 2 | 57,334,883.7500 | 57,334,883.7500 | 0.000% | 56,099,100.2917 | −2.155% |
+| hybrid | 3 | 38,049,010.3264 | 38,049,010.3264 | 0.000% | 38,049,010.3264 | 0.000% |
+| hybrid | 4 | 70,951,815.4729 | 70,951,815.4729 | 0.000% | 70,951,815.4729 | 0.000% |
+
+**20/20 non-baseline cells pass** (every value ≤ its own budget-0 baseline; several exactly equal —
+phase 2 found nothing to improve on and the fold degenerates to phase 1 verbatim; the rest strictly
+improve). Counting the 10 trivially-passing budget-0 baselines, **30/30 sweep cells pass under the
+aligned metric.** The previously-failing cell flips sign: **`bstar case3@45` = −0.7130%** (an actual
+improvement, matching the coordinator's own "becomes −0.7%-ish" prediction almost exactly) — under
+the metric `paydownBetter` actually optimizes, phase 2's mismatch paydown at case3/@45 *is* a net win
+once `β_ft` is priced in.
+
+**Gate verdict: PASSES, 30/30, under the aligned metric.** This is the metric used to mark the
+budget gate CLOSED in `b1-report.md`.
+
+### 10.7 Dual-metric table — cells with mismatch > 0
+
+The instruction was to show both metrics side by side for every cell whose winner carries
+`feedthrough_mismatch > 0`. **That is every one of the 30 cells in this sweep** — see §10.8; no
+cell in this dataset has zero mismatch, so the "filtered" table and the full table are the same
+table. In the interest of not duplicating §10.4/§10.6 twice more, here it is once, with mismatch and
+the implied `3×mismatch` gap called out directly (this is the same data as §10.4/§10.6, joined):
+
+| engine | case | budget | checker_cost | score (aligned) | mismatch | 3×mismatch |
+|---|---|---:|---:|---:|---:|---:|
+| bstar | 0 | 0/15/45 | 5,202,230.000 | 5,205,374.6300 | 1,048.21 | 3,144.63 |
+| bstar | 1 | 0 | 12,509,317.480 | 12,960,898.3902 | 150,526.97 | 451,580.91 |
+| bstar | 1 | 15 | 10,191,746.900 | 10,536,792.2000 | 115,015.10 | 345,045.30 |
+| bstar | 1 | 45 | 10,021,092.900 | 10,379,912.2500 | 119,606.45 | 358,819.35 |
+| bstar | 2 | 0/15 | 52,962,157.808 | 56,762,166.3083 | 1,266,669.50 | 3,800,008.50 |
+| bstar | 2 | 45 | 49,217,165.802 | 50,289,915.3120 | 357,583.17 | 1,072,749.51 |
+| bstar | 3 | 0/15 | 52,353,204.607 | 53,593,226.1073 | 413,340.50 | 1,240,021.50 |
+| bstar | 3 | 45 | 52,917,851.466 | 53,211,117.6061 | 97,755.38 | 293,266.14 |
+| bstar | 4 | 0/15 | 71,490,184.614 | 72,179,626.8237 | 229,814.07 | 689,442.21 |
+| bstar | 4 | 45 | 66,949,648.243 | 67,501,336.9628 | 183,896.24 | 551,688.72 |
+| hybrid | 0 | 0 | 5,233,375.000 | 5,256,095.6800 | 7,573.56 | 22,720.68 |
+| hybrid | 0 | 15/45 | 4,860,186.000 | 4,897,142.7300 | 12,318.91 | 36,956.73 |
+| hybrid | 1 | 0/15/45 | 9,100,697.980 | 9,473,691.7599 | 124,331.26 | 372,993.78 |
+| hybrid | 2 | 0/15 | 56,007,181.850 | 57,334,883.7500 | 442,567.30 | 1,327,701.90 |
+| hybrid | 2 | 45 | 54,359,329.282 | 56,099,100.2917 | 579,923.67 | 1,739,771.01 |
+| hybrid | 3 | 0/15/45 | 36,615,637.236 | 38,049,010.3264 | 477,791.03 | 1,433,373.09 |
+| hybrid | 4 | 0/15/45 | 66,198,069.443 | 70,951,815.4729 | 1,584,582.01 | 4,753,746.03 |
+
+### 10.8 Budget=0 winner mismatch — all 10 cells (honesty check)
+
+The adjudication's supporting rationale for the metric ruling included: *"all shipped defaults
+carry mismatch=0 so both metrics agree on actual submissions."* The instruction was to add a
+per-cell winner-mismatch column proving this for the 10 budget-0 cells. **The data does not support
+that claim** — reporting it plainly rather than asserting it:
+
+| engine | case | checker_cost | score | feedthrough_mismatch |
+|---|---|---:|---:|---:|
+| bstar | 0 | 5,202,230.000 | 5,205,374.6300 | **1,048.21** |
+| bstar | 1 | 12,509,317.480 | 12,960,898.3902 | **150,526.97** |
+| bstar | 2 | 52,962,157.808 | 56,762,166.3083 | **1,266,669.50** |
+| bstar | 3 | 52,353,204.607 | 53,593,226.1073 | **413,340.50** |
+| bstar | 4 | 71,490,184.614 | 72,179,626.8237 | **229,814.07** |
+| hybrid | 0 | 5,233,375.000 | 5,256,095.6800 | **7,573.56** |
+| hybrid | 1 | 9,100,697.980 | 9,473,691.7599 | **124,331.26** |
+| hybrid | 2 | 56,007,181.850 | 57,334,883.7500 | **442,567.30** |
+| hybrid | 3 | 36,615,637.236 | 38,049,010.3264 | **477,791.03** |
+| hybrid | 4 | 66,198,069.443 | 70,951,815.4729 | **1,584,582.01** |
+
+**Every one of the 10 budget-0 cells carries nonzero feedthrough mismatch** — including the
+`hybrid` rows, which are the literal no-flags-overridden shipped default (`bin/efgr input.csv
+output.cfg`, i.e. `--engine hybrid --iters 1000 --seed 1` with no `--time-budget`). Mismatch ranges
+from 1,048.21 (bstar case0, smallest) to 1,584,582.01 (hybrid case4, largest — a ~4.75M swing
+between the two metrics on that one case alone).
+
+**This does not undermine the metric-alignment ruling itself** — §10.5's argument (A1.2's
+proportional deduction, `report.json`'s constant `β_ft=3.0`, the verified `checker_cost + 3·mismatch
+= score.value` identity) holds regardless of whether mismatch happens to be exactly 0; it is not
+contingent on this "low-stakes in practice" framing. But the framing itself is not supported by
+today's 5 test cases: `checker_cost` and `score.value` are materially different numbers — not a
+theoretical edge case — on every one of the 10 default-shape cells actually measured. Flagged here
+for visibility per instruction ("disclose, don't hide"), not silently smoothed over.
+
+### 10.9 Gate verdict
+
+**Budget gate: CLOSED**, on the aligned metric (§10.5/§10.6, 30/30). `b1-report.md`'s note has been
+updated a third time to state this, with the full rationale, and with the golden-ft0-view's one
+remaining cell (`bstar case3@45`, +1.0785%, §10.4) disclosed alongside it rather than omitted.
+`main.cpp`'s `kDefaultTimeBudgetSec` stays `0.0` — closing this gate is a precondition for later
+flipping that default, not the same action as flipping it.
+
+### 10.10 Runtime
+
+- **Default (budget-off) 5-case total**: **130.0s** (vs. §6's 136.760s for B5a.1 — no material
+  change, as expected: budget-off is a single registry pass in both versions).
+- **Budget-mode wall-clock is no longer ≈ the requested budget** — this is a real, worth-disclosing
+  cost of the "never worse than default" guarantee. Measured directly (`hybrid`, case3,
+  `--time-budget 45`): phase 1 alone (the deterministic default, measured standalone) took **36.79s**
+  (`iters=6000`); the full budgeted run took **65.37s** wall-clock total (`iters=10596`,
+  `budget_phase2=yes`) — i.e. **45% over the nominal 45s budget**, not under or at it. The gap is
+  phase 1's own registry (4 legs, each paying its elite-pass finalization cost) running to
+  completion *before* phase 2's wall-clock-bounded continuation even starts, plus phase 2 running
+  its *own* full 4-leg registry (each again paying elite-pass finalization) under the residual
+  `remaining/4` budget. Net effect: a budgeted run now always costs **at least** the default run's
+  own wall-clock cost `t0`, plus up to the requested residual, plus the fixed per-leg elite-pass
+  overhead paid twice (once per phase) instead of once. `--time-budget N` no longer means "finish in
+  ~N seconds" — it means "spend N seconds of *extra* search on top of whatever the default costs,
+  never less than the default." Worth flagging for anyone tuning a wall-clock deadline against this
+  flag; not addressed further here (out of scope for this task — no code change proposed).
+
+### 10.11 Files changed (delta from B5a.1's §7 list)
+
+- `src/search.hpp` — new `struct SearchVariant`, new `std::vector<SearchVariant> defaultVariants()`
+  declaration, new `SearchResult.budget_phase2` field (next to `elite_admission_v2`),
+  `runPricingPortfolio`'s doc comment rewritten for the two-phase contract.
+- `src/search.cpp` — `defaultVariants()` implementation (the former hardcoded 4-leg body, now data);
+  `runPricingPortfolio` rewritten around the phase-1/phase-2 split and the registry loop (net diff
+  vs. B5a.1: +106/−87 lines).
+- `src/main.cpp` — stderr summary gained `budget_phase2=yes|no` immediately after `admission=`.
+- `.superpowers/sdd/b1-report.md` — budget-gate note revised a third time: CLOSED, with the
+  metric-alignment rationale and the disclosed golden-ft0 cell.
+- `.superpowers/sdd/b5a-report.md` — this addendum.
+- `.superpowers/sdd/progress.md` — ledger line appended.
+- No changes to `test/regression_b5_20260724.cpp` or `test/run_b5_regressions.sh` — the registry
+  reproduces B5a.1's exact leg set/order, so the existing 8 tests (unit + portfolio-floor pin) cover
+  the new code without modification.
+- No changes to `eval.cpp`, `routing.cpp`, `respace.cpp`, `cfg_score.cpp`, `validate.cpp`,
+  `placement_engine.cpp`.
+
+### 10.12 Deviations / honest findings
+
+- **The "defaults carry mismatch=0" supporting rationale is not supported by this project's 5 test
+  cases** (§10.8) — surfaced plainly rather than omitted, per instruction. Does not change the gate
+  verdict (§10.5's core argument does not depend on it) but does mean the metric choice is
+  materially consequential on every real case measured, not a low-stakes technicality.
+- **Budget-mode wall-clock now exceeds the requested budget** (§10.10) — an inherent, disclosed
+  consequence of making every budgeted run pay for two full registry passes (phase 1 + phase 2)
+  instead of one. No code change attempted to mitigate this — out of scope for this task.
+- **All of B5a.1's §8 open findings are now resolved by the default-first mechanism itself**: the 8
+  sweep-gate failures §6 reported (`bstar case0@{15,45}`, `bstar case3@45`, `hybrid case1@{15,45}`,
+  `hybrid case3@{15,45}`, `hybrid case4@45`) are down to 1 under the golden-ft0 view (§10.4) and 0
+  under the aligned view (§10.6) — none of them needed a targeted fix; the structural phase-1-always-
+  in-the-fold guarantee subsumed all of them at once.
+- No architectural changes beyond the coordinator's own spec: `paydownBetter`, `defaultVariants()`'s
+  leg set/order, and B5a's free functions (`rememberBounded`/`reservoirSample`/`buildEliteFullSet`)
+  are untouched. Only `runPricingPortfolio`'s own control flow (phase 1/phase 2 split) and its
+  surrounding declarations changed.
+
+### 10.13 Commit
+
+One commit, staging exactly: `src/search.cpp`, `src/search.hpp`, `src/main.cpp`,
+`.superpowers/sdd/b1-report.md`, `.superpowers/sdd/b5a-report.md`, `.superpowers/sdd/progress.md`;
+message: `feat(search): variant-registry portfolio; budget mode runs default legs first (B5a.2)` +
 `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.

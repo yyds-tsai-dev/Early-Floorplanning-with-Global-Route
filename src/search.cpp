@@ -952,102 +952,121 @@ SearchResult runHybridPlacementSearch(const Problem& problem, const SearchOption
     return result;
 }
 
-// B4.1 (route-pricing portfolio, coordinator adjudication 2026-07-24, b4-report.md) + B5a.1
-// (elite-admission dimension, coordinator adjudication after B5a's own STOP,
-// .superpowers/sdd/b5a-report.md): restores the per-case <=-pre-B4/pre-B5a Pareto floor that a
-// changed search trajectory can otherwise miss, by running the requested `engine` as FOUR legs --
-// the cross product of `route_pricing_official` {true,false} x `elite_admission_v2` {false,true} --
-// and folding all four with the existing value-gated `paydownBetter`.
-//
-// History: B4.1 originally ran 2 legs (official/legacy pricing, v1 admission implicitly, since B5a
-// did not yet exist) -- the legacy-pricing leg reproduces pre-B4 (HEAD 207d08c) behavior BIT-EXACTLY
-// (verified separately: byte-identical .cfg output on all 5 default cases), so THAT fold's floor was
-// structural. B5a then added a SECOND, independent dimension (elite_admission_v2) inside
-// runPlacementSearch itself -- shared by BOTH pricing legs unconditionally -- and B5a's own
-// end-to-end measurement (b5a-report.md) found this broke the bit-exact-replay premise the legacy
-// leg's floor depended on: with v2 unconditionally on, the "legacy" leg no longer reproduces pre-B4
-// behavior (B5a's admission rework lives in search.cpp, which the legacy leg also runs through), so
-// case3 lost its floor entirely (regressed +32.6%) and case1 regressed +17.1% via the same
-// shared-search-path mechanism cascading through the hybrid bstar-seed chain -- while case2/case4
-// improved substantially (v2 is a genuinely better admission signal there). B5a.1's fix: flag-gate
-// v2 behind `SearchOptions.elite_admission_v2` (default false = v1, byte-identical to pre-B5a), and
-// run BOTH values as two more legs here, crossed with the pricing dimension. The (official,v1) and
-// (legacy,v1) legs alone are byte-identical to the OLD 2-leg portfolio (v1 never touches the new
-// admission machinery at all -- see runPlacementSearch's own v1/v2 branch), so that pair's fold
-// reproduces the exact pre-B5a floor structurally; the (official,v2)/(legacy,v2) legs are pure
-// upside, winning outright on cases where the new admission signal is genuinely better.
-//
-// Leg order (also the fold order below): (official,v1), (legacy,v1) -- the FLOOR pair -- then
-// (official,v2), (legacy,v2). `paydownBetter` is a transitive total preorder, so pairwise folding in
-// this (or any) order picks the single overall-best leg. `options` is shared by all four legs (same
-// seed/iters) except `elite_admission_v2`, which each leg's own SearchOptions copy overrides
-// explicitly, REGARDLESS of the incoming `options.elite_admission_v2` value (symmetric with how
-// `route_pricing_official` is already always overridden per Problem copy below, ignoring the
-// incoming `problem.route_pricing_official`). A wall-clock time_budget, if set, now splits 4 ways
-// (was 2 -- B5a.1 doubles the leg count so each leg keeps the same PER-LEG share of a fixed total
-// budget); budget-off (0.0) divides to 0.0 regardless, unaffected.
-SearchResult runPricingPortfolio(const Problem& problem, const std::string& engine, const SearchOptions& options) {
-    Problem official_problem = problem;
-    official_problem.route_pricing_official = true;
-    Problem legacy_problem = problem;
-    legacy_problem.route_pricing_official = false;
+// B5a.2 (variant registry, coordinator adjudication after B5a.1's sweep report,
+// .superpowers/sdd/b5a-report.md "B5a.2 addendum"): the current 4-leg portfolio, in the current leg
+// order -- (official,v1), (legacy,v1) [the floor pair], (official,v2), (legacy,v2). Extracted from
+// runPricingPortfolio's former hardcoded 4-variable body (B5a.1) so a future dimension is one more
+// field on `SearchVariant` and one more entry (or a small cross-product loop) here, not a new
+// hardcoded leg at every call site.
+std::vector<SearchVariant> defaultVariants() {
+    return {
+        SearchVariant{true, false},
+        SearchVariant{false, false},
+        SearchVariant{true, true},
+        SearchVariant{false, true},
+    };
+}
 
-    SearchOptions v1_options = options;
-    v1_options.elite_admission_v2 = false;
-    v1_options.time_budget_sec = options.time_budget_sec * 0.25;
-    SearchOptions v2_options = options;
-    v2_options.elite_admission_v2 = true;
-    v2_options.time_budget_sec = options.time_budget_sec * 0.25;
+// B4.1 (route-pricing portfolio, b4-report.md) + B5a.1 (elite-admission dimension, b5a-report.md)
+// + B5a.2 (variant registry + default-first budget mode, coordinator adjudication,
+// b5a-report.md "B5a.2 addendum"): see the doc comment in search.hpp for the full contract. Summary:
+// budget-off runs `defaultVariants()` once (byte-identical to B5a.1/HEAD 70d8f38 -- md5-verified);
+// budget-on runs the registry TWICE -- phase 1 at the full `options.iters`, budget forced off (i.e.
+// exactly the default run, wall-clock measured as `t0`), then phase 2 (skipped if the remaining
+// budget `options.time_budget_sec - t0` does not clear a small floor) re-runs the registry with
+// `time_budget_sec = remaining/registry.size()` per leg -- and folds EVERY executed leg from BOTH
+// phases by the same value-gated `paydownBetter`. Because phase 1's own legs are always in the
+// folded set, the result can never be worse than the plain default run: the budget gate closes
+// STRUCTURALLY (not by empirical tuning) -- any sweep cell should therefore satisfy
+// checker_cost(budget-N) <= checker_cost(budget-0) by construction, for every N.
+SearchResult runPricingPortfolio(const Problem& problem, const std::string& engine, const SearchOptions& options) {
+    const std::vector<SearchVariant> variants = defaultVariants();
 
     // Same "sp"/"bstar"/"hybrid" dispatch main.cpp used to do inline before this function existed.
-    auto runLeg = [&](const Problem& p, const SearchOptions& leg_options) {
-        if (engine == "hybrid") return runHybridPlacementSearch(p, leg_options);
+    // Builds a fresh Problem/SearchOptions pair per (variant, leg_options) call so no caller-visible
+    // state is shared across legs.
+    auto runLeg = [&](const SearchVariant& variant, const SearchOptions& leg_options) {
+        Problem p = problem;
+        p.route_pricing_official = variant.pricing_official;
+        SearchOptions opts = leg_options;
+        opts.elite_admission_v2 = variant.elite_admission_v2;
+        if (engine == "hybrid") return runHybridPlacementSearch(p, opts);
         std::unique_ptr<PlacementEngine> eng = makePlacementEngine(engine);
-        return runPlacementSearch(p, *eng, leg_options);
+        return runPlacementSearch(p, *eng, opts);
     };
 
-    // Four separate exact-eval caches, one per leg, as today: runPlacementSearch/
-    // runHybridPlacementSearch each own a call-local `exact_cache` (an ordinary local variable,
-    // never static/global) -- calling either four times naturally gives four independent caches
-    // with no extra plumbing.
-    SearchResult official_v1 = runLeg(official_problem, v1_options);
-    SearchResult legacy_v1 = runLeg(legacy_problem, v1_options);
-    SearchResult official_v2 = runLeg(official_problem, v2_options);
-    SearchResult legacy_v2 = runLeg(legacy_problem, v2_options);
+    // Phase 1 (B5a.2): the ENTIRE registry at options.iters, time budget forced OFF -- exactly the
+    // default (budget-off) run. This is the structural half of the budget-gate fix: phase 1's own
+    // legs are byte-identical to what a plain budget-off call computes (same seed/iters, same
+    // variant list, same fold below), so folding anything else in on top of them (phase 2) can only
+    // match or improve, never regress below the default. `t0` is phase 1's own measured wall-clock
+    // cost, the input to phase 2's "is there anything meaningful left" decision below.
+    SearchOptions phase1_options = options;
+    phase1_options.time_budget_sec = 0.0;
+    const auto phase1_start = std::chrono::steady_clock::now();
+    std::vector<SearchResult> phase1_results;
+    phase1_results.reserve(variants.size());
+    for (const auto& variant : variants) phase1_results.push_back(runLeg(variant, phase1_options));
+    const double t0 = std::chrono::duration<double>(std::chrono::steady_clock::now() - phase1_start).count();
 
-    // B6/B5a: same fold-keeps-picked-leg-only behavior as runHybridPlacementSearch's leg pick above
-    // -- each `result = <leg>` assignment is a whole-struct copy, so the picked leg's
-    // fidelity_pairs/elite_pairs come along; the other legs' are discarded, never merged.
-    // `pricing_official`/`elite_admission_v2` are tracked via this function's OWN local bools and
-    // stamped fresh at the end (never read from any leg's own copy of those fields -- same
-    // precedent B4.1 already established for pricing_official alone).
-    SearchResult result = official_v1;
-    bool result_official = true;
-    bool result_v2 = false;
-    if (paydownBetter(legacy_v1.best_routing, legacy_v1.best_score.value, result.best_routing,
-                       result.best_score.value)) {
-        result = legacy_v1;
-        result_official = false;
-        result_v2 = false;
+    // Phase 2 (budget mode only): spend any wall-clock remaining after phase 1's own cost
+    // continuing the SA search under a time budget (the pre-B5a.2 continued-SA behavior), re-running
+    // the SAME registry. Skipped -- degenerating to the phase-1/default result -- when the requested
+    // budget does not clear phase 1's own cost by more than `kPhase2Floor`: a budget smaller than
+    // the default run's own runtime cannot buy anything phase 1 didn't already compute, so there is
+    // nothing meaningful for phase 2 to do. This is an inherently wall-clock-dependent decision (t0
+    // varies run-to-run with system load, exactly like `--time-budget`'s existing iteration count
+    // always has) -- but the STRUCTURAL guarantee above does not depend on which way that decision
+    // falls: whether or not phase 2 fires, phase 1's own legs stay in the folded candidate set.
+    constexpr double kPhase2Floor = 2.0;  // seconds
+    bool budget_phase2 = false;
+    std::vector<SearchResult> phase2_results;
+    if (options.time_budget_sec > 0.0) {
+        const double remaining = options.time_budget_sec - t0;
+        if (remaining > kPhase2Floor) {
+            budget_phase2 = true;
+            SearchOptions phase2_options = options;
+            phase2_options.time_budget_sec = remaining / static_cast<double>(variants.size());
+            phase2_results.reserve(variants.size());
+            for (const auto& variant : variants) phase2_results.push_back(runLeg(variant, phase2_options));
+        }
     }
-    if (paydownBetter(official_v2.best_routing, official_v2.best_score.value, result.best_routing,
-                       result.best_score.value)) {
-        result = official_v2;
-        result_official = true;
-        result_v2 = true;
+
+    // Fold every executed leg (phase 1 always, phase 2 if it ran) by the existing value-gated
+    // paydownBetter -- legality-first, then value; a transitive total preorder, so fold order never
+    // changes the winner. `pricing_official`/`elite_admission_v2` are stamped FRESH from the WINNING
+    // variant (never read from any leg's own copy of those result fields -- same precedent
+    // B4.1/B5a.1 established); `iterations`/`exact_evaluations` sum every leg actually run.
+    SearchResult result = phase1_results[0];
+    SearchVariant winner = variants[0];
+    int total_iterations = phase1_results[0].iterations;
+    int total_exact_evaluations = phase1_results[0].exact_evaluations;
+    for (std::size_t i = 1; i < variants.size(); ++i) {
+        total_iterations += phase1_results[i].iterations;
+        total_exact_evaluations += phase1_results[i].exact_evaluations;
+        if (paydownBetter(phase1_results[i].best_routing, phase1_results[i].best_score.value, result.best_routing,
+                           result.best_score.value)) {
+            result = phase1_results[i];
+            winner = variants[i];
+        }
     }
-    if (paydownBetter(legacy_v2.best_routing, legacy_v2.best_score.value, result.best_routing,
-                       result.best_score.value)) {
-        result = legacy_v2;
-        result_official = false;
-        result_v2 = true;
+    if (budget_phase2) {
+        for (std::size_t i = 0; i < variants.size(); ++i) {
+            total_iterations += phase2_results[i].iterations;
+            total_exact_evaluations += phase2_results[i].exact_evaluations;
+            if (paydownBetter(phase2_results[i].best_routing, phase2_results[i].best_score.value, result.best_routing,
+                               result.best_score.value)) {
+                result = phase2_results[i];
+                winner = variants[i];
+            }
+        }
     }
-    result.pricing_official = result_official;
-    result.elite_admission_v2 = result_v2;
-    result.iterations =
-        official_v1.iterations + legacy_v1.iterations + official_v2.iterations + legacy_v2.iterations;
-    result.exact_evaluations = official_v1.exact_evaluations + legacy_v1.exact_evaluations +
-                              official_v2.exact_evaluations + legacy_v2.exact_evaluations;
+
+    result.pricing_official = winner.pricing_official;
+    result.elite_admission_v2 = winner.elite_admission_v2;
+    result.budget_phase2 = budget_phase2;
+    result.iterations = total_iterations;
+    result.exact_evaluations = total_exact_evaluations;
     return result;
 }
 
