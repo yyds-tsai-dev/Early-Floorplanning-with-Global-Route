@@ -3,7 +3,10 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
+
+#include "route_cost.hpp"
 
 namespace efgr {
 namespace {
@@ -486,8 +489,110 @@ bool sameElements(std::vector<int> a, std::vector<int> b) {
     return a == b;
 }
 
+// ---- B5c move portfolio (.superpowers/sdd/b5-design.md §4), local helpers -----------------------
+// All gated behind each engine's own `move_portfolio_v2_` member (constructor-set, see
+// makePlacementEngine below) -- never read/called from the flag-off path, so flag-off mutate() is
+// byte-identical to pre-B5c.
+
+// Mirrors eval.cpp's routeAwareProxyPenalty CONGESTION term only (that function has internal
+// linkage in eval.cpp; eval.cpp/eval.hpp are out of this task's scope to touch -- see
+// b5c-report.md). Deliberately omits routeAwareProxyPenalty's smaller FT/soft-block-bbox share.
+// Pure function of two rects + a net count; O(1).
+double congestionShare(const Rect& a, const Rect& b, int nets) {
+    double dx = std::abs(a.cx() - b.cx());
+    double dy = std::abs(a.cy() - b.cy());
+    double narrow = dx >= dy ? std::max(1.0, std::min(a.h, b.h)) : std::max(1.0, std::min(a.w, b.w));
+    double overflow = std::max(0.0, static_cast<double>(nets) - narrow * 25.0);
+    return overflow * kBetaLin;
+}
+
+// Mirrors routing.cpp's portAllows verbatim (internal linkage there; routing.cpp is out of this
+// task's scope to touch). Pure function of (Block, edge).
+bool portAllowsLocal(const Block& block, int edge) {
+    if (!block.port_edges.empty()) {
+        return std::find(block.port_edges.begin(), block.port_edges.end(), edge) != block.port_edges.end();
+    }
+    return block.port_edge <= 0 || block.port_edge == edge;
+}
+
+// Edge-number pair (route_geometry.hpp's 1=left/2=top/3=right/4=bottom convention) `x` and `p` each
+// connect on when `x` sits on `side` of `p` (design §4.4 step 3's own worked example, generalized to
+// all 4 sides): a shared vertical edge (left/right) always pairs {3,1} or {1,3}; a shared horizontal
+// edge (below/above) always pairs {2,4} or {4,2}.
+void adjacentEdgesFor(AdjacentSide side, int* edge_x, int* edge_p) {
+    switch (side) {
+        case AdjacentSide::Left:  *edge_x = 3; *edge_p = 1; break;
+        case AdjacentSide::Right: *edge_x = 1; *edge_p = 3; break;
+        case AdjacentSide::Below: *edge_x = 2; *edge_p = 4; break;
+        case AdjacentSide::Above: *edge_x = 4; *edge_p = 2; break;
+    }
+}
+
+// Abutment-targeted move steps 1-2 (design §4.4): pick a net-weighted bundle, then resolve which
+// endpoint is `x` (the block that moves) vs `p` (the anchor) -- if both endpoints are edge blocks
+// the pair can never be topology-adjacent (edges are outline-anchored, not topology-placed), so this
+// returns false; if exactly one is an edge block it is always `p` (the free block moves to the
+// anchored one); if neither is an edge block, x=source/p=target (arbitrary but deterministic).
+bool pickAbutmentPair(const Problem& problem, std::mt19937& rng, int* x, int* p) {
+    int b_idx = netWeightedBundle(problem, rng);
+    if (b_idx < 0) return false;
+    const Bundle& b = problem.bundles[b_idx];
+    bool source_edge = isEdge(problem.blocks[b.source].type);
+    bool target_edge = isEdge(problem.blocks[b.target].type);
+    if (source_edge && target_edge) return false;
+    if (source_edge) {
+        *x = b.target;
+        *p = b.source;
+    } else {
+        *x = b.source;
+        *p = b.target;
+    }
+    return true;
+}
+
+// Wire-median / greedy-reposition moves' shared "given x, find its target partner + side" step
+// (design §4.1/§4.2/§4.3: "P = X's partner nearest wireMedian(X); side = the quadrant of
+// wireMedian(X) relative to P's center"). The quadrant collapses to one of 4 sides (not an
+// independent x/y pair) by taking whichever axis wireMedian(X) displaces P's center on MORE --
+// the same dominant-axis convention eval.cpp's routeAwareProxyPenalty already uses for its own
+// congestion term. Returns false if `x` has no bundles at all (no partner to target).
+bool wireMedianPartnerAndSide(const Problem& problem, const Placement& placement, int x, int* partner,
+                              AdjacentSide* side) {
+    auto target = wireMedianTarget(problem, placement, x);
+    int best = -1;
+    double best_dist = std::numeric_limits<double>::infinity();
+    for (const auto& b : problem.bundles) {
+        int candidate = -1;
+        if (b.source == x) candidate = b.target;
+        else if (b.target == x) candidate = b.source;
+        else continue;
+        const Rect& pr = placement.rects[candidate];
+        double d = manhattan(target.first, target.second, pr.cx(), pr.cy());
+        if (d < best_dist) {
+            best_dist = d;
+            best = candidate;
+        }
+    }
+    if (best < 0) return false;
+    const Rect& pr = placement.rects[best];
+    double dx = target.first - pr.cx();
+    double dy = target.second - pr.cy();
+    if (std::abs(dx) >= std::abs(dy)) {
+        *side = dx < 0.0 ? AdjacentSide::Left : AdjacentSide::Right;
+    } else {
+        *side = dy < 0.0 ? AdjacentSide::Below : AdjacentSide::Above;
+    }
+    *partner = best;
+    return true;
+}
+
+constexpr AdjacentSide kAbutmentSideOrder[] = {AdjacentSide::Left, AdjacentSide::Right, AdjacentSide::Below,
+                                               AdjacentSide::Above};
+
 class SequencePairEngine final : public PlacementEngine {
 public:
+    explicit SequencePairEngine(bool move_portfolio_v2 = false) : move_portfolio_v2_(move_portfolio_v2) {}
+
     std::string name() const override { return "sp"; }
 
     PlacementState initialState(const Problem& problem, std::mt19937&) const override {
@@ -518,18 +623,51 @@ public:
 
     void mutate(const Problem& problem, PlacementState& state, std::mt19937& rng) const override {
         if (state.sequence_pos.empty() || state.sequence_neg.empty()) state = initialState(problem, rng);
-        std::uniform_int_distribution<int> move_dist(0, 4);
-        int move = move_dist(rng);
-        if (move <= 2 && state.sequence_pos.size() >= 2) {
-            std::uniform_int_distribution<int> pick(0, static_cast<int>(state.sequence_pos.size()) - 1);
-            int a = pick(rng);
-            int b = pick(rng);
-            if (move == 0 || move == 2) std::swap(state.sequence_pos[a], state.sequence_pos[b]);
-            if (move == 1 || move == 2) std::swap(state.sequence_neg[a], state.sequence_neg[b]);
-        } else if (move == 3) {
+        if (!move_portfolio_v2_) {
+            // Flag-off: BYTE-IDENTICAL to pre-B5c (hard acceptance gate) -- this branch is verbatim
+            // the pre-existing body, untouched.
+            std::uniform_int_distribution<int> move_dist(0, 4);
+            int move = move_dist(rng);
+            if (move <= 2 && state.sequence_pos.size() >= 2) {
+                std::uniform_int_distribution<int> pick(0, static_cast<int>(state.sequence_pos.size()) - 1);
+                int a = pick(rng);
+                int b = pick(rng);
+                if (move == 0 || move == 2) std::swap(state.sequence_pos[a], state.sequence_pos[b]);
+                if (move == 1 || move == 2) std::swap(state.sequence_neg[a], state.sequence_neg[b]);
+            } else if (move == 3) {
+                mutateSoftAspect(problem, state, rng);
+            } else {
+                mutateEdgeChoice(problem, state, rng);
+            }
+            return;
+        }
+        // B5c move portfolio (design §4.5 SP proposal table): structural swap 0.40, soft-aspect
+        // 0.10, edge-choice 0.05, wire-median 0.20, abutment-targeted 0.15, greedy-reposition 0.10
+        // (geometric-targeted moves sum to 0.45). Every draw below comes from the SAME `rng` the
+        // flag-off branch above uses -- the stream legitimately diverges from v1 once this branch is
+        // taken at all, which is the variant's whole point (task brief).
+        std::uniform_real_distribution<double> unit(0.0, 1.0);
+        double r = unit(rng);
+        if (r < 0.40) {
+            if (state.sequence_pos.size() >= 2) {
+                std::uniform_int_distribution<int> sub(0, 2);
+                int move = sub(rng);
+                std::uniform_int_distribution<int> pick(0, static_cast<int>(state.sequence_pos.size()) - 1);
+                int a = pick(rng);
+                int b = pick(rng);
+                if (move == 0 || move == 2) std::swap(state.sequence_pos[a], state.sequence_pos[b]);
+                if (move == 1 || move == 2) std::swap(state.sequence_neg[a], state.sequence_neg[b]);
+            }
+        } else if (r < 0.50) {
             mutateSoftAspect(problem, state, rng);
-        } else {
+        } else if (r < 0.55) {
             mutateEdgeChoice(problem, state, rng);
+        } else if (r < 0.75) {
+            mutateWireMedian(problem, state, rng);
+        } else if (r < 0.90) {
+            mutateAbutment(problem, state, rng);
+        } else {
+            mutateGreedyReposition(problem, state, rng);
         }
     }
 
@@ -598,10 +736,79 @@ public:
         std::vector<int> expected = movableBlocks(problem);
         return sameElements(expected, state.sequence_pos) && sameElements(expected, state.sequence_neg);
     }
+
+private:
+    bool move_portfolio_v2_ = false;
+
+    // Infeasible-move fallback (design §4, shared contract): every geometric move that cannot be
+    // realized degenerates to this same structural swap (today's move==2, both permutations), so
+    // mutate() always returns a valid state.
+    void fallbackSwap(PlacementState& state, std::mt19937& rng) const {
+        if (state.sequence_pos.size() < 2) return;
+        std::uniform_int_distribution<int> pick(0, static_cast<int>(state.sequence_pos.size()) - 1);
+        int a = pick(rng);
+        int b = pick(rng);
+        std::swap(state.sequence_pos[a], state.sequence_pos[b]);
+        std::swap(state.sequence_neg[a], state.sequence_neg[b]);
+    }
+
+    void mutateWireMedian(const Problem& problem, PlacementState& state, std::mt19937& rng) const {
+        std::vector<int> movable = movableBlocks(problem);
+        if (movable.empty()) {
+            fallbackSwap(state, rng);
+            return;
+        }
+        std::uniform_int_distribution<int> pick(0, static_cast<int>(movable.size()) - 1);
+        int x = movable[pick(rng)];
+        Placement place = decode(problem, state);
+        int p;
+        AdjacentSide side;
+        if (!wireMedianPartnerAndSide(problem, place, x, &p, &side)) {
+            fallbackSwap(state, rng);
+            return;
+        }
+        reinsertSPAdjacent(state, x, p, side);
+    }
+
+    void mutateGreedyReposition(const Problem& problem, PlacementState& state, std::mt19937& rng) const {
+        Placement place = decode(problem, state);
+        int x = worstBlock(problem, place);
+        if (x < 0) {
+            fallbackSwap(state, rng);
+            return;
+        }
+        int p;
+        AdjacentSide side;
+        if (!wireMedianPartnerAndSide(problem, place, x, &p, &side)) {
+            fallbackSwap(state, rng);
+            return;
+        }
+        reinsertSPAdjacent(state, x, p, side);
+    }
+
+    void mutateAbutment(const Problem& problem, PlacementState& state, std::mt19937& rng) const {
+        int x, p;
+        if (!pickAbutmentPair(problem, rng, &x, &p)) {
+            fallbackSwap(state, rng);
+            return;
+        }
+        for (AdjacentSide side : kAbutmentSideOrder) {
+            int edge_x = 0;
+            int edge_p = 0;
+            adjacentEdgesFor(side, &edge_x, &edge_p);
+            if (portAllowsLocal(problem.blocks[x], edge_x) && portAllowsLocal(problem.blocks[p], edge_p)) {
+                reinsertSPAdjacent(state, x, p, side);
+                return;
+            }
+        }
+        fallbackSwap(state, rng);
+    }
 };
 
 class BStarEngine final : public PlacementEngine {
 public:
+    explicit BStarEngine(bool move_portfolio_v2 = false) : move_portfolio_v2_(move_portfolio_v2) {}
+
     std::string name() const override { return "bstar"; }
 
     PlacementState initialState(const Problem& problem, std::mt19937&) const override {
@@ -642,20 +849,52 @@ public:
 
     void mutate(const Problem& problem, PlacementState& state, std::mt19937& rng) const override {
         if (!isValidState(problem, state)) state = initialState(problem, rng);
-        std::uniform_int_distribution<int> move_dist(0, 3);
-        int move = move_dist(rng);
+        if (!move_portfolio_v2_) {
+            // Flag-off: BYTE-IDENTICAL to pre-B5c (hard acceptance gate) -- this branch is verbatim
+            // the pre-existing body, untouched.
+            std::uniform_int_distribution<int> move_dist(0, 3);
+            int move = move_dist(rng);
+            int n = static_cast<int>(state.nodes.size());
+            if (move == 0 && n >= 2) {
+                std::uniform_int_distribution<int> pick(0, n - 1);
+                int a = pick(rng);
+                int b = pick(rng);
+                std::swap(state.nodes[a], state.nodes[b]);
+            } else if (move == 1 && n >= 2) {
+                moveLeaf(state, rng);
+            } else if (move == 2) {
+                mutateSoftAspect(problem, state, rng);
+            } else {
+                mutateEdgeChoice(problem, state, rng);
+            }
+            return;
+        }
+        // B5c move portfolio (design §4.5 B*-tree proposal table): node-swap 0.25, moveLeaf 0.15,
+        // soft-aspect 0.10, edge-choice 0.05, wire-median 0.20, abutment-targeted 0.15, greedy-
+        // reposition 0.10 (geometric-targeted moves sum to 0.45). Same shared `rng` stream as the
+        // flag-off branch above.
+        std::uniform_real_distribution<double> unit(0.0, 1.0);
+        double r = unit(rng);
         int n = static_cast<int>(state.nodes.size());
-        if (move == 0 && n >= 2) {
-            std::uniform_int_distribution<int> pick(0, n - 1);
-            int a = pick(rng);
-            int b = pick(rng);
-            std::swap(state.nodes[a], state.nodes[b]);
-        } else if (move == 1 && n >= 2) {
-            moveLeaf(state, rng);
-        } else if (move == 2) {
+        if (r < 0.25) {
+            if (n >= 2) {
+                std::uniform_int_distribution<int> pick(0, n - 1);
+                int a = pick(rng);
+                int b = pick(rng);
+                std::swap(state.nodes[a], state.nodes[b]);
+            }
+        } else if (r < 0.40) {
+            if (n >= 2) moveLeaf(state, rng);
+        } else if (r < 0.50) {
             mutateSoftAspect(problem, state, rng);
-        } else {
+        } else if (r < 0.55) {
             mutateEdgeChoice(problem, state, rng);
+        } else if (r < 0.75) {
+            mutateWireMedian(problem, state, rng);
+        } else if (r < 0.90) {
+            mutateAbutment(problem, state, rng);
+        } else {
+            mutateGreedyReposition(problem, state, rng);
         }
     }
 
@@ -774,6 +1013,70 @@ private:
         }
         state.parent[leaf] = target;
     }
+
+    bool move_portfolio_v2_ = false;
+
+    // Infeasible-move fallback (design §4, shared contract): every geometric move that cannot be
+    // realized degenerates to this same node-swap (today's move==0), so mutate() always returns a
+    // valid state.
+    void fallbackSwap(PlacementState& state, std::mt19937& rng) const {
+        int n = static_cast<int>(state.nodes.size());
+        if (n < 2) return;
+        std::uniform_int_distribution<int> pick(0, n - 1);
+        int a = pick(rng);
+        int b = pick(rng);
+        std::swap(state.nodes[a], state.nodes[b]);
+    }
+
+    void mutateWireMedian(const Problem& problem, PlacementState& state, std::mt19937& rng) const {
+        std::vector<int> movable = movableBlocks(problem);
+        if (movable.empty()) {
+            fallbackSwap(state, rng);
+            return;
+        }
+        std::uniform_int_distribution<int> pick(0, static_cast<int>(movable.size()) - 1);
+        int x = movable[pick(rng)];
+        Placement place = decode(problem, state);
+        int p;
+        AdjacentSide side;
+        if (!wireMedianPartnerAndSide(problem, place, x, &p, &side)) {
+            fallbackSwap(state, rng);
+            return;
+        }
+        if (!reinsertBStarChild(state, x, p, side, rng, /*strict=*/false)) fallbackSwap(state, rng);
+    }
+
+    void mutateGreedyReposition(const Problem& problem, PlacementState& state, std::mt19937& rng) const {
+        Placement place = decode(problem, state);
+        int x = worstBlock(problem, place);
+        if (x < 0) {
+            fallbackSwap(state, rng);
+            return;
+        }
+        int p;
+        AdjacentSide side;
+        if (!wireMedianPartnerAndSide(problem, place, x, &p, &side)) {
+            fallbackSwap(state, rng);
+            return;
+        }
+        if (!reinsertBStarChild(state, x, p, side, rng, /*strict=*/false)) fallbackSwap(state, rng);
+    }
+
+    void mutateAbutment(const Problem& problem, PlacementState& state, std::mt19937& rng) const {
+        int x, p;
+        if (!pickAbutmentPair(problem, rng, &x, &p)) {
+            fallbackSwap(state, rng);
+            return;
+        }
+        for (AdjacentSide side : kAbutmentSideOrder) {
+            int edge_x = 0;
+            int edge_p = 0;
+            adjacentEdgesFor(side, &edge_x, &edge_p);
+            if (!portAllowsLocal(problem.blocks[x], edge_x) || !portAllowsLocal(problem.blocks[p], edge_p)) continue;
+            if (reinsertBStarChild(state, x, p, side, rng, /*strict=*/true)) return;
+        }
+        fallbackSwap(state, rng);
+    }
 };
 
 }  // namespace
@@ -782,18 +1085,203 @@ PlacementState PlacementEngine::seedFromPlacement(const Problem& problem, const 
     return initialState(problem, rng);
 }
 
-std::unique_ptr<PlacementEngine> makePlacementEngine(const std::string& name) {
+std::unique_ptr<PlacementEngine> makePlacementEngine(const std::string& name, bool move_portfolio_v2) {
     if (name == "sp" || name == "sequence-pair" || name == "sequence_pair") {
-        return std::unique_ptr<PlacementEngine>(new SequencePairEngine());
+        return std::unique_ptr<PlacementEngine>(new SequencePairEngine(move_portfolio_v2));
     }
     if (name == "bstar" || name == "b-tree" || name == "btree") {
-        return std::unique_ptr<PlacementEngine>(new BStarEngine());
+        return std::unique_ptr<PlacementEngine>(new BStarEngine(move_portfolio_v2));
     }
     throw std::invalid_argument("unknown placement engine: " + name);
 }
 
 std::vector<std::string> placementEngineNames() {
     return {"sp", "bstar", "hybrid"};
+}
+
+// ---- B5c move portfolio (.superpowers/sdd/b5-design.md §4), public primitives --------------------
+// Declared in placement_engine.hpp; defined here (outer namespace, NOT the anonymous namespace
+// above) so they satisfy the header's external-linkage declarations and are callable from test
+// binaries linking this translation unit -- same placement convention this file already uses for
+// shrinkWrapEstimate/shrinkWrapOutline/anchorAtOutline below, which likewise call anonymous-
+// namespace helpers (dimensionFor, movableBlocks, etc.) defined earlier in this same file.
+
+std::pair<double, double> wireMedianTarget(const Problem& problem, const Placement& placement, int x) {
+    std::vector<std::pair<double, int>> xs;
+    std::vector<std::pair<double, int>> ys;
+    for (const auto& b : problem.bundles) {
+        int partner = -1;
+        if (b.source == x) partner = b.target;
+        else if (b.target == x) partner = b.source;
+        else continue;
+        const Rect& pr = placement.rects[partner];
+        xs.emplace_back(pr.cx(), b.nets);
+        ys.emplace_back(pr.cy(), b.nets);
+    }
+    if (xs.empty()) {
+        const Rect& self = placement.rects[x];
+        return {self.cx(), self.cy()};
+    }
+    auto weightedMedian = [](std::vector<std::pair<double, int>> values) {
+        std::sort(values.begin(), values.end(),
+                  [](const auto& a, const auto& b) { return a.first < b.first; });
+        long long total = 0;
+        for (const auto& v : values) total += v.second;
+        double half = total / 2.0;
+        long long cumulative = 0;
+        for (const auto& v : values) {
+            cumulative += v.second;
+            if (static_cast<double>(cumulative) >= half) return v.first;
+        }
+        return values.back().first;
+    };
+    return {weightedMedian(xs), weightedMedian(ys)};
+}
+
+int netWeightedBundle(const Problem& problem, std::mt19937& rng) {
+    if (problem.bundles.empty()) return -1;
+    long long total = 0;
+    for (const auto& b : problem.bundles) total += std::max(0, b.nets);
+    if (total <= 0) {
+        std::uniform_int_distribution<int> pick(0, static_cast<int>(problem.bundles.size()) - 1);
+        return pick(rng);
+    }
+    std::uniform_int_distribution<long long> pick(1, total);
+    long long r = pick(rng);
+    long long cumulative = 0;
+    for (std::size_t i = 0; i < problem.bundles.size(); ++i) {
+        cumulative += std::max(0, problem.bundles[i].nets);
+        if (r <= cumulative) return static_cast<int>(i);
+    }
+    return static_cast<int>(problem.bundles.size()) - 1;
+}
+
+int worstBlock(const Problem& problem, const Placement& placement) {
+    std::vector<int> movable = movableBlocks(problem);
+    if (movable.empty()) return -1;
+    int best = -1;
+    double best_badness = -1.0;
+    for (int x : movable) {
+        const Rect& xr = placement.rects[x];
+        double badness = 0.0;
+        for (const auto& b : problem.bundles) {
+            int partner = -1;
+            if (b.source == x) partner = b.target;
+            else if (b.target == x) partner = b.source;
+            else continue;
+            const Rect& pr = placement.rects[partner];
+            badness += problem.alpha * b.nets * manhattan(xr.cx(), xr.cy(), pr.cx(), pr.cy());
+            badness += congestionShare(xr, pr, b.nets);
+        }
+        if (badness > best_badness) {
+            best_badness = badness;
+            best = x;
+        }
+    }
+    return best;
+}
+
+void reinsertSPAdjacent(PlacementState& state, int x, int p, AdjacentSide side) {
+    auto reinsert = [](std::vector<int>& seq, int mover, int anchor, bool before) {
+        auto mover_it = std::find(seq.begin(), seq.end(), mover);
+        if (mover_it == seq.end()) return;
+        seq.erase(mover_it);
+        auto anchor_it = std::find(seq.begin(), seq.end(), anchor);
+        if (anchor_it == seq.end()) {
+            seq.push_back(mover);  // defensive; anchor should always be present
+            return;
+        }
+        if (before) {
+            seq.insert(anchor_it, mover);
+        } else {
+            seq.insert(anchor_it + 1, mover);
+        }
+    };
+    switch (side) {
+        case AdjacentSide::Left:
+            reinsert(state.sequence_pos, x, p, true);
+            reinsert(state.sequence_neg, x, p, true);
+            break;
+        case AdjacentSide::Right:
+            reinsert(state.sequence_pos, x, p, false);
+            reinsert(state.sequence_neg, x, p, false);
+            break;
+        case AdjacentSide::Below:
+            reinsert(state.sequence_pos, x, p, true);
+            reinsert(state.sequence_neg, x, p, false);
+            break;
+        case AdjacentSide::Above:
+            reinsert(state.sequence_pos, x, p, false);
+            reinsert(state.sequence_neg, x, p, true);
+            break;
+    }
+}
+
+bool reinsertBStarChild(PlacementState& state, int x, int p, AdjacentSide side, std::mt19937& rng, bool strict) {
+    int n = static_cast<int>(state.nodes.size());
+    int mover_block;
+    int anchor_block;
+    bool want_left;
+    switch (side) {
+        case AdjacentSide::Right: mover_block = x; anchor_block = p; want_left = true;  break;
+        case AdjacentSide::Above: mover_block = x; anchor_block = p; want_left = false; break;
+        case AdjacentSide::Left:  mover_block = p; anchor_block = x; want_left = true;  break;
+        case AdjacentSide::Below: mover_block = p; anchor_block = x; want_left = false; break;
+        default: return false;
+    }
+    int mover = -1;
+    int anchor = -1;
+    for (int i = 0; i < n; ++i) {
+        if (state.nodes[i] == mover_block) mover = i;
+        if (state.nodes[i] == anchor_block) anchor = i;
+    }
+    if (mover < 0 || anchor < 0 || mover == anchor) return false;
+    if (mover == state.root) return false;                             // root has no parent
+    if (state.left[mover] >= 0 || state.right[mover] >= 0) return false;  // mover must be a leaf
+
+    int old_parent = state.parent[mover];
+    bool was_left = old_parent >= 0 && state.left[old_parent] == mover;
+    if (old_parent < 0) return false;  // defensive; every non-root node has a parent
+    if (was_left) state.left[old_parent] = -1; else state.right[old_parent] = -1;
+    state.parent[mover] = -1;
+
+    auto attach = [&](int target_node, bool left_slot) {
+        if (left_slot) state.left[target_node] = mover; else state.right[target_node] = mover;
+        state.parent[mover] = target_node;
+    };
+
+    bool exact_slot_free = want_left ? state.left[anchor] < 0 : state.right[anchor] < 0;
+    if (exact_slot_free) {
+        attach(anchor, want_left);
+        return true;
+    }
+    if (strict) {
+        // Restore exactly as found -- a strict caller's rejected attempt must never mutate `state`.
+        if (was_left) state.left[old_parent] = mover; else state.right[old_parent] = mover;
+        state.parent[mover] = old_parent;
+        return false;
+    }
+    if (state.left[anchor] < 0 || state.right[anchor] < 0) {
+        attach(anchor, state.left[anchor] < 0);
+        return true;
+    }
+    // Both of anchor's slots are taken: fall back to a uniformly-random node with a free slot
+    // (moveLeaf's own target-selection precedent) -- old_parent always qualifies (its slot was just
+    // vacated above), so `targets` is never empty and this always succeeds.
+    std::vector<int> targets;
+    for (int i = 0; i < n; ++i) {
+        if (i == mover) continue;
+        if (state.left[i] < 0 || state.right[i] < 0) targets.push_back(i);
+    }
+    std::uniform_int_distribution<int> pick_target(0, static_cast<int>(targets.size()) - 1);
+    int target = targets[pick_target(rng)];
+    bool use_left = state.left[target] < 0;
+    if (state.left[target] < 0 && state.right[target] < 0) {
+        std::uniform_int_distribution<int> side_pick(0, 1);
+        use_left = side_pick(rng) == 0;
+    }
+    attach(target, use_left);
+    return true;
 }
 
 namespace {

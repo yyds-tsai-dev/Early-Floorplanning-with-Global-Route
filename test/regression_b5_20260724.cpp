@@ -44,6 +44,7 @@
 #include "../src/eval.hpp"
 #include "../src/io.hpp"
 #include "../src/model.hpp"
+#include "../src/placement_engine.hpp"
 #include "../src/route_cost.hpp"
 #include "../src/search.hpp"
 
@@ -428,27 +429,31 @@ void testAbutmentCreditFlagOffByteIdenticalOnNontrivialFixture() {
               << score.wirelength << ", penalty=" << score.penalty << ")\n";
 }
 
-// Registry shape (b5-design.md §3, coordinator adjudication applying B5a's flag-gated-variant
-// lesson): defaultVariants() must hold exactly 6 legs -- the pre-existing 4 (B5a.1/B5a.2, UNCHANGED,
-// all credit-off) first, then B5b's 2 new legs (both official-pricing, credit-on: admission-v2 then
-// admission-v1) -- in this exact order, since runPricingPortfolio's fold/telemetry stamping and the
-// budget-mode phase split both depend on iterating this registry, not a hardcoded leg count.
-void testDefaultVariantsRegistryHasSixLegsInOrder() {
+// Registry shape (b5-design.md §4, coordinator adjudication applying B5a's flag-gated-variant
+// lesson): defaultVariants() must hold exactly 8 legs -- the pre-existing 6 (B5a.1/B5a.2/B5b,
+// UNCHANGED) first, then B5c's 2 new legs (both official-pricing, credit-on, moves-on: admission-v2
+// then admission-v1) -- in this exact order, since runPricingPortfolio's fold/telemetry stamping and
+// the budget-mode phase split both depend on iterating this registry, not a hardcoded leg count.
+void testDefaultVariantsRegistryHasEightLegsInOrder() {
     std::vector<SearchVariant> variants = defaultVariants();
-    assert(variants.size() == 6);
+    assert(variants.size() == 8);
     assert(variants[0].pricing_official == true && variants[0].elite_admission_v2 == false &&
-          variants[0].abutment_credit == false);
+          variants[0].abutment_credit == false && variants[0].move_portfolio_v2 == false);
     assert(variants[1].pricing_official == false && variants[1].elite_admission_v2 == false &&
-          variants[1].abutment_credit == false);
+          variants[1].abutment_credit == false && variants[1].move_portfolio_v2 == false);
     assert(variants[2].pricing_official == true && variants[2].elite_admission_v2 == true &&
-          variants[2].abutment_credit == false);
+          variants[2].abutment_credit == false && variants[2].move_portfolio_v2 == false);
     assert(variants[3].pricing_official == false && variants[3].elite_admission_v2 == true &&
-          variants[3].abutment_credit == false);
+          variants[3].abutment_credit == false && variants[3].move_portfolio_v2 == false);
     assert(variants[4].pricing_official == true && variants[4].elite_admission_v2 == true &&
-          variants[4].abutment_credit == true);
+          variants[4].abutment_credit == true && variants[4].move_portfolio_v2 == false);
     assert(variants[5].pricing_official == true && variants[5].elite_admission_v2 == false &&
-          variants[5].abutment_credit == true);
-    std::cout << "testDefaultVariantsRegistryHasSixLegsInOrder ok\n";
+          variants[5].abutment_credit == true && variants[5].move_portfolio_v2 == false);
+    assert(variants[6].pricing_official == true && variants[6].elite_admission_v2 == true &&
+          variants[6].abutment_credit == true && variants[6].move_portfolio_v2 == true);
+    assert(variants[7].pricing_official == true && variants[7].elite_admission_v2 == false &&
+          variants[7].abutment_credit == true && variants[7].move_portfolio_v2 == true);
+    std::cout << "testDefaultVariantsRegistryHasEightLegsInOrder ok\n";
 }
 
 // ---- End-to-end determinism smoke ---------------------------------------------------------------
@@ -525,6 +530,355 @@ void testPortfolioRestoresCase3FloorPostB5a1() {
               << ", elite_admission_v2=" << result.elite_admission_v2 << ")\n";
 }
 
+// ---- B5c: move-portfolio upgrade (.superpowers/sdd/b5-design.md §4) -----------------------------
+//
+// Flag-gated exactly like B5a/B5b before it: SearchOptions.move_portfolio_v2 is threaded via
+// makePlacementEngine's second argument (placement_engine.hpp's own doc comments record the
+// "engine construction, not mutate's signature" threading decision and its documented caveat).
+
+Problem makeTwoBlockAbutmentProblem(int x_port_edge, int p_port_edge, int nets) {
+    Problem problem;
+    problem.outline_w = 1000.0;
+    problem.outline_h = 1000.0;
+    Block x_block;
+    x_block.width = 10.0;
+    x_block.height = 10.0;
+    x_block.area = 100.0;
+    x_block.type = BlockType::Macro;
+    x_block.port_edge = x_port_edge;
+    Block p_block;
+    p_block.width = 10.0;
+    p_block.height = 10.0;
+    p_block.area = 100.0;
+    p_block.type = BlockType::Macro;
+    p_block.port_edge = p_port_edge;
+    problem.blocks.push_back(x_block);
+    problem.blocks.push_back(p_block);
+    problem.bundles.push_back(Bundle{0, 1, nets});
+    return problem;
+}
+
+// ---- (b) wireMedianTarget: weighted-median correctness + even-count tie rule --------------------
+
+void testWireMedianTargetEvenCountTieUsesLowerMedian() {
+    Problem problem;
+    problem.outline_w = 1000.0;
+    problem.outline_h = 1000.0;
+    for (int i = 0; i < 5; ++i) {
+        Block b;
+        b.width = 1.0;
+        b.height = 1.0;
+        b.area = 1.0;
+        b.type = BlockType::Macro;
+        problem.blocks.push_back(b);
+    }
+    problem.bundles.push_back(Bundle{0, 1, 1});
+    problem.bundles.push_back(Bundle{0, 2, 1});
+    problem.bundles.push_back(Bundle{0, 3, 1});
+    problem.bundles.push_back(Bundle{0, 4, 1});
+
+    Placement placement;
+    placement.rects.push_back(Rect{500.0, 500.0, 1.0, 1.0});  // block 0 = X, own position irrelevant
+    placement.rects.push_back(Rect{0.0, 0.0, 0.0, 0.0});      // partner @ x=0
+    placement.rects.push_back(Rect{10.0, 0.0, 0.0, 0.0});     // partner @ x=10
+    placement.rects.push_back(Rect{20.0, 0.0, 0.0, 0.0});     // partner @ x=20
+    placement.rects.push_back(Rect{30.0, 0.0, 0.0, 0.0});     // partner @ x=30
+
+    auto target = wireMedianTarget(problem, placement, 0);
+    // 4 equal-weight (nets=1) partners: total weight 4, half=2.0. Cumulative weight first reaches
+    // >=2.0 at the SECOND sorted point (x=10) -- the LOWER weighted median (the design doc's own
+    // wireMedian formula does not pin an alternate even-count convention; this is the standard one,
+    // documented in wireMedianTarget's own header comment).
+    assert(std::abs(target.first - 10.0) < 1e-9);
+    assert(std::abs(target.second - 0.0) < 1e-9);
+    std::cout << "testWireMedianTargetEvenCountTieUsesLowerMedian ok (target=(" << target.first << ","
+              << target.second << "))\n";
+}
+
+void testWireMedianTargetWeightsByNetCount() {
+    Problem problem;
+    problem.outline_w = 1000.0;
+    problem.outline_h = 1000.0;
+    for (int i = 0; i < 3; ++i) {
+        Block b;
+        b.width = 1.0;
+        b.height = 1.0;
+        b.area = 1.0;
+        b.type = BlockType::Macro;
+        problem.blocks.push_back(b);
+    }
+    problem.bundles.push_back(Bundle{0, 1, 10});  // heavy partner @ x=0
+    problem.bundles.push_back(Bundle{0, 2, 1});   // light partner @ x=100
+
+    Placement placement;
+    placement.rects.push_back(Rect{500.0, 500.0, 1.0, 1.0});
+    placement.rects.push_back(Rect{0.0, 0.0, 0.0, 0.0});
+    placement.rects.push_back(Rect{100.0, 0.0, 0.0, 0.0});
+
+    auto target = wireMedianTarget(problem, placement, 0);
+    // total weight 11, half=5.5; cumulative after the heavy (x=0, weight 10) partner is 10 >= 5.5,
+    // so the median sits AT the heavy partner, not at the midpoint (50) or the light partner (100).
+    assert(std::abs(target.first - 0.0) < 1e-9);
+    std::cout << "testWireMedianTargetWeightsByNetCount ok (target=(" << target.first << ","
+              << target.second << "))\n";
+}
+
+void testWireMedianTargetNoBundlesReturnsOwnCenter() {
+    Problem problem;
+    problem.outline_w = 1000.0;
+    problem.outline_h = 1000.0;
+    Block b;
+    b.width = 10.0;
+    b.height = 10.0;
+    b.area = 100.0;
+    b.type = BlockType::Macro;
+    problem.blocks.push_back(b);
+    Placement placement;
+    placement.rects.push_back(Rect{40.0, 60.0, 10.0, 10.0});
+    auto target = wireMedianTarget(problem, placement, 0);
+    assert(std::abs(target.first - 45.0) < 1e-9);
+    assert(std::abs(target.second - 65.0) < 1e-9);
+    std::cout << "testWireMedianTargetNoBundlesReturnsOwnCenter ok\n";
+}
+
+// ---- (c) abutment-targeted move respects PORT EDGE legality --------------------------------------
+
+void testAbutmentSideRealizesPortLegalTouch(const std::string& engine_name) {
+    // X only allows edge 3 (right), P only allows edge 1 (left) -- per the design's own §4.4 worked
+    // example, this makes "Left" (X.right touches P.x, edges {X:3,P:1}) the ONLY port-legal side;
+    // Right/Below/Above each require an edge neither block allows.
+    Problem problem = makeTwoBlockAbutmentProblem(/*x_port_edge=*/3, /*p_port_edge=*/1, /*nets=*/500);
+
+    // mutateAbutment's own port-legality pre-check (private; reimplemented here since routing.cpp's
+    // portAllows has internal linkage -- see b5c-report.md's scope note), confirming this fixture's
+    // premise: exactly one of the 4 sides is legal, and it is Left.
+    struct SidePorts {
+        AdjacentSide side;
+        int edge_x;
+        int edge_p;
+    };
+    static constexpr SidePorts kOrder[] = {
+        {AdjacentSide::Left, 3, 1},
+        {AdjacentSide::Right, 1, 3},
+        {AdjacentSide::Below, 2, 4},
+        {AdjacentSide::Above, 4, 2},
+    };
+    auto portOk = [](const Block& blk, int edge) { return blk.port_edge <= 0 || blk.port_edge == edge; };
+    int legal_count = 0;
+    AdjacentSide chosen = AdjacentSide::Left;
+    for (const auto& sp : kOrder) {
+        if (portOk(problem.blocks[0], sp.edge_x) && portOk(problem.blocks[1], sp.edge_p)) {
+            ++legal_count;
+            chosen = sp.side;
+        }
+    }
+    assert(legal_count == 1);
+    assert(chosen == AdjacentSide::Left);
+
+    std::unique_ptr<PlacementEngine> engine = makePlacementEngine(engine_name);
+    std::mt19937 rng(99);
+    PlacementState state = engine->initialState(problem, rng);
+    if (engine_name == "sp") {
+        reinsertSPAdjacent(state, 0, 1, chosen);
+    } else {
+        bool ok = reinsertBStarChild(state, 0, 1, chosen, rng, /*strict=*/true);
+        assert(ok);
+    }
+    assert(engine->isValidState(problem, state));
+    Placement place = engine->decode(problem, state);
+    const Rect& rx = place.rects[0];
+    const Rect& rp = place.rects[1];
+    // "Left" realized: X.right touches P.x, with a positive y-overlap (positiveTouch-consistent).
+    assert(std::abs(rx.right() - rp.x) < 1e-6);
+    assert(std::min(rx.top(), rp.top()) - std::max(rx.y, rp.y) > 1e-6);
+    std::cout << "testAbutmentSideRealizesPortLegalTouch(" << engine_name << ") ok\n";
+}
+
+// ---- (d) greedy-reposition's worstBlock metric ---------------------------------------------------
+
+void testWorstBlockPicksHighestBadnessBlock() {
+    Problem problem;
+    problem.outline_w = 2000.0;
+    problem.outline_h = 2000.0;
+    problem.alpha = 1.0;
+    for (int i = 0; i < 4; ++i) {
+        Block b;
+        b.width = 10.0;
+        b.height = 10.0;
+        b.area = 100.0;
+        b.type = BlockType::Macro;
+        problem.blocks.push_back(b);
+    }
+    // block3 is the shared bundle-partner/anchor for block0 and block1 -- marked Edge so worstBlock's
+    // movable-only candidate set (movableBlocks) excludes it as a CANDIDATE (an edge block cannot be
+    // repositioned by these moves anyway); it still works fine as a bundle partner (worstBlock's
+    // inner per-bundle loop does not filter by the PARTNER's type, only the candidate's). Without
+    // this, block3 itself would win (it accumulates badness from BOTH bundles below and edges out
+    // block0's own single-bundle badness by a small margin) -- not a worstBlock bug, just the wrong
+    // fixture shape for isolating "does the single worst CANDIDATE win."
+    problem.blocks[3].type = BlockType::Edge;
+    problem.bundles.push_back(Bundle{0, 3, 1000});  // block0: heavy nets, far from the shared anchor
+    problem.bundles.push_back(Bundle{1, 3, 1});     // block1: light nets, near the shared anchor
+    // block2 has no bundles at all -- badness 0, must never win over block0 or block1.
+
+    Placement placement;
+    placement.rects.push_back(Rect{0.0, 0.0, 10.0, 10.0});
+    placement.rects.push_back(Rect{500.0, 500.0, 10.0, 10.0});
+    placement.rects.push_back(Rect{1000.0, 1000.0, 10.0, 10.0});
+    placement.rects.push_back(Rect{510.0, 500.0, 10.0, 10.0});  // shared anchor (block 3)
+
+    int worst = worstBlock(problem, placement);
+    assert(worst == 0);
+    std::cout << "testWorstBlockPicksHighestBadnessBlock ok (worst=" << worst << ")\n";
+}
+
+// ---- (a) flag-off byte-identity: independently-reimplemented reference vs the real engine --------
+//
+// Verbatim copy of BStarEngine::moveLeaf (private) so the reference below is independently derived,
+// not merely "calls the same private function twice."
+void referenceMoveLeafCopy(PlacementState& state, std::mt19937& rng) {
+    std::vector<int> leaves;
+    int n = static_cast<int>(state.nodes.size());
+    for (int i = 0; i < n; ++i) {
+        if (i != state.root && state.left[i] < 0 && state.right[i] < 0) leaves.push_back(i);
+    }
+    if (leaves.empty()) return;
+    std::uniform_int_distribution<int> pick_leaf(0, static_cast<int>(leaves.size()) - 1);
+    int leaf = leaves[pick_leaf(rng)];
+    int old_parent = state.parent[leaf];
+    if (old_parent >= 0) {
+        if (state.left[old_parent] == leaf) state.left[old_parent] = -1;
+        if (state.right[old_parent] == leaf) state.right[old_parent] = -1;
+    }
+    state.parent[leaf] = -1;
+    std::vector<int> targets;
+    for (int i = 0; i < n; ++i) {
+        if (i == leaf) continue;
+        if (state.left[i] < 0 || state.right[i] < 0) targets.push_back(i);
+    }
+    if (targets.empty()) {
+        state.parent[leaf] = old_parent;
+        if (old_parent >= 0) state.left[old_parent] = leaf;
+        return;
+    }
+    std::uniform_int_distribution<int> pick_target(0, static_cast<int>(targets.size()) - 1);
+    int target = targets[pick_target(rng)];
+    bool use_left = state.left[target] < 0;
+    if (state.left[target] < 0 && state.right[target] < 0) {
+        std::uniform_int_distribution<int> side(0, 1);
+        use_left = side(rng) == 0;
+    }
+    if (use_left) {
+        state.left[target] = leaf;
+    } else {
+        state.right[target] = leaf;
+    }
+    state.parent[leaf] = target;
+}
+
+Problem makeFiveMovableBlockProblem() {
+    Problem problem;
+    problem.outline_w = 2000.0;
+    problem.outline_h = 2000.0;
+    for (int i = 0; i < 5; ++i) {
+        Block b;
+        b.width = 10.0 + i;
+        b.height = 10.0 + i;
+        b.area = b.width * b.height;
+        // All macro (no soft, no edge) -- moves 3/4 (soft-aspect/edge-choice) are guaranteed no-ops
+        // in BOTH the real engine and the reimplemented reference below, isolating the structural-
+        // swap/moveLeaf dispatch this test actually verifies.
+        b.type = BlockType::Macro;
+        problem.blocks.push_back(b);
+    }
+    problem.bundles.push_back(Bundle{0, 1, 100});
+    problem.bundles.push_back(Bundle{1, 2, 50});
+    problem.bundles.push_back(Bundle{2, 3, 30});
+    return problem;
+}
+
+void testSPFlagOffByteIdenticalToReimplementedReference() {
+    Problem problem = makeFiveMovableBlockProblem();
+    std::unique_ptr<PlacementEngine> engine = makePlacementEngine("sp");  // move_portfolio_v2 default false
+    std::mt19937 seed_rng(4242);
+    PlacementState initial = engine->initialState(problem, seed_rng);
+    PlacementState actual = initial;
+    PlacementState reference = initial;
+
+    std::mt19937 actual_rng(777);
+    std::mt19937 reference_rng(777);
+    for (int i = 0; i < 1000; ++i) {
+        engine->mutate(problem, actual, actual_rng);
+
+        // Independently reimplemented SequencePairEngine::mutate flag-off branch (verbatim shape,
+        // not a call into the engine).
+        std::uniform_int_distribution<int> move_dist(0, 4);
+        int move = move_dist(reference_rng);
+        if (move <= 2 && reference.sequence_pos.size() >= 2) {
+            std::uniform_int_distribution<int> pick(0, static_cast<int>(reference.sequence_pos.size()) - 1);
+            int a = pick(reference_rng);
+            int b = pick(reference_rng);
+            if (move == 0 || move == 2) std::swap(reference.sequence_pos[a], reference.sequence_pos[b]);
+            if (move == 1 || move == 2) std::swap(reference.sequence_neg[a], reference.sequence_neg[b]);
+        }
+
+        assert(actual.sequence_pos == reference.sequence_pos);
+        assert(actual.sequence_neg == reference.sequence_neg);
+    }
+    std::cout << "testSPFlagOffByteIdenticalToReimplementedReference ok (1000 mutations)\n";
+}
+
+void testBStarFlagOffByteIdenticalToReimplementedReference() {
+    Problem problem = makeFiveMovableBlockProblem();
+    std::unique_ptr<PlacementEngine> engine = makePlacementEngine("bstar");  // move_portfolio_v2 default false
+    std::mt19937 seed_rng(4242);
+    PlacementState initial = engine->initialState(problem, seed_rng);
+    PlacementState actual = initial;
+    PlacementState reference = initial;
+
+    std::mt19937 actual_rng(777);
+    std::mt19937 reference_rng(777);
+    for (int i = 0; i < 1000; ++i) {
+        engine->mutate(problem, actual, actual_rng);
+
+        // Independently reimplemented BStarEngine::mutate flag-off branch (verbatim shape).
+        std::uniform_int_distribution<int> move_dist(0, 3);
+        int move = move_dist(reference_rng);
+        int n = static_cast<int>(reference.nodes.size());
+        if (move == 0 && n >= 2) {
+            std::uniform_int_distribution<int> pick(0, n - 1);
+            int a = pick(reference_rng);
+            int b = pick(reference_rng);
+            std::swap(reference.nodes[a], reference.nodes[b]);
+        } else if (move == 1 && n >= 2) {
+            referenceMoveLeafCopy(reference, reference_rng);
+        }
+
+        assert(actual.nodes == reference.nodes);
+        assert(actual.parent == reference.parent);
+        assert(actual.left == reference.left);
+        assert(actual.right == reference.right);
+        assert(actual.root == reference.root);
+    }
+    std::cout << "testBStarFlagOffByteIdenticalToReimplementedReference ok (1000 mutations)\n";
+}
+
+// ---- (e) infeasible-fallback contract: flag-on mutate always yields a valid, decodable state ------
+
+void testFlagOnMutateAlwaysValidFuzz(const std::string& engine_name) {
+    Problem problem = parseProblem("test/2026 ICCAD_case.case0.csv");
+    std::unique_ptr<PlacementEngine> engine = makePlacementEngine(engine_name, /*move_portfolio_v2=*/true);
+    std::mt19937 rng(31415);
+    PlacementState state = engine->initialState(problem, rng);
+    for (int i = 0; i < 1000; ++i) {
+        engine->mutate(problem, state, rng);
+        assert(engine->isValidState(problem, state));
+        Placement place = engine->decode(problem, state);
+        assert(place.rects.size() == problem.blocks.size());
+    }
+    std::cout << "testFlagOnMutateAlwaysValidFuzz(" << engine_name << ") ok (1000 mutations)\n";
+}
+
 }  // namespace
 
 int main() {
@@ -540,7 +894,18 @@ int main() {
     testAbutmentCreditZeroAtRampThreshold();
     testAbutmentCreditMidRampMonotonicity();
     testAbutmentCreditFlagOffByteIdenticalOnNontrivialFixture();
-    testDefaultVariantsRegistryHasSixLegsInOrder();
+    testDefaultVariantsRegistryHasEightLegsInOrder();
+    // B5c (move-portfolio upgrade, .superpowers/sdd/b5-design.md §4)
+    testWireMedianTargetEvenCountTieUsesLowerMedian();
+    testWireMedianTargetWeightsByNetCount();
+    testWireMedianTargetNoBundlesReturnsOwnCenter();
+    testAbutmentSideRealizesPortLegalTouch("sp");
+    testAbutmentSideRealizesPortLegalTouch("bstar");
+    testWorstBlockPicksHighestBadnessBlock();
+    testSPFlagOffByteIdenticalToReimplementedReference();
+    testBStarFlagOffByteIdenticalToReimplementedReference();
+    testFlagOnMutateAlwaysValidFuzz("sp");
+    testFlagOnMutateAlwaysValidFuzz("bstar");
     std::cout << "b5a regressions passed\n";
     return 0;
 }

@@ -132,6 +132,7 @@ int main(int argc, char** argv) {
                   << " pricing=" << (result.pricing_official ? "official" : "legacy")
                   << " admission=" << (result.elite_admission_v2 ? "v2" : "v1")
                   << " credit=" << (result.abutment_credit ? "on" : "off")
+                  << " moves=" << (result.move_portfolio_v2 ? "v2" : "v1")
                   << " budget_phase2=" << (result.budget_phase2 ? "yes" : "no")
                   << " tau=" << tau
                   << " tau_w=" << tau_w

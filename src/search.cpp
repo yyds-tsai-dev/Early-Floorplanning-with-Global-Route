@@ -875,8 +875,11 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
 }
 
 SearchResult runHybridPlacementSearch(const Problem& problem, const SearchOptions& options) {
-    std::unique_ptr<PlacementEngine> sp = makePlacementEngine("sp");
-    std::unique_ptr<PlacementEngine> bstar = makePlacementEngine("bstar");
+    // B5c: both legs' engines are constructed with the SAME move_portfolio_v2 boolean `options`
+    // carries, so a hybrid leg's sp/bstar sub-runs stay consistent with the flag runLeg set (or
+    // whatever a direct caller passed) -- see SearchOptions.move_portfolio_v2's doc comment.
+    std::unique_ptr<PlacementEngine> sp = makePlacementEngine("sp", options.move_portfolio_v2);
+    std::unique_ptr<PlacementEngine> bstar = makePlacementEngine("bstar", options.move_portfolio_v2);
 
     SearchOptions sp_options = options;
     SearchOptions bstar_options = options;
@@ -954,34 +957,42 @@ SearchResult runHybridPlacementSearch(const Problem& problem, const SearchOption
 
 // B5a.2 (variant registry, coordinator adjudication after B5a.1's sweep report,
 // .superpowers/sdd/b5a-report.md "B5a.2 addendum") + B5b (abutment-credit variant,
-// .superpowers/sdd/b5-design.md §3, coordinator adjudication applying B5a's own flag-gated-variant
-// lesson): the current 6-leg portfolio, in the current leg order -- (official,v1), (legacy,v1) [the
-// floor pair], (official,v2), (legacy,v2) [B5a.1's original 4, unchanged, all credit-off], then
-// (official,v2,credit-on), (official,v1,credit-on) [B5b's 2 new legs]. Extracted from
-// runPricingPortfolio's former hardcoded 4-variable body (B5a.1) so a future dimension is one more
-// field on `SearchVariant` and one more entry (or a small cross-product loop) here, not a new
-// hardcoded leg at every call site. B5b's 2 new legs are both official-pricing only -- see this
-// function's own doc comment in search.hpp for why the credit dimension is not also crossed with
-// the legacy-pricing leg.
+// .superpowers/sdd/b5-design.md §3) + B5c (move-portfolio variant, b5-design.md §4, same coordinator
+// flag-gated-variant lesson): the current 8-leg portfolio, in the current leg order --
+// (official,v1), (legacy,v1) [the floor pair], (official,v2), (legacy,v2) [B5a.1's original 4,
+// unchanged, all credit-off/moves-off], then (official,v2,credit-on), (official,v1,credit-on)
+// [B5b's 2 legs, moves-off], then (official,v2,credit-on,moves-on), (official,v1,credit-on,moves-on)
+// [B5c's 2 new legs]. Extracted from runPricingPortfolio's former hardcoded 4-variable body (B5a.1)
+// so a future dimension is one more field on `SearchVariant` and one more entry (or a small
+// cross-product loop) here, not a new hardcoded leg at every call site. B5b's and B5c's new legs are
+// all official-pricing only -- see this function's own doc comment in search.hpp for why neither
+// dimension is also crossed with the legacy-pricing leg.
 std::vector<SearchVariant> defaultVariants() {
     return {
-        SearchVariant{true, false, false},
-        SearchVariant{false, false, false},
-        SearchVariant{true, true, false},
-        SearchVariant{false, true, false},
-        // B5b: 2 new legs, both official pricing, credit-on -- admission-v2 first, then
+        SearchVariant{true, false, false, false},
+        SearchVariant{false, false, false, false},
+        SearchVariant{true, true, false, false},
+        SearchVariant{false, true, false, false},
+        // B5b: 2 legs, both official pricing, credit-on, moves-off -- admission-v2 first, then
         // admission-v1, per the coordinator's specified order.
-        SearchVariant{true, true, true},
-        SearchVariant{true, false, true},
+        SearchVariant{true, true, true, false},
+        SearchVariant{true, false, true, false},
+        // B5c: 2 new legs, official pricing, credit-on, moves-on -- same admission-v2-then-v1 order
+        // B5b established (task brief: "(official, v2-admission, credit-on, moves-on) and
+        // (official, v1-admission, credit-on, moves-on)").
+        SearchVariant{true, true, true, true},
+        SearchVariant{true, false, true, true},
     };
 }
 
 // B4.1 (route-pricing portfolio, b4-report.md) + B5a.1 (elite-admission dimension, b5a-report.md)
 // + B5a.2 (variant registry + default-first budget mode, coordinator adjudication,
-// b5a-report.md "B5a.2 addendum") + B5b (abutment-credit variant, b5-design.md §3): see the doc
-// comment in search.hpp for the full contract. Summary:
+// b5a-report.md "B5a.2 addendum") + B5b (abutment-credit variant, b5-design.md §3) + B5c
+// (move-portfolio variant, b5-design.md §4): see the doc comment in search.hpp for the full
+// contract. Summary:
 // budget-off runs `defaultVariants()` once (byte-identical to B5a.1/HEAD 70d8f38 for the first 4
-// legs -- md5-verified -- with 2 additional credit-on legs folded in by B5b);
+// legs -- md5-verified -- with 2 credit-on legs folded in by B5b and 2 moves-on legs folded in by
+// B5c);
 // budget-on runs the registry TWICE -- phase 1 at the full `options.iters`, budget forced off (i.e.
 // exactly the default run, wall-clock measured as `t0`), then phase 2 (skipped if the remaining
 // budget `options.time_budget_sec - t0` does not clear a small floor) re-runs the registry with
@@ -995,15 +1006,19 @@ SearchResult runPricingPortfolio(const Problem& problem, const std::string& engi
 
     // Same "sp"/"bstar"/"hybrid" dispatch main.cpp used to do inline before this function existed.
     // Builds a fresh Problem/SearchOptions pair per (variant, leg_options) call so no caller-visible
-    // state is shared across legs.
+    // state is shared across legs. B5c: `opts.move_portfolio_v2` is threaded to BOTH the SearchOptions
+    // copy (telemetry/consistency) AND makePlacementEngine's own second argument (placement_engine.hpp)
+    // -- the engine's own per-instance flag is what mutate() actually reads (see SearchOptions.
+    // move_portfolio_v2's doc comment for why the two must be set together).
     auto runLeg = [&](const SearchVariant& variant, const SearchOptions& leg_options) {
         Problem p = problem;
         p.route_pricing_official = variant.pricing_official;
         p.abutment_credit = variant.abutment_credit;
         SearchOptions opts = leg_options;
         opts.elite_admission_v2 = variant.elite_admission_v2;
+        opts.move_portfolio_v2 = variant.move_portfolio_v2;
         if (engine == "hybrid") return runHybridPlacementSearch(p, opts);
-        std::unique_ptr<PlacementEngine> eng = makePlacementEngine(engine);
+        std::unique_ptr<PlacementEngine> eng = makePlacementEngine(engine, opts.move_portfolio_v2);
         return runPlacementSearch(p, *eng, opts);
     };
 
@@ -1077,6 +1092,7 @@ SearchResult runPricingPortfolio(const Problem& problem, const std::string& engi
     result.pricing_official = winner.pricing_official;
     result.elite_admission_v2 = winner.elite_admission_v2;
     result.abutment_credit = winner.abutment_credit;
+    result.move_portfolio_v2 = winner.move_portfolio_v2;
     result.budget_phase2 = budget_phase2;
     result.iterations = total_iterations;
     result.exact_evaluations = total_exact_evaluations;

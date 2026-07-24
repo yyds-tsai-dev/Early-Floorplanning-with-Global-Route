@@ -3,6 +3,7 @@
 #include <memory>
 #include <random>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "model.hpp"
@@ -36,8 +37,76 @@ public:
     virtual bool isValidState(const Problem& problem, const PlacementState& state) const = 0;
 };
 
-std::unique_ptr<PlacementEngine> makePlacementEngine(const std::string& name);
+// B5c (move portfolio, .superpowers/sdd/b5-design.md §4): `move_portfolio_v2` is baked into the
+// CONSTRUCTED engine instance (default false), NOT read from any per-call argument -- `mutate`'s
+// signature is fixed at (problem, state, rng) across the whole codebase (search.cpp's SA loop,
+// finalizeFeedthrough, every test's own PlacementEngine subclass), so threading a new search-level
+// flag through it without adding a 4th parameter (touching the abstract interface and every
+// override/call site) means the flag must live on the ENGINE OBJECT itself. SearchOptions.
+// move_portfolio_v2 (search.hpp) is the source of truth for registry legs; runPricingPortfolio's
+// runLeg/runHybridPlacementSearch construct engines via this SAME boolean so the two stay in sync --
+// see search.cpp's runLeg for the one production call site. Existing callers that omit the second
+// argument keep constructing a flag-off (byte-identical-mutate) engine, unchanged.
+std::unique_ptr<PlacementEngine> makePlacementEngine(const std::string& name, bool move_portfolio_v2 = false);
 std::vector<std::string> placementEngineNames();
+
+// B5c (move portfolio, .superpowers/sdd/b5-design.md §4): shared primitives for the wire-median /
+// abutment-targeted / greedy-reposition moves (§4.1), exposed as free functions (rather than engine
+// members) so both SequencePairEngine and BStarEngine's mutate share one implementation and so each
+// is unit-testable in isolation (mirrors search.hpp's rememberBounded/reservoirSample/
+// buildEliteFullSet precedent, hoisted for the exact same reason). Every rng-consuming one takes
+// `rng` as an explicit parameter, never a captured/static generator, so the caller's own mutate()
+// stream stays the single source of randomness (design §4, R6).
+
+// Bundle-weighted median of block `x`'s partners' centers (design §4.1 wireMedian): collects
+// (partner_center, nets) over every bundle touching `x` and returns the weighted median of the
+// x-coordinates and (independently) the y-coordinates -- the per-axis HPWL-optimal point for `x`
+// (2023-D optimPos). Even-total-weight ties resolve to the LOWER weighted median (the smallest
+// coordinate at which cumulative weight first reaches half the total) -- the standard weighted-
+// median convention for 1D optimal-position placement; the design doc does not pin an alternate
+// formula. Returns `x`'s own current center unchanged if `x` has no bundles (no partners to target).
+std::pair<double, double> wireMedianTarget(const Problem& problem, const Placement& placement, int x);
+
+// Roulette-wheel pick of one bundle index weighted by its net count (design §4.1
+// netWeightedBundle): prefix-sum + one uniform draw over [1, total_nets]. Returns -1 if
+// problem.bundles is empty.
+int netWeightedBundle(const Problem& problem, std::mt19937& rng);
+
+// argmax over movable (non-edge) blocks of a badness metric (design §4.1 worstBlock): bundle-
+// weighted alpha*nets*manhattan distance to each partner, plus a congestion-proxy share mirroring
+// eval.cpp's routeAwareProxyPenalty overflow term (that function has internal linkage in eval.cpp,
+// out of scope for this task to touch -- see b5c-report.md for the honest scope note: the smaller
+// FT/soft-block-bbox share of routeAwareProxyPenalty is NOT replicated here). Returns -1 if there
+// are no movable blocks. O(bundles).
+int worstBlock(const Problem& problem, const Placement& placement);
+
+// Which side of `p` the repositioned block ends up on (design §4.2/§4.3's 4-way reinsertion table).
+enum class AdjacentSide { Left, Right, Below, Above };
+
+// SP realization (design §4.2, SequencePairEngine::mutate): removes `x` from both
+// state.sequence_pos/sequence_neg and reinserts it immediately adjacent to `p` per the quadrant-
+// reinsertion table (erase+insert is always a permutation of the same elements, so isValidState
+// holds by construction). No-op if `x` or `p` is not present in sequence_pos (e.g. an edge block) --
+// callers must confirm both are movable blocks first.
+void reinsertSPAdjacent(PlacementState& state, int x, int p, AdjacentSide side);
+
+// B*-tree realization (design §4.3, BStarEngine::mutate): a tree child slot only ever expresses
+// "right-of"/"above-of" its parent, so Right/Above attach `x` as a child of `p`, while Left/Below
+// realize the opposite two directions by attaching `p` as a child of `x` instead (swapping which
+// node is the "mover") -- both are the SAME detach+reattach primitive, just with the two block
+// arguments swapped. The mover MUST currently be a tree leaf (both children empty): detaching an
+// internal node would orphan its own children, a case this primitive does not attempt to repair
+// (mirrors moveLeaf's own leaf-only scope -- design §4.3 itself cites "the moveLeaf detach logic").
+// Returns false (state left completely unchanged) when the resolved mover is not a leaf, is the
+// tree's root, or either block is absent from state.nodes (e.g. an edge block).
+// `strict`: true (the abutment-targeted move, which has already verified THIS EXACT side's PORT
+// EDGE legality) accepts only the geometrically-exact child slot -- no fallback, so a false return
+// means "not realizable as this exact side," letting the caller try the next side rather than
+// silently landing a different, unverified adjacency. false (wire-median / greedy-reposition, which
+// have no specific-side legality contract) falls back to the anchor's other slot, and finally to the
+// mover's just-vacated old-parent slot (always free), so those callers succeed whenever the mover is
+// a valid leaf -- mirrors moveLeaf's own free-slot-target fallback, `rng`-driven.
+bool reinsertBStarChild(PlacementState& state, int x, int p, AdjacentSide side, std::mt19937& rng, bool strict);
 
 struct OutlineFit {
     double w = 0.0;
