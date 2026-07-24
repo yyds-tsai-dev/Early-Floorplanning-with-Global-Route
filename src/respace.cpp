@@ -3,9 +3,11 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <tuple>
 #include <utility>
 
 #include "placement_engine.hpp"
+#include "route_cost.hpp"
 
 namespace efgr {
 namespace {
@@ -379,13 +381,15 @@ bool rectsLegalWithinOutline(const Placement& placement, double w, double h) {
     return true;
 }
 
-}  // namespace
-
-bool respaceToDemand(const Problem& problem, Placement& placement, const RoutingResult& routing) {
-    std::vector<StripDemand> demands = channelDemands(problem, placement, routing);
-    if (demands.empty()) return false;  // nothing to relieve (design §3.5 degenerate no-op)
-
-    // Work on a local copy throughout; the caller's `placement` is only ever touched on success.
+// B7 (capacity-profit interior-gap rungs): shared by respaceToDemand (fed by channelDemands' full
+// per-channel demand list) and capacityGapCandidates' single-gap apply step (applyGapCandidate,
+// below, fed one manually-built StripDemand) -- extracted verbatim from respaceToDemand's own
+// pre-B7 body (no behavior change to respaceToDemand: same steps, same order) so both share the
+// identical relax/re-anchor/legality-gate sequence instead of duplicating it. Relaxes a COPY of
+// `placement` to satisfy `demands`, re-anchors edge blocks + re-stamps the outline via
+// shrinkWrapOutline, and gates on legality; `placement` is left completely untouched on any
+// failure, overwritten with the legal widened result on success.
+bool applyDemandsAndLegalize(const Problem& problem, Placement& placement, const std::vector<StripDemand>& demands) {
     Placement candidate = placement;
 
     relaxToDemand(problem, candidate, demands);
@@ -404,8 +408,8 @@ bool respaceToDemand(const Problem& problem, Placement& placement, const Routing
     // Legality gate (task brief step 4): shrinkWrapOutline's own commit path already verified
     // containment + pairwise overlap + edge-location legality via placementLegalAt internally
     // (fit.legal == true means that gate passed at commit time) -- but re-verify pairwise overlap
-    // + containment explicitly here as well, since respaceToDemand is a public entry point that
-    // must not trust an internal callee's bookkeeping alone for its own legality contract.
+    // + containment explicitly here as well, since this is a shared entry point that must not
+    // trust an internal callee's bookkeeping alone for its own legality contract.
     if (!rectsLegalWithinOutline(candidate, candidate.outline_w, candidate.outline_h)) return false;
     if (candidate.outline_w > problem.outline_w + kEps || candidate.outline_h > problem.outline_h + kEps) {
         return false;
@@ -413,6 +417,14 @@ bool respaceToDemand(const Problem& problem, Placement& placement, const Routing
 
     placement = candidate;
     return true;
+}
+
+}  // namespace
+
+bool respaceToDemand(const Problem& problem, Placement& placement, const RoutingResult& routing) {
+    std::vector<StripDemand> demands = channelDemands(problem, placement, routing);
+    if (demands.empty()) return false;  // nothing to relieve (design §3.5 degenerate no-op)
+    return applyDemandsAndLegalize(problem, placement, demands);
 }
 
 RespaceResult respaceFixedPoint(const Problem& problem, const Placement& base, const ExactCachedFn& exactCached) {
@@ -466,6 +478,135 @@ RespaceResult respaceFixedPoint(const Problem& problem, const Placement& base, c
     }
 
     return best;
+}
+
+// B7 (capacity-profit interior-gap rungs, .superpowers/sdd/b7-brief.md; research doc
+// 2026-07-23 §3c): see respace.hpp's doc comment for the field/contract summary. Profit
+// derivation -- a first-order linearization of exactScore's own official overflow-rate penalty
+// term kBetaLin*A*R (R=O/C, route_cost.hpp; the tail term kBetaTail is deliberately NOT included,
+// matching the brief's own formula): holding O fixed and treating value ~= A*(1+kBetaLin*O/C) +
+// alpha*WL, d(value)/dA = 1+kBetaLin*O/C and d(value)/dC = -kBetaLin*A*O/C^2, so widening a gap
+// that adds capacity DeltaC (free -- no WL/routing change) and outline area DeltaA changes value
+// by -[kBetaLin*A*O/C^2]*DeltaC + [1+kBetaLin*O/C]*DeltaA; profit is the negation (the value
+// decrease). This key only RANKS candidates -- correctness of the eventual adoption never depends
+// on its precision, since every applied candidate is still gated by a real exactCached call +
+// outlineSweepBetter (legality-first, then value) at the call site (search.cpp).
+//
+// DeltaC(g,delta) = 25*delta*count, where `count` is the number of distinct channels in
+// `routing.channels` whose channelBounds resolves to exactly this (from,to) pair on this axis --
+// every channel sharing a (left,right) pair lives in the SAME vertical x-strip (extractChannels
+// slices strips at block x-edges globally, so two channels sharing a left/right pair necessarily
+// share that pair's exact x0/x1), so all of them grow by `delta` together when the pair's
+// separation grows by `delta`, each adding 25*delta to its own capacity contribution
+// (computeOverflowAndMismatch's cap_h/cap_v, routing.cpp). Symmetric argument for (below,above)
+// pairs and horizontal y-strips.
+//
+// DeltaA(g,delta) = max(0, delta - slack), where `slack` is the CURRENT declared-outline
+// dimension (placement.outline_w/h) minus the CURRENT tight span along that same axis (axisSpan,
+// this file) -- a per-AXIS (not per-gap-chain) quantity, computed ONCE per axis and reused for
+// every gap on it. This is a PROVABLE upper bound, not a guess: relaxToDemand's longest-path
+// relax can raise any single node's coordinate by at most `delta` from a single demand edge of
+// that weight (a DAG longest-path argument -- a topological-order relax has no cycles, so any
+// node's value can traverse the new edge at most once), so the axis's tight span can grow by at
+// most `delta` regardless of which gap is widened; if the existing slack already covers that
+// worst case (slack >= delta), DeltaA=0 is guaranteed correct, not merely assumed. When
+// slack < delta, DeltaA=(delta-slack) is a conservative (possibly-too-high) estimate for gaps not
+// actually on the critical chain -- erring toward UNDER-ranking a gap that might in fact be free,
+// never toward over-promising one that is not; a missed opportunity here costs nothing beyond a
+// slightly worse top-N choice, since adoption stays value-gated.
+std::vector<CapacityGapCandidate> capacityGapCandidates(const Problem& problem, const Placement& placement,
+                                                        const RoutingResult& routing) {
+    std::vector<CapacityGapCandidate> candidates;
+    double O = routing.channel_overflow_nets;
+    double C = routing.channel_capacity_total;
+    if (O <= kEps || C <= kEps) return candidates;  // structural no-op -- see doc comment above
+
+    double A = placement.outline_w * placement.outline_h;
+    double rate = O / C;
+    double coeff_c = kBetaLin * A * rate / C;  // 20*A*O/C^2
+    double coeff_a = 1.0 + kBetaLin * rate;    // 1 + 20*O/C
+
+    // Per-axis tight span + slack (computed once, reused by every gap on that axis).
+    std::size_t n = problem.blocks.size();
+    std::vector<double> coord_x(n, 0.0);
+    std::vector<double> coord_y(n, 0.0);
+    for (std::size_t i = 0; i < n; ++i) {
+        coord_x[i] = placement.rects[i].x;
+        coord_y[i] = placement.rects[i].y;
+    }
+    double slack_w = placement.outline_w - axisSpan(problem, placement, /*horizontal=*/true, coord_x);
+    double slack_h = placement.outline_h - axisSpan(problem, placement, /*horizontal=*/false, coord_y);
+
+    // Enumerate distinct (from,to,axis) pairs from every channel's channelBounds, counting how
+    // many channels share each pair (DeltaC's "count" above). Excludes any gap whose `to` would
+    // be the outline wall or an edge-type block -- see respace.hpp's CapacityGapCandidate doc
+    // comment for why those are structurally unrealizable via applyGapCandidate.
+    std::map<std::tuple<int, int, bool>, int> gap_counts;
+    for (const auto& ch : routing.channels) {
+        ChannelBounds bounds = channelBounds(problem, placement, ch.rect);
+        bool left_ok = bounds.left == -1 || !isEdge(problem.blocks[bounds.left].type);
+        bool below_ok = bounds.below == -1 || !isEdge(problem.blocks[bounds.below].type);
+        if (bounds.right >= 0 && !isEdge(problem.blocks[bounds.right].type) && left_ok) {
+            gap_counts[std::make_tuple(bounds.left, bounds.right, true)]++;
+        }
+        if (bounds.above >= 0 && !isEdge(problem.blocks[bounds.above].type) && below_ok) {
+            gap_counts[std::make_tuple(bounds.below, bounds.above, false)]++;
+        }
+    }
+
+    static constexpr double kDeltas[] = {1.0, 2.0, 4.0};
+    for (const auto& entry : gap_counts) {
+        int from = std::get<0>(entry.first);
+        int to = std::get<1>(entry.first);
+        bool horizontal = std::get<2>(entry.first);
+        int count = entry.second;
+        double slack = horizontal ? slack_w : slack_h;
+        for (double delta : kDeltas) {
+            double delta_c = 25.0 * delta * static_cast<double>(count);
+            double delta_a = std::max(0.0, delta - slack);
+            double profit = coeff_c * delta_c - delta_a * coeff_a;
+            candidates.push_back(CapacityGapCandidate{from, to, horizontal, delta, profit});
+        }
+    }
+
+    // Deterministic ordering: profit descending, explicit tie-breaks (design brief item 3).
+    std::stable_sort(candidates.begin(), candidates.end(),
+                      [](const CapacityGapCandidate& a, const CapacityGapCandidate& b) {
+                          if (std::abs(a.profit - b.profit) > kEps) return a.profit > b.profit;
+                          if (a.horizontal != b.horizontal) return a.horizontal;
+                          if (a.from != b.from) return a.from < b.from;
+                          if (a.to != b.to) return a.to < b.to;
+                          return a.delta < b.delta;
+                      });
+    return candidates;
+}
+
+// B7: applies one gap candidate's widening -- see respace.hpp's doc comment for the "widen the
+// EXISTING gap by delta, not set it to delta" rationale. Re-derives the CURRENT geometric
+// separation directly from `placement` (not stored on `gap`) so this stays correct regardless of
+// how much the placement has moved since capacityGapCandidates ranked it.
+bool applyGapCandidate(const Problem& problem, Placement& placement, const CapacityGapCandidate& gap) {
+    double current_gap;
+    if (gap.horizontal) {
+        double from_edge = (gap.from == -1) ? 0.0 : placement.rects[gap.from].right();
+        current_gap = placement.rects[gap.to].x - from_edge;
+    } else {
+        double from_edge = (gap.from == -1) ? 0.0 : placement.rects[gap.from].top();
+        current_gap = placement.rects[gap.to].y - from_edge;
+    }
+
+    StripDemand demand;
+    double need = std::max(0.0, current_gap) + gap.delta;
+    if (gap.horizontal) {
+        demand.left = gap.from;
+        demand.right = gap.to;
+        demand.need_w = need;
+    } else {
+        demand.below = gap.from;
+        demand.above = gap.to;
+        demand.need_h = need;
+    }
+    return applyDemandsAndLegalize(problem, placement, {demand});
 }
 
 }  // namespace efgr

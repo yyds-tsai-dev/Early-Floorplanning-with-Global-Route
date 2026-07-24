@@ -164,6 +164,43 @@ void maybeAdoptRespace(const Problem& problem, const ExactCachedFn& exactCached,
     }
 }
 
+// B7 (capacity-profit interior-gap rungs, .superpowers/sdd/b7-brief.md): ranks interior gaps by
+// an analytic profit key (capacityGapCandidates, respace.cpp) and applies the top-N via the SAME
+// P3 single-pass relax/re-anchor/legality machinery maybeAdoptRespace above uses
+// (applyGapCandidate), adopting each result under the SAME outlineSweepBetter preference. Called
+// ONCE per pass (never per elite candidate -- too expensive; see the two call sites below, both
+// of which mirror why maybeAdoptRespace/B3.1's post-finalize sweep are themselves single passes,
+// not per-candidate), each call paying at most kMaxGapRungs exact evals. Pareto-safe by
+// construction: every applied candidate is adopted only if outlineSweepBetter prefers it, so this
+// can only match or improve `result`, never regress it.
+void maybeAdoptCapacityGapRungs(const Problem& problem, const ExactCachedFn& exactCached, SearchResult& result) {
+    // Runtime note (b7-brief.md acceptance clause: "if the growth exceeds +15%, reduce to N=3 and
+    // report both"): a raw comparison against b5c-report.md's own recorded baseline (272.02s)
+    // showed N=6 at +20.4% -- over the bound. But a controlled SAME-SESSION re-measurement (git
+    // stash the B7 diff, rebuild, re-time the identical pre-B7 binary on this machine) found the
+    // clean baseline itself now runs at 338.877s, not 272.02s -- a ~25% machine/environment drift
+    // since that report was written, unrelated to this change. Against the FAIR same-session
+    // baseline, N=6 measured 327.479s (-3.4%) and N=3 measured 341.310s (+0.7%) -- both within
+    // ordinary run-to-run noise, and N=6 is the one that actually captures the real case4 win
+    // (-5.99% aligned) this feature exists to find; N=3 misses it. N=6 is kept; both N=6 and N=3
+    // results are reported in b7-report.md per the brief's "report both."
+    constexpr std::size_t kMaxGapRungs = 6;  // N, b7-brief.md
+    std::vector<CapacityGapCandidate> gaps =
+        capacityGapCandidates(problem, result.best_placement, result.best_routing);
+    for (std::size_t i = 0; i < gaps.size() && i < kMaxGapRungs; ++i) {
+        Placement candidate = result.best_placement;
+        if (!applyGapCandidate(problem, candidate, gaps[i])) continue;
+        RoutingResult candidate_routing;
+        Placement candidate_effective;
+        Score candidate_score = exactCached(candidate, &candidate_routing, &candidate_effective);
+        if (outlineSweepBetter(candidate_routing, candidate_score.value, result.best_routing, result.best_score.value)) {
+            result.best_score = candidate_score;
+            result.best_placement = candidate_effective;
+            result.best_routing = candidate_routing;
+        }
+    }
+}
+
 }  // namespace
 
 void rememberBounded(std::vector<CheapCandidate>& pool, const Placement& placement, double value,
@@ -832,6 +869,10 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
 
     (void)best_state;
     (void)current_place;
+    // B7 (capacity-profit interior-gap rungs, .superpowers/sdd/b7-brief.md): ONCE after the elite
+    // loop, on the then-best -- "once per elite candidate is too expensive," mirroring why the
+    // post-finalize pass below is also a single call, not per-candidate.
+    maybeAdoptCapacityGapRungs(problem, exactCached, result);
     finalizeFeedthrough(problem, engine, result);
 
     // B3.1 (b3-report.md "Concerns" #1, honest finding carried forward as a follow-on task):
@@ -870,6 +911,11 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
         result.best_placement = post_finalize_swept_compacted.placement;
         result.best_routing = post_finalize_swept_compacted.routing;
     }
+
+    // B7: second (post-finalize) pass -- finalizeFeedthrough + the sweeps above may have moved
+    // best_placement again since the elite-loop pass, so re-rank/re-try gap rungs against the
+    // FINAL committed geometry (brief: "in the post-finalize pass after the B3.1 sweep").
+    maybeAdoptCapacityGapRungs(problem, exactCached, result);
 
     return result;
 }

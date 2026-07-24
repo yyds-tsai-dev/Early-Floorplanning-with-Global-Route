@@ -100,4 +100,61 @@ struct RespaceResult {
 // Deterministic: no RNG, and `exactCached`/`respaceToDemand` are themselves deterministic.
 RespaceResult respaceFixedPoint(const Problem& problem, const Placement& base, const ExactCachedFn& exactCached);
 
+// B7 (capacity-profit interior-gap rungs, .superpowers/sdd/b7-brief.md; research doc
+// 2026-07-23 §3c): one interior gap -- a specific block-pair (or block/outline-wall pair)
+// bounding an existing channel, per channelBounds -- and a candidate integer widening amount.
+// `horizontal=true` widens the (left,right) pair's x-separation (grows the shared channel(s)'
+// WIDTH, hence VERTICAL-usage capacity, per channelDemands' own axis-crossing invariant);
+// `horizontal=false` widens the (below,above) pair's y-separation (grows HEIGHT / HORIZONTAL-
+// usage capacity). `from`/`to` use channelBounds' -1-for-wall convention for `from` only -- `to`
+// is always a real, non-edge block index (capacityGapCandidates below excludes any gap whose
+// `to` would be the outline wall or an edge-type block, since relaxToDemand's constraint graph
+// has no mechanism to move either one: a (block -> high-side-wall) demand is never read by
+// relaxAxis's per-block loop, which only ever iterates CORE block targets, and an edge-type `to`
+// is never a member of that same `core` node set either -- both would be silent no-ops via
+// applyGapCandidate below, so they are excluded at enumeration time rather than ranked-and-
+// wasted). `profit` is the analytic ranking key -- see capacityGapCandidates' own doc comment
+// (respace.cpp) for the derivation; descending profit is the intended application order.
+struct CapacityGapCandidate {
+    int from = -1;
+    int to = -1;
+    bool horizontal = true;
+    double delta = 0.0;
+    double profit = 0.0;
+};
+
+// Enumerates every interior gap channelBounds identifies across `routing.channels` (deduped by
+// (from,to,horizontal) -- one entry per distinct pair, not per channel, since several stacked
+// channels can share the same bounding pair and widening it once widens all of them together),
+// crossed with three integer widening amounts delta in {1,2,4} um, and ranks the result
+// DESCENDING by an analytic profit estimate with explicit deterministic tie-breaks (profit desc,
+// then horizontal before vertical, then `from`, then `to`, then `delta`) -- see respace.cpp for
+// the full derivation. Returns an EMPTY vector whenever the current routing carries no overflow
+// (`routing.channel_overflow_nets <= kEps`) or no capacity (`routing.channel_capacity_total <=
+// kEps`): the profit formula is provably <= 0 for every gap in that regime (see respace.cpp),
+// which is also the cheap early-out the brief's own "honest scope" note anticipates (most
+// default winners already carry near-zero overflow post-B4). Pure; no mutation of
+// problem/placement/routing. `placement`/`routing` MUST be a mutually consistent pair (the SAME
+// call site's own exactCached-produced placement + its routing, never a placement re-derived or
+// mutated after routing was computed) -- channelBounds re-derives bounds geometrically from
+// `placement` alone, so a stale/mismatched pairing could mis-attribute a channel's bounding pair
+// (the P3-final-review "channelBounds wrong-pair attribution under stamp/routing disagreement"
+// risk research doc 2026-07-23 §8 item 5 flagged as load-bearing here) -- callers must follow the
+// same discipline every other respace.cpp/search.cpp call site already does (result.best_placement
+// and result.best_routing are always assigned together, from the same exactCached call).
+std::vector<CapacityGapCandidate> capacityGapCandidates(const Problem& problem, const Placement& placement,
+                                                        const RoutingResult& routing);
+
+// Applies one gap candidate's widening to a COPY of `placement`, via the SAME relax/re-anchor/
+// legality-gate sequence respaceToDemand uses (respace.cpp's shared applyDemandsAndLegalize) --
+// builds a single-entry StripDemand whose required gap is the candidate's CURRENT geometric
+// separation (re-derived directly from `placement`, not stored on the candidate) plus
+// `gap.delta` (widen the EXISTING gap by delta, not "set the gap to delta" -- the latter would be
+// a near-universal no-op, since almost every real gap already exceeds a few integer microns),
+// runs relaxToDemand, re-anchors edge blocks + re-stamps the outline via shrinkWrapOutline, and
+// gates on legality. On failure (illegal, or would exceed MAX), `placement` is left completely
+// untouched and this returns false, mirroring respaceToDemand's own contract exactly.
+// Deterministic (no RNG).
+bool applyGapCandidate(const Problem& problem, Placement& placement, const CapacityGapCandidate& gap);
+
 }  // namespace efgr
