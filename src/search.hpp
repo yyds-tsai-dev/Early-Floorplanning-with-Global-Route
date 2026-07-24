@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <random>
 #include <string>
 #include <utility>
 #include <vector>
@@ -26,6 +27,21 @@ struct SearchOptions {
     // original gate). An experiment hook for B5's sweep, not a production default -- flipping the
     // default is B5's budget-gate decision, not this one's.
     bool adaptive_interval = false;
+    // B5a.1 (elite-admission variant portfolio, coordinator adjudication after B5a's own STOP --
+    // .superpowers/sdd/b5a-report.md): when true, runPlacementSearch's elite pass uses the NEW (v2)
+    // admission mechanism -- widened K_cheap=48 cheap prefilter, exact-value archive, insurance
+    // reservoir, rung-0 tight-exact re-rank (buildEliteFullSet, b5-design.md §2). DEFAULT FALSE:
+    // false must reproduce HEAD 408a297 (pre-B5a) BYTE-IDENTICALLY -- kTopCheapCandidates reverts to
+    // 16, no archive/insurance machinery runs at all (not even constructed), and the elite loop
+    // iterates top_candidates directly, the exact pre-B5a code path (hard acceptance gate, same
+    // discipline as adaptive_interval's own byte-identity requirement above). B5a's own end-to-end
+    // measurement found v2 alone regresses case1/case3 at default flags (a shared-search-path
+    // interaction with runPricingPortfolio's legacy-leg floor and the hybrid bstar-seed cascade --
+    // see b5a-report.md) while winning case2/case4 substantially, so v2 is never turned on directly
+    // by ordinary callers/CLI -- runPricingPortfolio below runs BOTH v1 and v2 (crossed with
+    // route_pricing_official) as 4 separate legs and folds by value, giving v2's wins for free while
+    // the v1 legs hold the floor.
+    bool elite_admission_v2 = false;
 };
 
 struct SearchResult {
@@ -50,6 +66,16 @@ struct SearchResult {
     // for any SearchResult not produced by runPricingPortfolio, so existing direct callers of
     // runPlacementSearch/runHybridPlacementSearch are unaffected.
     bool pricing_official = true;
+    // B5a.1 (elite-admission variant portfolio, .superpowers/sdd/b5a-report.md): true iff the NEW
+    // (v2) tight-exact-reranked elite admission (b5-design.md §2) won runPricingPortfolio's 4-leg
+    // fold; false iff the ORIGINAL (v1, pre-B5a/HEAD 408a297) top-16-by-cheap-rank admission won.
+    // Telemetry only (never read by scoring/caching logic) -- surfaced in main.cpp's stderr summary
+    // as `admission=v1|v2`. Defaults false (matches SearchOptions.elite_admission_v2's default) for
+    // any SearchResult not produced by runPricingPortfolio's own explicit fold-tracking -- exactly
+    // the same precedent pricing_official above already set (runPricingPortfolio tracks which leg
+    // won with its OWN local bookkeeping and stamps this field fresh at the end; it is never read
+    // from any individual leg's own copy of the field).
+    bool elite_admission_v2 = false;
     // B6 (rank-fidelity instrumentation, .superpowers/sdd/b6-brief.md): observation-only -- never
     // READ by any decision in runPlacementSearch/finalizeFeedthrough/outlineSweep, purely reporting
     // data for main.cpp's stderr summary (tau=/tau_w= fields) and the flag-gated adaptive-interval
@@ -69,6 +95,15 @@ struct SearchResult {
     // exactCached (memoized by placementKey), so a pool member the SA loop already exact-scored is a
     // cache hit here, not a new eval. Same fold behavior as fidelity_pairs above: picked leg's vector
     // only.
+    // B5a FIELD-SEMANTICS CHANGE (.superpowers/sdd/b5-design.md §2.5 point 4): `top_candidates`
+    // widened from K=16 to K=48 (kTopCheapCandidates, search.cpp), so this vector -- and therefore
+    // main.cpp's pool_tau/exact_best_cheap_rank stderr fields -- now describe the 48-member CHEAP
+    // prefilter's own rank fidelity, not literally "the pool admitted to full elite treatment"
+    // anymore: admission to full treatment is a SEPARATE downstream re-rank (buildEliteFullSet below)
+    // by tight-exact value, not by this vector's cheap order. elite_pairs/pool_tau/
+    // exact_best_cheap_rank remain a diagnostic on the cheap proxy's own fidelity at pool scale; they
+    // do not describe which candidates actually received the expensive sweep/compact/respace
+    // treatment (see buildEliteFullSet's own doc comment for that set).
     std::vector<std::pair<double, double>> elite_pairs;
 };
 
@@ -104,6 +139,71 @@ struct OutlineSweepResult {
 OutlineSweepResult outlineSweep(const Problem& problem, const Placement& base, const ExactCachedFn& exactCached,
                                 bool include_pads = true);
 
+// B5a (elite-pool rework, .superpowers/sdd/b5-design.md §2): a candidate placement considered for
+// the elite pass's cheap-value prefilter (runPlacementSearch's `top_candidates`) or exact-value
+// archive (`exact_archive`) -- `value` is whichever score the owning pool ranks by (cheap for the
+// prefilter, exact for the archive), `key` is its `placementKey` (dedup identity). Hoisted here (was
+// local to runPlacementSearch) so `rememberBounded`/`buildEliteFullSet` below, and their unit tests
+// (test/regression_b5_20260724.cpp), can share the shape -- the design doc itself calls the archive
+// "CheapCandidate-shaped".
+struct CheapCandidate {
+    double value;
+    Placement placement;
+    std::string key;
+};
+
+// B5a: inserts `placement` (scored at `value`) into `pool` unless a placementKey-identical entry is
+// already present, then keeps `pool` sorted ascending by `.value` and capped at `cap` entries. The
+// exact dedup+sort+resize discipline the cheap-value prefilter used before B5a, now shared with the
+// exact-value archive B5a adds -- both are "keep the best `cap` distinct candidates seen so far"
+// pools, differing only in which value they rank by. A key already present short-circuits the whole
+// insert (first-seen value for that key wins; matches the pre-B5a `rememberCandidate` semantics this
+// generalizes).
+void rememberBounded(std::vector<CheapCandidate>& pool, const Placement& placement, double value,
+                     std::size_t cap);
+
+// B5a (elite-pool rework, b5-design.md §2.2 "Insurance picks"): one step of classic reservoir
+// sampling (Algorithm R) over a stream of decoded candidates. `seen` is the 1-based index of
+// `placement` in that stream (the caller increments its own counter once per call); `insurance`
+// grows to `cap` entries then randomly replaces a uniformly-chosen existing entry with diminishing
+// probability `cap/seen`, giving every stream element equal probability `cap/n` of surviving in the
+// final `cap`-sized sample after `n` calls. Takes `rng` as an explicit parameter (never a
+// captured/global generator) so a caller can pass a DEDICATED generator and structurally guarantee
+// this can never read the SA loop's own main mutate/accept rng stream.
+void reservoirSample(std::vector<Placement>& insurance, const Placement& placement, int seen,
+                     std::size_t cap, std::mt19937& rng);
+
+// B5a (elite-pool rework, b5-design.md §2): one placement admitted to the elite pass's expensive
+// full treatment (outlineSweep raw + compacted + maybeAdoptRespace) -- `tight_value`/`open_routes`
+// are its rung-0 tight-outline exact score, set by buildEliteFullSet below.
+struct EliteCandidate {
+    Placement placement;
+    std::string key;
+    double tight_value = 0.0;
+    int open_routes = 0;
+};
+
+// B5a (elite-pool rework, b5-design.md §2.1): builds the admission set for the elite pass's
+// expensive full treatment, replacing plain "top-K by cheap value" admission (B6 measured cheap
+// rank to be a weak-to-inverted predictor of the post-sweep exact winner -- pool_tau negative on
+// case1/case3, exact_best_cheap_rank 16/16 on case3 default). Unions the cheap-value prefilter
+// (`cheap_pool`), the exact-value archive (`exact_archive`), the SA loop's running best
+// (`best_placement`, always FORCE-admitted), and the insurance reservoir (`insurance`, likewise
+// always force-admitted) -- deduped by placementKey. Re-ranks the deduped union by a RUNG-0
+// TIGHT-EXACT score (one real `exactCached` call per candidate; reuses whatever memoized cache the
+// caller's `exactCached` closure already carries, so a candidate already exact-scored by the
+// caller -- e.g. every `cheap_pool` member, via the caller's own elite-pool snapshot loop -- costs
+// nothing here), legality-first (open_routes==0 strictly preferred) then ascending tight value.
+// Returns the top `full_size` re-ranked candidates UNIONED with the force-admitted best+insurance,
+// so the returned vector can hold up to `full_size + 1 + insurance.size()` entries after dedup, not
+// exactly `full_size` -- the caller applies the identical elite treatment to every returned member
+// regardless of which admission path brought it in.
+std::vector<EliteCandidate> buildEliteFullSet(const std::vector<CheapCandidate>& cheap_pool,
+                                              const std::vector<CheapCandidate>& exact_archive,
+                                              const Placement& best_placement,
+                                              const std::vector<Placement>& insurance,
+                                              std::size_t full_size, const ExactCachedFn& exactCached);
+
 std::string placementKey(const Placement& placement);
 // B1.1 (Codex adversarial review, 2026-07-24, .superpowers/sdd/b1-report.md "Post-review
 // amendment"): exact (bitwise ==) placement equality -- same rect count, every rect's x/y/w/h and
@@ -136,16 +236,30 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
                                 const PlacementState& initial_state);
 SearchResult runHybridPlacementSearch(const Problem& problem, const SearchOptions& options);
 void finalizeFeedthrough(const Problem& problem, const PlacementEngine& engine, SearchResult& result);
-// B4.1 (route-pricing portfolio, b4-report.md): runs the FULL requested engine search ("sp",
-// "bstar", or "hybrid" -- same dispatch main.cpp used to do inline) TWICE, on two `problem` copies
-// differing ONLY in `route_pricing_official` (model.hpp) -- official (B4's per-edge marginal
-// pricing) and legacy (byte-identical to pre-B4/HEAD 207d08c) -- then folds the two SearchResults
-// with the existing value-gated `paydownBetter` (legality-first, then value). Restores the
-// per-case <=-pre-B4 Pareto floor a changed search trajectory can otherwise miss, since the legacy
-// leg reproduces pre-B4 behavior bit-exactly (B4 never touched search.cpp) -- the fold's floor is
-// structural. `options` is shared by both legs (same seed); a wall-clock time_budget, if set, is
-// split 50/50 across them. Existing direct callers of runPlacementSearch/runHybridPlacementSearch
-// keep single-pricing semantics unchanged.
+// B4.1 (route-pricing portfolio, b4-report.md) + B5a.1 (elite-admission dimension,
+// .superpowers/sdd/b5a-report.md): runs the FULL requested engine search ("sp", "bstar", or
+// "hybrid" -- same dispatch main.cpp used to do inline) as FOUR legs -- the cross product of
+// `route_pricing_official` {true,false} (model.hpp) x `elite_admission_v2` {false,true}
+// (SearchOptions) -- then folds all four SearchResults with the existing value-gated
+// `paydownBetter` (legality-first, then value; a transitive total preorder, so pairwise folding in
+// any order picks the same overall winner). Leg order: (official,v1) and (legacy,v1) first (the
+// FLOOR legs -- v1 is byte-identical to pre-B5a/HEAD 408a297 on each pricing, so this pair alone
+// reproduces exactly what the pre-B5a 2-leg portfolio produced), then (official,v2), (legacy,v2)
+// (B5a's new tight-exact-reranked admission, which B5a's own measurement found wins substantially
+// on some cases -- e.g. case2/case4 -- and regresses others -- case1/case3, via a shared-search-path
+// interaction with the v1 floor's own legacy-leg bit-exact-replay premise and the hybrid bstar-seed
+// cascade; see b5a-report.md). Folding all four by value means the v1 floor legs structurally
+// guarantee per-case <= the pre-B5a/B4.1 baseline (same "legacy leg reproduces old behavior
+// bit-exactly" argument B4.1 already established, now doubled for the (v1) pricing pair), while the
+// v2 legs are pure upside where they happen to win. `options` is shared by all four legs (same
+// seed, same iters) except `elite_admission_v2`, which each leg's own copy overrides explicitly
+// regardless of the incoming `options.elite_admission_v2` value; a wall-clock time_budget, if set,
+// is split 4 ways (was 2, halved again since B5a.1 doubles the leg count) -- budget-off (0.0)
+// divides to 0.0 either way, unaffected. `pricing_official`/`elite_admission_v2` on the returned
+// result are stamped FRESH from this function's own fold bookkeeping (never read from any
+// individual leg's own copy of those fields -- same precedent as B4.1's `pricing_official`).
+// Existing direct callers of runPlacementSearch/runHybridPlacementSearch keep single-leg semantics
+// unchanged (elite_admission_v2 defaults false on SearchOptions).
 SearchResult runPricingPortfolio(const Problem& problem, const std::string& engine, const SearchOptions& options);
 
 }  // namespace efgr

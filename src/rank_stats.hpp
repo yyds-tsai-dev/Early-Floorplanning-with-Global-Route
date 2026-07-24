@@ -31,7 +31,8 @@ constexpr std::size_t kDefaultFidelityWindow = 64;
 
 // Kendall's tau-b rank correlation coefficient over paired samples (x_i, y_i) =
 // pairs[i].first/.second (Kendall 1945). O(n^2) all-pairs comparison -- fine at the sizes this
-// module is used at (<=64 SA-loop window entries, <=16 elite-pool entries). Ties handled per the
+// module is used at (<=64 SA-loop window entries, <=48 elite-pool entries post-B5a, was <=16).
+// Ties handled per the
 // standard tau-b denominator: a pair tied on x, y, or both is excluded from the concordant/
 // discordant counts, and contributes to n1 (tied-in-x pair count) and/or n2 (tied-in-y pair count)
 // respectively -- a pair tied in BOTH contributes to both. Returns 0.0 for n<2 or a degenerate

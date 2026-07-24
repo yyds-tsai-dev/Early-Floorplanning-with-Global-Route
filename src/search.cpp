@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <optional>
 #include <random>
 #include <sstream>
 #include <unordered_map>
@@ -164,6 +165,90 @@ void maybeAdoptRespace(const Problem& problem, const ExactCachedFn& exactCached,
 }
 
 }  // namespace
+
+void rememberBounded(std::vector<CheapCandidate>& pool, const Placement& placement, double value,
+                     std::size_t cap) {
+    std::string key = placementKey(placement);
+    for (const auto& candidate : pool) {
+        if (candidate.key == key) return;
+    }
+    pool.push_back(CheapCandidate{value, placement, key});
+    std::sort(pool.begin(), pool.end(),
+              [](const CheapCandidate& a, const CheapCandidate& b) { return a.value < b.value; });
+    if (pool.size() > cap) pool.resize(cap);
+}
+
+void reservoirSample(std::vector<Placement>& insurance, const Placement& placement, int seen,
+                     std::size_t cap, std::mt19937& rng) {
+    if (insurance.size() < cap) {
+        insurance.push_back(placement);
+        return;
+    }
+    std::uniform_int_distribution<int> pick(1, seen);
+    int slot = pick(rng);
+    if (slot <= static_cast<int>(cap)) {
+        insurance[static_cast<std::size_t>(slot - 1)] = placement;
+    }
+}
+
+std::vector<EliteCandidate> buildEliteFullSet(const std::vector<CheapCandidate>& cheap_pool,
+                                              const std::vector<CheapCandidate>& exact_archive,
+                                              const Placement& best_placement,
+                                              const std::vector<Placement>& insurance,
+                                              std::size_t full_size, const ExactCachedFn& exactCached) {
+    std::vector<EliteCandidate> cand_set;
+    auto admit = [&](const Placement& placement) {
+        std::string key = placementKey(placement);
+        for (const auto& existing : cand_set) {
+            if (existing.key == key) return;
+        }
+        cand_set.push_back(EliteCandidate{placement, key, 0.0, 0});
+    };
+    for (const auto& candidate : cheap_pool) admit(candidate.placement);
+    for (const auto& candidate : exact_archive) admit(candidate.placement);
+    admit(best_placement);
+    for (const auto& placement : insurance) admit(placement);
+
+    // Rung-0: tight-outline exact score for every admitted candidate. `exactCached` is memoized by
+    // placementKey(input), so a candidate the caller already exact-scored under this same closure
+    // (every `cheap_pool` member, via the caller's own elite-pool snapshot loop; `best_placement`,
+    // always itself the effective output of an earlier exactCached call) is a cache hit here, not a
+    // new eval.
+    for (auto& candidate : cand_set) {
+        RoutingResult routing;
+        Placement effective;
+        Score tight = exactCached(candidate.placement, &routing, &effective);
+        candidate.tight_value = tight.value;
+        candidate.open_routes = routing.open_routes;
+    }
+    std::sort(cand_set.begin(), cand_set.end(), [](const EliteCandidate& a, const EliteCandidate& b) {
+        if ((a.open_routes == 0) != (b.open_routes == 0)) return a.open_routes == 0;
+        return a.tight_value < b.tight_value;
+    });
+
+    std::vector<EliteCandidate> full_set;
+    auto admitFull = [&](const Placement& placement) {
+        std::string key = placementKey(placement);
+        for (const auto& existing : full_set) {
+            if (existing.key == key) return;
+        }
+        for (const auto& scored : cand_set) {
+            if (scored.key == key) {
+                full_set.push_back(scored);
+                return;
+            }
+        }
+        // Defensive fallback, unreachable in practice: every forced member below was
+        // unconditionally admit()'d into cand_set above, so it is always found by the loop above.
+        full_set.push_back(EliteCandidate{placement, key, 0.0, 0});
+    };
+    for (std::size_t i = 0; i < cand_set.size() && full_set.size() < full_size; ++i) {
+        admitFull(cand_set[i].placement);
+    }
+    admitFull(best_placement);
+    for (const auto& placement : insurance) admitFull(placement);
+    return full_set;
+}
 
 OutlineSweepResult outlineSweep(const Problem& problem, const Placement& base, const ExactCachedFn& exactCached,
                                 bool include_pads) {
@@ -515,29 +600,54 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
         result.best_placement = effective;
     }
 
-    struct CheapCandidate {
-        double value;
-        Placement placement;
-        std::string key;
-    };
     std::vector<CheapCandidate> top_candidates;
+    // B5a.1 (flag-gated variant, .superpowers/sdd/b5a-report.md): v1 (flag false, the default)
+    // keeps the original K_cheap=16; v2 widens to 48 (b5-design.md §2.1/§2.5 point 1). A runtime
+    // value (not compile-time constexpr) because the choice now depends on options.elite_admission_v2.
+    const std::size_t kTopCheapCandidates = options.elite_admission_v2 ? 48 : 16;
     auto rememberCandidate = [&](const Placement& placement, const Score& score) {
-        std::string key = placementKey(placement);
-        for (const auto& candidate : top_candidates) {
-            if (candidate.key == key) return;
-        }
-        top_candidates.push_back(CheapCandidate{score.value, placement, key});
-        std::sort(top_candidates.begin(), top_candidates.end(), [](const CheapCandidate& a, const CheapCandidate& b) {
-            return a.value < b.value;
-        });
-        constexpr std::size_t kTopCheapCandidates = 16;
-        if (top_candidates.size() > kTopCheapCandidates) top_candidates.resize(kTopCheapCandidates);
+        rememberBounded(top_candidates, placement, score.value, kTopCheapCandidates);
     };
     // Seed the cheap-candidate pool with `current_place` (the placement `current_score` was actually
     // computed on), NOT result.best_placement -- the latter may now be the grown effective placement
     // from the seed exact-eval above, which would mis-pair a grown placement with the ungrown cheap
     // score. When the grow does not fire these are byte-identical (effective == current_place).
     rememberCandidate(current_place, current_score);
+
+    // B5a (elite-pool rework, b5-design.md §2.1/§2.5 point 2): exact-value archive, maintained
+    // during the SA loop at the periodic/cheap-beats-best exact-eval trigger site below (near-free:
+    // those evals are already paid for by that site, not new work) -- top-8 by EXACT value,
+    // placementKey-deduped, retained regardless of cheap rank so a basin the cooled cheap pool has
+    // abandoned but the SA loop already confirmed genuinely good stays available to admission.
+    // B5a.1: v1 (flag false) performs NO archive maintenance at all -- rememberExactArchive is a
+    // no-op there, so `exact_archive` stays permanently empty, matching pre-B5a behavior exactly.
+    std::vector<CheapCandidate> exact_archive;
+    auto rememberExactArchive = [&](const Placement& placement, double exact_value) {
+        if (!options.elite_admission_v2) return;
+        constexpr std::size_t kExactArchiveSize = 8;  // K_arch
+        rememberBounded(exact_archive, placement, exact_value, kExactArchiveSize);
+    };
+
+    // B5a (elite-pool rework, b5-design.md §2.2 "Insurance picks"): Lau-Ho blind-pick floor via
+    // reservoir sampling over every decoded candidate the SA loop visits, drawn from a DEDICATED rng
+    // so the main mutate/accept stream (`rng` above) is byte-unperturbed -- `ins_rng` is declared and
+    // read ONLY here, never touching `rng`. Determinism: same options.seed => same insurance picks,
+    // provably independent of anything drawn off the main `rng` stream (a different generator seeded
+    // from a different value).
+    // B5a.1: v1 (flag false) constructs NO insurance rng at all (std::optional stays empty) and
+    // draws nothing -- rememberInsurance is a no-op there, so `insurance` stays permanently empty,
+    // matching pre-B5a behavior exactly (hard requirement: "no insurance rng construction or draws"
+    // on the v1 path).
+    constexpr std::size_t kInsuranceReservoirSize = 4;  // R_ins
+    std::vector<Placement> insurance;
+    int insurance_seen = 0;
+    std::optional<std::mt19937> ins_rng;
+    if (options.elite_admission_v2) ins_rng.emplace(options.seed ^ 0x5eedu);
+    auto rememberInsurance = [&](const Placement& placement) {
+        if (!options.elite_admission_v2) return;
+        ++insurance_seen;
+        reservoirSample(insurance, placement, insurance_seen, kInsuranceReservoirSize, *ins_rng);
+    };
 
     double temp = std::max(1.0, options.initial_temperature);
     int exact_interval = std::max(1, options.exact_interval);
@@ -577,6 +687,10 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
         Placement cand_place = engine.decode(problem, candidate);
         Score cand_score = cheapScore(problem, cand_place);
         rememberCandidate(cand_place, cand_score);
+        // B5a: reservoir-sample this decoded candidate into the insurance pool (dedicated ins_rng
+        // only -- see its declaration above -- never perturbs `rng` or the accept/reject decision
+        // below).
+        rememberInsurance(cand_place);
         double delta = cand_score.value - current_score.value;
         std::uniform_real_distribution<double> unit(0.0, 1.0);
         if (delta <= 0.0 || std::exp(-delta / std::max(1.0, temp)) > unit(rng)) {
@@ -589,6 +703,10 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
             RoutingResult routing;
             Placement effective;
             Score exact = exactCached(cand_place, &routing, &effective);
+            // B5a (elite-pool rework, b5-design.md §2.5 point 2): archive this SA-loop exact eval
+            // (already paid for by this site) -- top-8 by exact value, deduped, regardless of
+            // whether it becomes the new best.
+            rememberExactArchive(effective, exact.value);
             // B6 (rank-fidelity instrumentation): record this (cheap, exact) pair for EVERY
             // exactCached call at this site, cache hit or miss -- pure observation, read by
             // nothing below. Must run before any return/continue this block could take, and
@@ -632,6 +750,11 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
     // happened to trigger an exact eval for pays a genuinely new one here -- one the elite loop's
     // own outlineSweep(m=0.0 tight rung) below would otherwise pay for a few lines later anyway.
     // Pure recording: never touches result.best_*/best_state, never touches `rng`.
+    // B5a (b5-design.md §2.5 point 4): top_candidates is now the WIDENED K_cheap=48 prefilter (was
+    // 16), so this loop's own exactCached calls double as rung-0's pre-warm of the exact_cache --
+    // buildEliteFullSet below re-scores every one of these same placements and gets a cache hit for
+    // each. elite_pairs/pool_tau/exact_best_cheap_rank therefore now report over K=48 (see
+    // SearchResult.elite_pairs's doc comment in search.hpp for the full field-semantics note).
     for (const auto& candidate : top_candidates) {
         RoutingResult elite_routing;
         Placement elite_effective;
@@ -639,37 +762,72 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
         result.elite_pairs.emplace_back(candidate.value, elite_exact.value);
     }
 
-    for (const auto& candidate : top_candidates) {
-        // T7 (design §1.4 elite path): replaces the single tight-stamp exactCached call with a
-        // deterministic outline-margin sweep -- m=0.0 reproduces the exact prior single-eval
-        // behavior, so this can only match or beat it (strictly Pareto-safe). Preference mirrors
-        // outlineSweep's own internal rule (open_routes==0 strictly first, then lower value) so
-        // the elite loop never regresses legality chasing a lower score.
-        OutlineSweepResult swept = outlineSweep(problem, candidate.placement, exactCached);
-        if (outlineSweepBetter(swept.routing, swept.score.value, result.best_routing, result.best_score.value)) {
-            result.best_score = swept.score;
-            result.best_placement = swept.placement;
-            result.best_routing = swept.routing;
-        }
+    // B5a.1 (flag-gated variant, .superpowers/sdd/b5a-report.md): v1 (flag false, the default)
+    // reproduces the pre-B5a elite loop VERBATIM -- iterates `top_candidates` (capped at 16 above)
+    // directly, exactly as HEAD 408a297 did, so this branch is byte-identical to before B5a existed.
+    // v2 (flag true) is B5a's own admission rework (b5-design.md §2.1/§2.5 point 5):
+    // buildEliteFullSet re-ranks the widened cheap prefilter + exact archive by a rung-0 TIGHT-EXACT
+    // score (legality-first), and additionally FORCE-admits the running best and the insurance
+    // reservoir regardless of rank -- see buildEliteFullSet's own doc comment (search.hpp) for the
+    // full contract. Both branches share the IDENTICAL loop body (T7 sweep raw + compacted +
+    // maybeAdoptRespace) -- only the candidate source differs.
+    if (!options.elite_admission_v2) {
+        for (const auto& candidate : top_candidates) {
+            // T7 (design §1.4 elite path): replaces the single tight-stamp exactCached call with a
+            // deterministic outline-margin sweep -- m=0.0 reproduces the exact prior single-eval
+            // behavior, so this can only match or beat it (strictly Pareto-safe). Preference mirrors
+            // outlineSweep's own internal rule (open_routes==0 strictly first, then lower value) so
+            // the elite loop never regresses legality chasing a lower score.
+            OutlineSweepResult swept = outlineSweep(problem, candidate.placement, exactCached);
+            if (outlineSweepBetter(swept.routing, swept.score.value, result.best_routing, result.best_score.value)) {
+                result.best_score = swept.score;
+                result.best_placement = swept.placement;
+                result.best_routing = swept.routing;
+            }
 
-        Placement compacted = compactTowardOrigin(problem, candidate.placement);
-        // compactTowardOrigin resets outline_w/h to 0 (moved core rects invalidate any prior
-        // stamp) -- outlineSweep re-shrink-wraps from scratch per rung regardless, so no
-        // additional restamp is needed here before sweeping (unlike the pre-T7 single-eval path,
-        // which required an explicit restamp so exactCached's placementKey stayed accurate).
-        OutlineSweepResult swept_compacted = outlineSweep(problem, compacted, exactCached);
-        if (outlineSweepBetter(swept_compacted.routing, swept_compacted.score.value, result.best_routing,
-                               result.best_score.value)) {
-            result.best_score = swept_compacted.score;
-            result.best_placement = swept_compacted.placement;
-            result.best_routing = swept_compacted.routing;
-        }
+            Placement compacted = compactTowardOrigin(problem, candidate.placement);
+            // compactTowardOrigin resets outline_w/h to 0 (moved core rects invalidate any prior
+            // stamp) -- outlineSweep re-shrink-wraps from scratch per rung regardless, so no
+            // additional restamp is needed here before sweeping (unlike the pre-T7 single-eval path,
+            // which required an explicit restamp so exactCached's placementKey stayed accurate).
+            OutlineSweepResult swept_compacted = outlineSweep(problem, compacted, exactCached);
+            if (outlineSweepBetter(swept_compacted.routing, swept_compacted.score.value, result.best_routing,
+                                   result.best_score.value)) {
+                result.best_score = swept_compacted.score;
+                result.best_placement = swept_compacted.placement;
+                result.best_routing = swept_compacted.routing;
+            }
 
-        // T5 (design p3-design.md §5, plan Task 5): respace the then-current best ONCE per
-        // elite candidate, after both sweep adoptions above have already run their course --
-        // never on the swept candidate directly, so a sweep variant that lost either adoption
-        // never separately pays for its own respaceFixedPoint call.
-        maybeAdoptRespace(problem, exactCached, result);
+            // T5 (design p3-design.md §5, plan Task 5): respace the then-current best ONCE per
+            // elite candidate, after both sweep adoptions above have already run their course --
+            // never on the swept candidate directly, so a sweep variant that lost either adoption
+            // never separately pays for its own respaceFixedPoint call.
+            maybeAdoptRespace(problem, exactCached, result);
+        }
+    } else {
+        constexpr std::size_t kFullTreatmentSize = 16;  // K_full (elite full-treatment slot count, unchanged)
+        std::vector<EliteCandidate> full_set = buildEliteFullSet(top_candidates, exact_archive, result.best_placement,
+                                                                 insurance, kFullTreatmentSize, exactCached);
+
+        for (const auto& candidate : full_set) {
+            OutlineSweepResult swept = outlineSweep(problem, candidate.placement, exactCached);
+            if (outlineSweepBetter(swept.routing, swept.score.value, result.best_routing, result.best_score.value)) {
+                result.best_score = swept.score;
+                result.best_placement = swept.placement;
+                result.best_routing = swept.routing;
+            }
+
+            Placement compacted = compactTowardOrigin(problem, candidate.placement);
+            OutlineSweepResult swept_compacted = outlineSweep(problem, compacted, exactCached);
+            if (outlineSweepBetter(swept_compacted.routing, swept_compacted.score.value, result.best_routing,
+                                   result.best_score.value)) {
+                result.best_score = swept_compacted.score;
+                result.best_placement = swept_compacted.placement;
+                result.best_routing = swept_compacted.routing;
+            }
+
+            maybeAdoptRespace(problem, exactCached, result);
+        }
     }
 
     (void)best_state;
@@ -794,59 +952,102 @@ SearchResult runHybridPlacementSearch(const Problem& problem, const SearchOption
     return result;
 }
 
-// B4.1 (route-pricing portfolio, coordinator adjudication 2026-07-24, b4-report.md): restores the
-// per-case <=-pre-B4 Pareto floor that B4's own per-placement gate cannot give across a CHANGED
-// SEARCH TRAJECTORY (design b4-design.md's own R4/R6 risk, measured on case3). Unlike B1's
-// analogous case3 finding -- a single seed-handoff divergence point that a third hybrid leg could
-// patch -- B4 changes every exactScore's own routing, so no single legacy ENDPOINT exists to seed
-// a compensating leg from; the only construction that guarantees per-case <= pre-B4 is running the
-// FULL search under BOTH pricings and folding by value. Runs the requested `engine` twice, on two
-// Problem copies differing ONLY in `route_pricing_official` -- the legacy-pricing run reproduces
-// pre-B4 (HEAD 207d08c) behavior BIT-EXACTLY (verified separately: byte-identical .cfg output on
-// all 5 default cases), so the fold's floor is structural, not empirical. This is also the minimal
-// special case of the B2 time-budget portfolio pattern (multi-restart, fold-by-value) arriving
-// early; B2 will generalize it (multiple seeds/engines) later.
+// B4.1 (route-pricing portfolio, coordinator adjudication 2026-07-24, b4-report.md) + B5a.1
+// (elite-admission dimension, coordinator adjudication after B5a's own STOP,
+// .superpowers/sdd/b5a-report.md): restores the per-case <=-pre-B4/pre-B5a Pareto floor that a
+// changed search trajectory can otherwise miss, by running the requested `engine` as FOUR legs --
+// the cross product of `route_pricing_official` {true,false} x `elite_admission_v2` {false,true} --
+// and folding all four with the existing value-gated `paydownBetter`.
+//
+// History: B4.1 originally ran 2 legs (official/legacy pricing, v1 admission implicitly, since B5a
+// did not yet exist) -- the legacy-pricing leg reproduces pre-B4 (HEAD 207d08c) behavior BIT-EXACTLY
+// (verified separately: byte-identical .cfg output on all 5 default cases), so THAT fold's floor was
+// structural. B5a then added a SECOND, independent dimension (elite_admission_v2) inside
+// runPlacementSearch itself -- shared by BOTH pricing legs unconditionally -- and B5a's own
+// end-to-end measurement (b5a-report.md) found this broke the bit-exact-replay premise the legacy
+// leg's floor depended on: with v2 unconditionally on, the "legacy" leg no longer reproduces pre-B4
+// behavior (B5a's admission rework lives in search.cpp, which the legacy leg also runs through), so
+// case3 lost its floor entirely (regressed +32.6%) and case1 regressed +17.1% via the same
+// shared-search-path mechanism cascading through the hybrid bstar-seed chain -- while case2/case4
+// improved substantially (v2 is a genuinely better admission signal there). B5a.1's fix: flag-gate
+// v2 behind `SearchOptions.elite_admission_v2` (default false = v1, byte-identical to pre-B5a), and
+// run BOTH values as two more legs here, crossed with the pricing dimension. The (official,v1) and
+// (legacy,v1) legs alone are byte-identical to the OLD 2-leg portfolio (v1 never touches the new
+// admission machinery at all -- see runPlacementSearch's own v1/v2 branch), so that pair's fold
+// reproduces the exact pre-B5a floor structurally; the (official,v2)/(legacy,v2) legs are pure
+// upside, winning outright on cases where the new admission signal is genuinely better.
+//
+// Leg order (also the fold order below): (official,v1), (legacy,v1) -- the FLOOR pair -- then
+// (official,v2), (legacy,v2). `paydownBetter` is a transitive total preorder, so pairwise folding in
+// this (or any) order picks the single overall-best leg. `options` is shared by all four legs (same
+// seed/iters) except `elite_admission_v2`, which each leg's own SearchOptions copy overrides
+// explicitly, REGARDLESS of the incoming `options.elite_admission_v2` value (symmetric with how
+// `route_pricing_official` is already always overridden per Problem copy below, ignoring the
+// incoming `problem.route_pricing_official`). A wall-clock time_budget, if set, now splits 4 ways
+// (was 2 -- B5a.1 doubles the leg count so each leg keeps the same PER-LEG share of a fixed total
+// budget); budget-off (0.0) divides to 0.0 regardless, unaffected.
 SearchResult runPricingPortfolio(const Problem& problem, const std::string& engine, const SearchOptions& options) {
     Problem official_problem = problem;
     official_problem.route_pricing_official = true;
     Problem legacy_problem = problem;
     legacy_problem.route_pricing_official = false;
 
-    // Same seed/options for both legs -- the ONLY difference between the two Problem copies is the
-    // pricing flag. A wall-clock time_budget, if set, is split 50/50 so the two full-search legs
-    // together spend the same total wall-clock a single un-portfolio'd run would have; budget-off
-    // (0.0) halves to 0.0, unaffected.
-    SearchOptions leg_options = options;
-    leg_options.time_budget_sec = options.time_budget_sec * 0.5;
+    SearchOptions v1_options = options;
+    v1_options.elite_admission_v2 = false;
+    v1_options.time_budget_sec = options.time_budget_sec * 0.25;
+    SearchOptions v2_options = options;
+    v2_options.elite_admission_v2 = true;
+    v2_options.time_budget_sec = options.time_budget_sec * 0.25;
 
     // Same "sp"/"bstar"/"hybrid" dispatch main.cpp used to do inline before this function existed.
-    auto runLeg = [&](const Problem& p) {
+    auto runLeg = [&](const Problem& p, const SearchOptions& leg_options) {
         if (engine == "hybrid") return runHybridPlacementSearch(p, leg_options);
         std::unique_ptr<PlacementEngine> eng = makePlacementEngine(engine);
         return runPlacementSearch(p, *eng, leg_options);
     };
 
-    // Two separate exact-eval caches, one per leg, as today: runPlacementSearch/
+    // Four separate exact-eval caches, one per leg, as today: runPlacementSearch/
     // runHybridPlacementSearch each own a call-local `exact_cache` (an ordinary local variable,
-    // never static/global) -- calling either twice naturally gives two independent caches with no
-    // extra plumbing.
-    SearchResult official_result = runLeg(official_problem);
-    SearchResult legacy_result = runLeg(legacy_problem);
+    // never static/global) -- calling either four times naturally gives four independent caches
+    // with no extra plumbing.
+    SearchResult official_v1 = runLeg(official_problem, v1_options);
+    SearchResult legacy_v1 = runLeg(legacy_problem, v1_options);
+    SearchResult official_v2 = runLeg(official_problem, v2_options);
+    SearchResult legacy_v2 = runLeg(legacy_problem, v2_options);
 
-    // B6: same fold-keeps-picked-leg-only behavior as runHybridPlacementSearch's leg pick above --
-    // `result = official_result`/`= legacy_result` are whole-struct copies, so the picked leg's
-    // fidelity_pairs/elite_pairs come along; the other leg's are discarded, never merged. main.cpp
-    // reports whichever leg `pricing_official` below says won.
-    SearchResult result = official_result;
-    bool official_won = true;
-    if (paydownBetter(legacy_result.best_routing, legacy_result.best_score.value, result.best_routing,
+    // B6/B5a: same fold-keeps-picked-leg-only behavior as runHybridPlacementSearch's leg pick above
+    // -- each `result = <leg>` assignment is a whole-struct copy, so the picked leg's
+    // fidelity_pairs/elite_pairs come along; the other legs' are discarded, never merged.
+    // `pricing_official`/`elite_admission_v2` are tracked via this function's OWN local bools and
+    // stamped fresh at the end (never read from any leg's own copy of those fields -- same
+    // precedent B4.1 already established for pricing_official alone).
+    SearchResult result = official_v1;
+    bool result_official = true;
+    bool result_v2 = false;
+    if (paydownBetter(legacy_v1.best_routing, legacy_v1.best_score.value, result.best_routing,
                        result.best_score.value)) {
-        result = legacy_result;
-        official_won = false;
+        result = legacy_v1;
+        result_official = false;
+        result_v2 = false;
     }
-    result.pricing_official = official_won;
-    result.iterations = official_result.iterations + legacy_result.iterations;
-    result.exact_evaluations = official_result.exact_evaluations + legacy_result.exact_evaluations;
+    if (paydownBetter(official_v2.best_routing, official_v2.best_score.value, result.best_routing,
+                       result.best_score.value)) {
+        result = official_v2;
+        result_official = true;
+        result_v2 = true;
+    }
+    if (paydownBetter(legacy_v2.best_routing, legacy_v2.best_score.value, result.best_routing,
+                       result.best_score.value)) {
+        result = legacy_v2;
+        result_official = false;
+        result_v2 = true;
+    }
+    result.pricing_official = result_official;
+    result.elite_admission_v2 = result_v2;
+    result.iterations =
+        official_v1.iterations + legacy_v1.iterations + official_v2.iterations + legacy_v2.iterations;
+    result.exact_evaluations = official_v1.exact_evaluations + legacy_v1.exact_evaluations +
+                              official_v2.exact_evaluations + legacy_v2.exact_evaluations;
     return result;
 }
 

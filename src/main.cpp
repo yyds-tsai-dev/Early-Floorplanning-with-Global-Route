@@ -114,6 +114,11 @@ int main(int argc, char** argv) {
         // `result` is whichever leg runPricingPortfolio/runHybridPlacementSearch picked (see their
         // fold-site comments in search.cpp), so these describe the PICKED leg's rank fidelity only,
         // not a combination across legs.
+        // B5a (.superpowers/sdd/b5-design.md §2): pool_tau/exact_best_cheap_rank now report over the
+        // WIDENED K=48 cheap prefilter (search.cpp's top_candidates), a diagnostic on the cheap
+        // proxy's own rank fidelity -- not the (separate, tight-exact-reranked) set that actually
+        // received the expensive elite treatment. See SearchResult.elite_pairs's doc comment
+        // (search.hpp) for the full field-semantics note.
         double tau = kendallTauB(result.fidelity_pairs);
         double tau_w = windowedTauB(result.fidelity_pairs);
         double pool_tau = kendallTauB(result.elite_pairs);
@@ -125,6 +130,7 @@ int main(int argc, char** argv) {
         std::cerr << std::setprecision(12)
                   << "engine=" << result.engine_name
                   << " pricing=" << (result.pricing_official ? "official" : "legacy")
+                  << " admission=" << (result.elite_admission_v2 ? "v2" : "v1")
                   << " tau=" << tau
                   << " tau_w=" << tau_w
                   << " pool_tau=" << pool_tau
