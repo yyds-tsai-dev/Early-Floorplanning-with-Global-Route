@@ -1031,23 +1031,49 @@ std::vector<SearchVariant> defaultVariants() {
     };
 }
 
+// B2 (seed-sweep budget phase, .superpowers/sdd/b2-brief.md item 1): see the doc comment in
+// search.hpp. Equality runs the leg (only strictly-less remaining skips), matching the brief's own
+// "<" wording.
+bool shouldRunPhase2Leg(double remaining_sec, double leg_phase1_wall_time_sec) {
+    constexpr double kPhase2LegMargin = 1.5;  // b2-brief.md item 1
+    return remaining_sec >= kPhase2LegMargin * leg_phase1_wall_time_sec;
+}
+
+// B2 (seed-sweep budget phase + anytime output): see the doc comment in search.hpp.
+bool PortfolioFold::admit(const Problem& problem, const SearchResult& leg_result, const SearchVariant& variant,
+                          int leg_seed, const AnytimeWriteFn& on_improved) {
+    total_iterations += leg_result.iterations;
+    total_exact_evaluations += leg_result.exact_evaluations;
+    ++legs_run;
+    bool improved = !have_result || paydownBetter(leg_result.best_routing, leg_result.best_score.value,
+                                                   result.best_routing, result.best_score.value);
+    if (improved) {
+        result = leg_result;
+        winner = variant;
+        picked_seed = leg_seed;
+        have_result = true;
+        if (on_improved) on_improved(problem, result.best_placement, result.best_routing);
+    }
+    return improved;
+}
+
 // B4.1 (route-pricing portfolio, b4-report.md) + B5a.1 (elite-admission dimension, b5a-report.md)
 // + B5a.2 (variant registry + default-first budget mode, coordinator adjudication,
 // b5a-report.md "B5a.2 addendum") + B5b (abutment-credit variant, b5-design.md §3) + B5c
-// (move-portfolio variant, b5-design.md §4): see the doc comment in search.hpp for the full
-// contract. Summary:
-// budget-off runs `defaultVariants()` once (byte-identical to B5a.1/HEAD 70d8f38 for the first 4
-// legs -- md5-verified -- with 2 credit-on legs folded in by B5b and 2 moves-on legs folded in by
-// B5c);
-// budget-on runs the registry TWICE -- phase 1 at the full `options.iters`, budget forced off (i.e.
-// exactly the default run, wall-clock measured as `t0`), then phase 2 (skipped if the remaining
-// budget `options.time_budget_sec - t0` does not clear a small floor) re-runs the registry with
-// `time_budget_sec = remaining/registry.size()` per leg -- and folds EVERY executed leg from BOTH
-// phases by the same value-gated `paydownBetter`. Because phase 1's own legs are always in the
-// folded set, the result can never be worse than the plain default run: the budget gate closes
-// STRUCTURALLY (not by empirical tuning) -- any sweep cell should therefore satisfy
-// checker_cost(budget-N) <= checker_cost(budget-0) by construction, for every N.
-SearchResult runPricingPortfolio(const Problem& problem, const std::string& engine, const SearchOptions& options) {
+// (move-portfolio variant, b5-design.md §4) + B2 (seed-sweep phase 2 + anytime output,
+// .superpowers/sdd/b2-brief.md): see the doc comment in search.hpp for the full contract. Summary:
+// budget-off runs `defaultVariants()` once (byte-identical to pre-B2 HEAD -- md5-verified);
+// budget-on runs phase 1 (the full registry, budget forced off, timed per-leg AND in aggregate as
+// `t0`), then phase 2 -- now a SEED SWEEP (B2, replaces the pre-B2 continued-SA): repeated
+// full-registry rounds at seed options.seed+1000*round, each leg gated individually by
+// shouldRunPhase2Leg against ITS OWN phase-1 wall time, until a round completes zero legs. Every
+// leg from both phases is folded via PortfolioFold::admit (the same value-gated paydownBetter as
+// before, now also driving the optional anytime-write callback). Because phase 1's own legs are
+// always in the folded set, the result can never be worse than the plain default run: the budget
+// gate closes STRUCTURALLY (not by empirical tuning) -- any sweep cell should therefore satisfy
+// value(budget-N) <= value(budget-0) by construction, for every N.
+SearchResult runPricingPortfolio(const Problem& problem, const std::string& engine, const SearchOptions& options,
+                                 const AnytimeWriteFn& on_improved) {
     const std::vector<SearchVariant> variants = defaultVariants();
 
     // Same "sp"/"bstar"/"hybrid" dispatch main.cpp used to do inline before this function existed.
@@ -1068,80 +1094,74 @@ SearchResult runPricingPortfolio(const Problem& problem, const std::string& engi
         return runPlacementSearch(p, *eng, opts);
     };
 
-    // Phase 1 (B5a.2): the ENTIRE registry at options.iters, time budget forced OFF -- exactly the
-    // default (budget-off) run. This is the structural half of the budget-gate fix: phase 1's own
-    // legs are byte-identical to what a plain budget-off call computes (same seed/iters, same
-    // variant list, same fold below), so folding anything else in on top of them (phase 2) can only
-    // match or improve, never regress below the default. `t0` is phase 1's own measured wall-clock
-    // cost, the input to phase 2's "is there anything meaningful left" decision below.
+    PortfolioFold fold;
+
+    // Phase 1 (B5a.2; per-leg timing + streaming fold added by B2): the ENTIRE registry at
+    // options.iters, time budget forced OFF -- exactly the default (budget-off) run. This is the
+    // structural half of the budget-gate fix: phase 1's own legs are byte-identical to what a plain
+    // budget-off call computes (same seed/iters, same variant list; folding one leg at a time via
+    // PortfolioFold::admit below is provably the same fold a "collect all 8, then fold" pass would
+    // produce -- paydownBetter is a transitive total preorder, so streaming admission against the
+    // running best matches batch admission pairwise, term for term), so folding anything else in on
+    // top of them (phase 2) can only match or improve, never regress below the default. `t0` is
+    // phase 1's own aggregate measured wall-clock cost; `leg_wall_times[i]` (B2) is EACH leg's own
+    // share of it, the input to shouldRunPhase2Leg's per-leg skip decision below.
     SearchOptions phase1_options = options;
     phase1_options.time_budget_sec = 0.0;
     const auto phase1_start = std::chrono::steady_clock::now();
-    std::vector<SearchResult> phase1_results;
-    phase1_results.reserve(variants.size());
-    for (const auto& variant : variants) phase1_results.push_back(runLeg(variant, phase1_options));
+    std::vector<double> leg_wall_times(variants.size(), 0.0);
+    for (std::size_t i = 0; i < variants.size(); ++i) {
+        const auto leg_start = std::chrono::steady_clock::now();
+        SearchResult leg_result = runLeg(variants[i], phase1_options);
+        leg_wall_times[i] = std::chrono::duration<double>(std::chrono::steady_clock::now() - leg_start).count();
+        fold.admit(problem, leg_result, variants[i], options.seed, on_improved);
+    }
     const double t0 = std::chrono::duration<double>(std::chrono::steady_clock::now() - phase1_start).count();
 
-    // Phase 2 (budget mode only): spend any wall-clock remaining after phase 1's own cost
-    // continuing the SA search under a time budget (the pre-B5a.2 continued-SA behavior), re-running
-    // the SAME registry. Skipped -- degenerating to the phase-1/default result -- when the requested
-    // budget does not clear phase 1's own cost by more than `kPhase2Floor`: a budget smaller than
-    // the default run's own runtime cannot buy anything phase 1 didn't already compute, so there is
-    // nothing meaningful for phase 2 to do. This is an inherently wall-clock-dependent decision (t0
-    // varies run-to-run with system load, exactly like `--time-budget`'s existing iteration count
-    // always has) -- but the STRUCTURAL guarantee above does not depend on which way that decision
-    // falls: whether or not phase 2 fires, phase 1's own legs stay in the folded candidate set.
-    constexpr double kPhase2Floor = 2.0;  // seconds
+    // Phase 2 (B2 seed sweep, REPLACES B5a.2's continued-SA -- search.hpp's doc comment carries the
+    // full T5/Cicirello rationale): independent full-registry restarts at seed
+    // options.seed+1000*round, round=1,2,3,... -- each leg individually gated by shouldRunPhase2Leg
+    // against its OWN phase-1 wall time (not a per-round floor), so a round can run SOME legs and
+    // skip others. A round that could not start even one leg ends the sweep (remaining budget only
+    // shrinks further in later rounds, so no later round could do better either) -- this also
+    // proves the loop terminates without an artificial round cap, since every round that continues
+    // consumes strictly positive real wall-clock. The old `kPhase2Floor` global 2s check is gone,
+    // superseded by shouldRunPhase2Leg itself: when remaining can't clear even the cheapest leg,
+    // round 1 admits zero legs and the sweep ends immediately, the same net effect.
+    constexpr int kPhase2SeedStep = 1000;  // b2-brief.md item 1: far from hybrid's internal +1
     bool budget_phase2 = false;
-    std::vector<SearchResult> phase2_results;
     if (options.time_budget_sec > 0.0) {
-        const double remaining = options.time_budget_sec - t0;
-        if (remaining > kPhase2Floor) {
-            budget_phase2 = true;
-            SearchOptions phase2_options = options;
-            phase2_options.time_budget_sec = remaining / static_cast<double>(variants.size());
-            phase2_results.reserve(variants.size());
-            for (const auto& variant : variants) phase2_results.push_back(runLeg(variant, phase2_options));
-        }
-    }
-
-    // Fold every executed leg (phase 1 always, phase 2 if it ran) by the existing value-gated
-    // paydownBetter -- legality-first, then value; a transitive total preorder, so fold order never
-    // changes the winner. `pricing_official`/`elite_admission_v2` are stamped FRESH from the WINNING
-    // variant (never read from any leg's own copy of those result fields -- same precedent
-    // B4.1/B5a.1 established); `iterations`/`exact_evaluations` sum every leg actually run.
-    SearchResult result = phase1_results[0];
-    SearchVariant winner = variants[0];
-    int total_iterations = phase1_results[0].iterations;
-    int total_exact_evaluations = phase1_results[0].exact_evaluations;
-    for (std::size_t i = 1; i < variants.size(); ++i) {
-        total_iterations += phase1_results[i].iterations;
-        total_exact_evaluations += phase1_results[i].exact_evaluations;
-        if (paydownBetter(phase1_results[i].best_routing, phase1_results[i].best_score.value, result.best_routing,
-                           result.best_score.value)) {
-            result = phase1_results[i];
-            winner = variants[i];
-        }
-    }
-    if (budget_phase2) {
-        for (std::size_t i = 0; i < variants.size(); ++i) {
-            total_iterations += phase2_results[i].iterations;
-            total_exact_evaluations += phase2_results[i].exact_evaluations;
-            if (paydownBetter(phase2_results[i].best_routing, phase2_results[i].best_score.value, result.best_routing,
-                               result.best_score.value)) {
-                result = phase2_results[i];
-                winner = variants[i];
+        const auto phase2_start = std::chrono::steady_clock::now();
+        for (int round = 1;; ++round) {
+            const int seed_for_round = options.seed + kPhase2SeedStep * round;
+            bool any_leg_ran = false;
+            for (std::size_t i = 0; i < variants.size(); ++i) {
+                const double elapsed_phase2 =
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - phase2_start).count();
+                const double remaining = options.time_budget_sec - t0 - elapsed_phase2;
+                if (!shouldRunPhase2Leg(remaining, leg_wall_times[i])) continue;
+                SearchOptions leg_options = options;
+                leg_options.time_budget_sec = 0.0;  // independent restart: run to completion
+                leg_options.seed = seed_for_round;
+                SearchResult leg_result = runLeg(variants[i], leg_options);
+                any_leg_ran = true;
+                budget_phase2 = true;
+                fold.admit(problem, leg_result, variants[i], seed_for_round, on_improved);
             }
+            if (!any_leg_ran) break;
         }
     }
 
-    result.pricing_official = winner.pricing_official;
-    result.elite_admission_v2 = winner.elite_admission_v2;
-    result.abutment_credit = winner.abutment_credit;
-    result.move_portfolio_v2 = winner.move_portfolio_v2;
+    SearchResult result = fold.result;
+    result.pricing_official = fold.winner.pricing_official;
+    result.elite_admission_v2 = fold.winner.elite_admission_v2;
+    result.abutment_credit = fold.winner.abutment_credit;
+    result.move_portfolio_v2 = fold.winner.move_portfolio_v2;
     result.budget_phase2 = budget_phase2;
-    result.iterations = total_iterations;
-    result.exact_evaluations = total_exact_evaluations;
+    result.iterations = fold.total_iterations;
+    result.exact_evaluations = fold.total_exact_evaluations;
+    result.picked_seed = fold.picked_seed;
+    result.legs_run = fold.legs_run;
     return result;
 }
 

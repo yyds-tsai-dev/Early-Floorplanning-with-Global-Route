@@ -1,5 +1,6 @@
 #include "io.hpp"
 
+#include <cstdio>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
@@ -197,39 +198,52 @@ Problem parseProblem(const std::string& path) {
 
 void writeCfg(const std::string& path, const Problem& problem, const Placement& placement,
               const RoutingResult& routing) {
-    std::ofstream out(path);
-    if (!out) throw std::runtime_error("cannot open output cfg: " + path);
-    out << std::fixed << std::setprecision(3);
-    // Emit the placement's declared (shrink-wrapped) outline when stamped -- design
-    // p1-design.md §1.6 -- falling back to the MAX-clamped usedOutline bbox when unset (0),
-    // which reproduces today's behavior for placements that never shrink-wrapped.
-    double out_w = placement.outline_w;
-    double out_h = placement.outline_h;
-    if (out_w <= 0.0 || out_h <= 0.0) {
-        auto [used_w, used_h] = usedOutline(problem, placement, routing);
-        out_w = used_w;
-        out_h = used_h;
+    // B2 (anytime output, .superpowers/sdd/b2-brief.md item 2): write to a temp file next to `path`,
+    // then atomically rename over it -- a reader (or a kill mid-write) never observes a partially
+    // written cfg. std::rename is atomic when source and destination share a filesystem, true for
+    // every caller here (`path + ".tmp"` always sits next to `path`). This makes EVERY writeCfg call
+    // anytime-safe -- runPricingPortfolio's optional on_improved callback (search.hpp) may call this
+    // many times against the SAME output path over one run -- with no separate "unsafe" writer to
+    // keep in sync: main.cpp's own final write uses this exact same function.
+    const std::string tmp_path = path + ".tmp";
+    {
+        std::ofstream out(tmp_path);
+        if (!out) throw std::runtime_error("cannot open output cfg: " + tmp_path);
+        out << std::fixed << std::setprecision(3);
+        // Emit the placement's declared (shrink-wrapped) outline when stamped -- design
+        // p1-design.md §1.6 -- falling back to the MAX-clamped usedOutline bbox when unset (0),
+        // which reproduces today's behavior for placements that never shrink-wrapped.
+        double out_w = placement.outline_w;
+        double out_h = placement.outline_h;
+        if (out_w <= 0.0 || out_h <= 0.0) {
+            auto [used_w, used_h] = usedOutline(problem, placement, routing);
+            out_w = used_w;
+            out_h = used_h;
+        }
+        out << "OUTLINE " << out_w << " " << out_h << "\nEND\n";
+        out << "BLOCK\n";
+        for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
+            const auto& r = placement.rects[i];
+            out << problem.blocks[i].name << " " << r.x << " " << r.y << " " << r.w << " " << r.h << "\n";
+        }
+        out << "END\n";
+        out << "CHANNEL\n";
+        for (const auto& ch : routing.channels) {
+            out << ch.name << " " << ch.rect.x << " " << ch.rect.y << " " << ch.rect.w << " " << ch.rect.h << "\n";
+        }
+        out << "END\n";
+        out << "PATH\n";
+        for (const auto& route : routing.routes) {
+            if (route.open || route.steps.empty()) continue;
+            out << "PATH " << route.nets;
+            for (const auto& step : route.steps) out << " " << step.object << " " << step.edge;
+            out << "\n";
+        }
+        out << "END\n";
+    }  // `out` flushes and closes here (RAII scope exit) before the rename below.
+    if (std::rename(tmp_path.c_str(), path.c_str()) != 0) {
+        throw std::runtime_error("cannot atomically publish output cfg: " + tmp_path + " -> " + path);
     }
-    out << "OUTLINE " << out_w << " " << out_h << "\nEND\n";
-    out << "BLOCK\n";
-    for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
-        const auto& r = placement.rects[i];
-        out << problem.blocks[i].name << " " << r.x << " " << r.y << " " << r.w << " " << r.h << "\n";
-    }
-    out << "END\n";
-    out << "CHANNEL\n";
-    for (const auto& ch : routing.channels) {
-        out << ch.name << " " << ch.rect.x << " " << ch.rect.y << " " << ch.rect.w << " " << ch.rect.h << "\n";
-    }
-    out << "END\n";
-    out << "PATH\n";
-    for (const auto& route : routing.routes) {
-        if (route.open || route.steps.empty()) continue;
-        out << "PATH " << route.nets;
-        for (const auto& step : route.steps) out << " " << step.object << " " << step.edge;
-        out << "\n";
-    }
-    out << "END\n";
 }
 
 }  // namespace efgr

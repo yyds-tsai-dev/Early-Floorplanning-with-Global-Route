@@ -99,13 +99,19 @@ struct SearchResult {
     // from any individual leg's own copy of the field).
     bool elite_admission_v2 = false;
     // B5a.2 (variant-registry portfolio + default-first budget mode, coordinator adjudication after
-    // B5a.1's sweep report -- .superpowers/sdd/b5a-report.md "B5a.2 addendum"): true iff
-    // runPricingPortfolio's phase 2 (the continued-SA, time-budgeted re-run of the registry) actually
-    // executed for this result -- i.e. `options.time_budget_sec` exceeded phase 1's own measured
-    // wall-clock cost by more than the phase-2 floor. False whenever time_budget_sec is 0 (budget
-    // off) OR the requested budget could not clear phase 1 (the run degenerates to the default
-    // result). Telemetry only -- surfaced in main.cpp's stderr summary as `budget_phase2=yes|no`.
-    // Defaults false for any SearchResult not produced by runPricingPortfolio.
+    // B5a.1's sweep report -- .superpowers/sdd/b5a-report.md "B5a.2 addendum") + B2 (seed-sweep
+    // phase-2, .superpowers/sdd/b2-brief.md item 1, REPLACES B5a.2's original continued-SA phase 2):
+    // true iff runPricingPortfolio's phase 2 actually executed at least one leg for this result --
+    // i.e. remaining budget after phase 1 cleared the 1.5x-margin floor (PortfolioFold::admit /
+    // shouldRunPhase2Leg below) for at least the cheapest phase-1-measured leg. False whenever
+    // time_budget_sec is 0 (budget off) OR the requested budget could not clear even one leg's own
+    // floor (the run degenerates to the phase-1/default result). Phase 2 is now a SEED-SWEEP
+    // (independent restarts at options.seed+1000*round, run to full completion each) rather than
+    // the pre-B2 continued-SA (same seed, each leg's OWN SA loop truncated early by a shortened
+    // time_budget_sec) -- see runPricingPortfolio's own doc comment for the full B2 rationale
+    // (T5/Cicirello: independent restarts >= continued chains). Telemetry only -- surfaced in
+    // main.cpp's stderr summary as `budget_phase2=yes|no`. Defaults false for any SearchResult not
+    // produced by runPricingPortfolio.
     bool budget_phase2 = false;
     // B5b (abutment-credit registry variant, .superpowers/sdd/b5-design.md §3, coordinator
     // adjudication applying B5a's own flag-gated-variant lesson): true iff the WINNING leg of
@@ -155,6 +161,23 @@ struct SearchResult {
     // do not describe which candidates actually received the expensive sweep/compact/respace
     // treatment (see buildEliteFullSet's own doc comment for that set).
     std::vector<std::pair<double, double>> elite_pairs;
+    // B2 (seed-sweep budget phase, .superpowers/sdd/b2-brief.md item 5): the SearchOptions.seed
+    // value actually used by the leg that won runPricingPortfolio's fold -- `options.seed` itself
+    // for a phase-1 leg, or `options.seed + 1000*round` for a phase-2 seed-sweep leg (item 1,
+    // PortfolioFold::admit below). Telemetry only (never read by scoring/caching logic) --
+    // surfaced in main.cpp's stderr summary as `seed=<s>`, immediately after `budget_phase2=`.
+    // Defaults to 0 for any SearchResult not produced by runPricingPortfolio's own explicit
+    // fold-tracking -- same precedent pricing_official/budget_phase2/etc. above already
+    // established (a raw runPlacementSearch/runHybridPlacementSearch call never stamps this field).
+    int picked_seed = 0;
+    // B2 (seed-sweep budget phase, .superpowers/sdd/b2-brief.md item 5): total number of portfolio
+    // legs actually executed and folded -- `defaultVariants().size()` (8) for phase 1 alone (budget
+    // off, or budget on but phase 2 never clears even its cheapest leg's floor), plus however many
+    // additional seed-sweep legs phase 2 ran (item 1) when it does fire. Telemetry only --
+    // surfaced in main.cpp's stderr summary as `legs_run=<n>`, immediately after `seed=`. Defaults
+    // to 1 for any SearchResult not produced by runPricingPortfolio (a raw single-engine call is
+    // exactly one "leg" of search by this field's own definition).
+    int legs_run = 1;
 };
 
 // Exact-scoring callback shape used by the elite pass's exact_cache (search.cpp's `exactCached`
@@ -324,38 +347,107 @@ struct SearchVariant {
 // rewarded by the abutment credit ramp, design §3.3/§8 sequencing rationale -- B5b before B5c).
 std::vector<SearchVariant> defaultVariants();
 
+// B2 (seed-sweep budget phase + anytime output, .superpowers/sdd/b2-brief.md items 1-2): callback
+// invoked by PortfolioFold::admit below whenever a newly folded-in leg becomes the running
+// fold-best -- runPricingPortfolio's caller (main.cpp) passes one that writes the current best cfg
+// to the output path (atomic: temp+rename, io.cpp's writeCfg), so a killed/overrun run always
+// leaves a valid best-so-far cfg on disk (2023-D pattern, A42 aggregate-2h safety -- the contest's
+// "8 cases / 2h TOTAL" can kill a run regardless of whether that invocation's own --time-budget was
+// set). Default-constructed (empty/null `std::function`) means "no anytime writing"; every existing
+// direct caller of runPricingPortfolio that does not pass one sees no behavior change at all.
+using AnytimeWriteFn = std::function<void(const Problem&, const Placement&, const RoutingResult&)>;
+
+// B2: incremental value-gated fold over a stream of portfolio legs, extracted out of
+// runPricingPortfolio's body so the "write on improvement" logic is directly unit-testable
+// (test/regression_b2_20260725.cpp) without running a real 8-leg search -- same "hoist the
+// primitive" precedent as paydownBetter/outlineSweepBetter/rememberBounded/buildEliteFullSet above.
+// `admit` folds ONE leg's result in via the SAME value-gated `paydownBetter` runPricingPortfolio
+// used pre-B2 (legality-first, then value; a transitive total preorder, so streaming admission one
+// leg at a time yields the identical winner a "fold the whole vector at once" pass would), updates
+// the running iteration/exact-eval totals and `legs_run`, and returns true iff this leg became the
+// new running best -- in which case, when `on_improved` is non-null, it is invoked with the new
+// best (problem, placement, routing) BEFORE returning. The very first `admit` call always returns
+// true (empty fold has no incumbent to lose to), so the first leg of phase 1 always triggers the
+// first anytime write -- exactly the brief's "first write after the first leg result, no separate
+// pre-phase-1 write" rule, with no special-casing needed.
+struct PortfolioFold {
+    SearchResult result;
+    SearchVariant winner{};
+    int picked_seed = 0;
+    int legs_run = 0;
+    int total_iterations = 0;
+    int total_exact_evaluations = 0;
+    bool have_result = false;
+
+    bool admit(const Problem& problem, const SearchResult& leg_result, const SearchVariant& variant, int leg_seed,
+               const AnytimeWriteFn& on_improved);
+};
+
+// B2 (seed-sweep budget phase, .superpowers/sdd/b2-brief.md item 1): true iff a phase-2 seed-sweep
+// leg whose PHASE-1 measurement (same variant, options.seed) took `leg_phase1_wall_time_sec` should
+// run, given `remaining_sec` wall-clock seconds left in the overall budget. The brief's own rule:
+// skip when `remaining < 1.5 * leg_phase1_wall_time_sec` -- a fresh seed's actual runtime is not
+// identical to phase 1's measurement of the SAME leg (different SA trajectory -> different elite-
+// pool/sweep/respace costs), so the 1.5x margin is safety headroom against that variance, not a
+// tight bound. Hoisted as a free, pure function (not inlined into runPricingPortfolio's loop) so
+// the skip arithmetic itself is directly unit-testable. Equality (`remaining == 1.5*leg_time`)
+// runs the leg (only strictly-less skips), matching the brief's own "<" wording.
+bool shouldRunPhase2Leg(double remaining_sec, double leg_phase1_wall_time_sec);
+
 // B4.1 (route-pricing portfolio, b4-report.md) + B5a.1 (elite-admission dimension,
 // b5a-report.md) + B5a.2 (variant registry + default-first budget mode, b5a-report.md "B5a.2
 // addendum") + B5b (abutment-credit registry variant, b5-design.md §3) + B5c (move-portfolio
-// registry variant, b5-design.md §4): runs the FULL requested engine search ("sp", "bstar", or
+// registry variant, b5-design.md §4) + B2 (seed-sweep phase 2 + anytime output,
+// .superpowers/sdd/b2-brief.md): runs the FULL requested engine search ("sp", "bstar", or
 // "hybrid" -- same dispatch main.cpp used to do inline) over `defaultVariants()` (currently 8 legs --
 // see defaultVariants()'s own doc comment for the exact leg list/order), folding every executed leg
 // with the existing value-gated `paydownBetter` (legality-first, then value; a transitive total
-// preorder, so fold order never changes the winner).
+// preorder, so fold order never changes the winner) via PortfolioFold::admit above, which also
+// drives the optional `on_improved` anytime-write callback (B2 item 2).
 //
 // BUDGET-OFF (`options.time_budget_sec == 0`): runs the registry ONCE at `options.iters`,
-// time-budget off -- byte-identical to B5a.1/HEAD 70d8f38 (verified: md5-identical .cfg on all 5
-// default cases).
+// time-budget off -- byte-identical to pre-B2 HEAD (hard gate, re-verified: md5-identical .cfg on
+// all 5 default cases -- B2 only ADDS the optional anytime-write side effect and per-leg timing
+// instrumentation around the SAME phase-1 loop, changing no comparison/selection logic).
 //
-// BUDGET-ON (`options.time_budget_sec > 0`) is now DEFAULT-FIRST, closing the budget gate
-// STRUCTURALLY rather than empirically: **phase 1** runs the ENTIRE registry at `options.iters`
-// with the time budget forced OFF -- i.e. phase 1 IS the default run, byte-identical to what
-// budget-off computes, and its own wall-clock cost is measured as `t0`. **Phase 2** (continued-SA,
-// today's pre-B5a.2 budgeted behavior) re-runs the ENTIRE registry with
-// `time_budget_sec = (options.time_budget_sec - t0) / defaultVariants().size()` per leg, but ONLY
-// if that remaining budget clears a small floor (2s) -- otherwise phase 2 is skipped entirely and
-// the result degenerates to phase 1 alone (a requested budget smaller than the default run's own
-// cost cannot buy anything phase 1 didn't already compute). Every leg from BOTH phases that ran is
-// folded together by the same `paydownBetter` -- since phase 1's own legs are ALWAYS in the folded
-// set, the portfolio's result can never be worse than the plain default run, regardless of whether
-// phase 2 fires or what it finds: budget's contract is now "never worse than default, spend any
-// surplus wall-clock exploring further." `SearchResult.budget_phase2` reports whether phase 2 ran.
+// BUDGET-ON (`options.time_budget_sec > 0`) stays DEFAULT-FIRST (B5a.2's structural gate closure,
+// unchanged): **phase 1** runs the ENTIRE registry at `options.iters` with the time budget forced
+// OFF -- i.e. phase 1 IS the default run, byte-identical to what budget-off computes -- timing EACH
+// leg individually this time (`leg_wall_times`, B2) as well as the aggregate `t0`.
+//
+// **Phase 2 (B2, REPLACES B5a.2's continued-SA)** is now a SEED SWEEP: for round = 1, 2, 3, ...,
+// try the FULL registry again at seed `options.seed + 1000*round` (far from the `+1` offset
+// runHybridPlacementSearch already uses internally for its bstar leg, so a phase-2 seed can never
+// collide with that) -- but BEFORE EACH LEG (not once per round), check `shouldRunPhase2Leg` against
+// that leg's OWN phase-1-measured wall time; a leg that fails the check is skipped (not the whole
+// round). A round in which not even ONE leg could run ends the sweep -- remaining budget only
+// shrinks in later rounds, so no later round could do better either, which also proves the loop
+// terminates without an artificial round cap. Every phase-2 leg that DOES run goes to full
+// completion (`time_budget_sec` forced 0 for that call) -- a genuine independent restart, not a
+// truncated continuation. Rationale for the replacement (motivating evidence in b2-brief.md): T5's
+// seed-variance probe (beta-task-5-report.md) measured bstar up to 5.8x across seeds with all prior
+// legs pinned to seed 1; Cicirello (SoCS 2017 / arXiv:1709.02877, docs/research/2026-07-07-external-
+// techniques-survey.md) found periodic best-solution sharing across parallel SA chains has no
+// statistically significant benefit over fully INDEPENDENT chains on a comparably-sized benchmark --
+// together arguing that spending extra wall-clock on a fresh seed (which can land in a genuinely
+// different basin) beats continuing one chain past its own natural stopping point (which only
+// explores further around a trajectory already sampled). The B5a.2 measurement that motivated the
+// original continued-SA (hybrid@45 Sigma -1.4%) is not disputed -- seed diversity is simply the
+// better spend of the SAME wall-clock, not a claim that continued-SA found nothing.
+//
+// Every leg from BOTH phases that ran is folded by the same `paydownBetter` (via PortfolioFold) --
+// since phase 1's own legs are ALWAYS in the folded set, the portfolio's result can never be worse
+// than the plain default run, regardless of whether phase 2 fires or what it finds: budget's
+// contract stays "never worse than default, spend any surplus wall-clock exploring further."
+// `SearchResult.budget_phase2` reports whether phase 2 ran at least one leg; `SearchResult.
+// legs_run`/`picked_seed` (B2 item 5) report the total leg count and the winning leg's own seed.
 //
 // `pricing_official`/`elite_admission_v2`/`abutment_credit`/`move_portfolio_v2` on the returned
 // result are stamped FRESH from the WINNING variant (never read from any leg's own copy of those
 // fields -- same precedent B4.1/B5a.1 established). Existing direct callers of runPlacementSearch/
 // runHybridPlacementSearch keep single-leg semantics unchanged (elite_admission_v2/move_portfolio_v2
 // default false on SearchOptions; abutment_credit defaults false on Problem).
-SearchResult runPricingPortfolio(const Problem& problem, const std::string& engine, const SearchOptions& options);
+SearchResult runPricingPortfolio(const Problem& problem, const std::string& engine, const SearchOptions& options,
+                                 const AnytimeWriteFn& on_improved = AnytimeWriteFn());
 
 }  // namespace efgr

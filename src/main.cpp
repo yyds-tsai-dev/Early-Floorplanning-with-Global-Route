@@ -103,7 +103,16 @@ int main(int argc, char** argv) {
         // per-case <=-pre-B4 Pareto floor. Subsumes the old inline hybrid-vs-single-engine dispatch
         // (runPricingPortfolio does the same "hybrid" vs makePlacementEngine(engine_name) split
         // internally, once per pricing leg).
-        SearchResult result = runPricingPortfolio(problem, engine_name, options);
+        // B2 (anytime output, .superpowers/sdd/b2-brief.md item 2): write the current best cfg to
+        // `output_path` after EVERY leg (both phases) that improves runPricingPortfolio's running
+        // fold-best, atomically (io.cpp's writeCfg, temp+rename) -- a killed/overrun run always
+        // leaves a valid best-so-far cfg on disk. The unconditional writeCfg call below (after
+        // runPricingPortfolio returns) always re-publishes the exact same bytes the LAST anytime
+        // write already produced, so a normal-exit run's final on-disk file is unaffected by this
+        // callback's existence.
+        SearchResult result = runPricingPortfolio(
+            problem, engine_name, options,
+            [&](const Problem& p, const Placement& pl, const RoutingResult& rr) { writeCfg(output_path, p, pl, rr); });
 
         auto validation = validateSolution(problem, result.best_placement, result.best_routing);
         writeCfg(output_path, problem, result.best_placement, result.best_routing);
@@ -134,6 +143,8 @@ int main(int argc, char** argv) {
                   << " credit=" << (result.abutment_credit ? "on" : "off")
                   << " moves=" << (result.move_portfolio_v2 ? "v2" : "v1")
                   << " budget_phase2=" << (result.budget_phase2 ? "yes" : "no")
+                  << " seed=" << result.picked_seed
+                  << " legs_run=" << result.legs_run
                   << " tau=" << tau
                   << " tau_w=" << tau_w
                   << " pool_tau=" << pool_tau

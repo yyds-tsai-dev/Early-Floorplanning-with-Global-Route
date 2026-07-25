@@ -13,6 +13,7 @@ test/b4_regression_bin
 test/b6_regression_bin
 test/b5_regression_bin
 test/b7_regression_bin
+test/b2_regression_bin
 
 # Object files
 *.o
