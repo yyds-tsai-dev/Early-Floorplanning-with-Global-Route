@@ -86,6 +86,24 @@ struct Problem {
     // pre-B5b arithmetic BYTE-IDENTICALLY -- the credit multiplier is gated by an `if`, never merely
     // multiplied by 1.0.
     bool abutment_credit = false;
+    // F-FT (docs/research/2026-07-28-alpha-v5-cost-recalculation-analysis.md §6, Codex finding #1):
+    // solver-internal knob selecting which FT-hop pricing routing.cpp's cost_driven=true OFFICIAL
+    // branch uses -- false (default) is the CONSERVATIVE per-block ftMismatchDelta pricing
+    // (route_cost.hpp), byte-identical to pre-F-FT history; true switches to the EXACT marginal of the
+    // official V5 AGGREGATE FT penalty (kBetaFt*max(0, ft_area_sum-OutlineArea), route_cost.hpp's
+    // roundCostOfficial) via ftRequiredDelta, so an FT hop that keeps the aggregate under the outline
+    // area prices as free instead of being avoided at the (officially inflated) per-block mismatch
+    // rate. This is Codex's adversarial-review finding #1 on the V5 port: the router priced FT hops
+    // conservatively (per-block) while the scorer it targets charges by aggregate slack, so officially
+    // -free FT shortcuts were avoided. NEVER parsed from the input CSV (io.cpp does not touch this
+    // field; every parsed Problem keeps the default false) -- exists purely so search.cpp's
+    // runPricingPortfolio can run this as its own registry-variant dimension (SearchVariant.
+    // ft_pricing_aggressive) and fold the results, the same flag-gated-variant pattern B5b/B5c
+    // established: false reproduces today's per-block pricing BYTE-IDENTICALLY. Conservative pricing
+    // is retained as the FLOOR across every other leg per the Q4' outline_after_ft ambiguity
+    // (qa-draft Q4') -- the aggregate's exact semantics (Sum base+delta vs Sum delta,
+    // outline_after_ft) are not fully pinned, so a leg that never turns this on stays the safety net.
+    bool ft_pricing_aggressive = false;
 };
 
 struct Placement {

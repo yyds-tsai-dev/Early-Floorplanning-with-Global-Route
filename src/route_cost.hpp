@@ -141,6 +141,27 @@ inline double ftMismatchDelta(const Block& b, double acc, double n, double place
     return mismatch_after - mismatch_before;
 }
 
+// F-FT (docs/research/2026-07-28-alpha-v5-cost-recalculation-analysis.md §6, Codex finding #1): the
+// V5 aggregate's EXACT per-block delta -- required(acc+n) - required(acc), using the same
+// base/ftRequiredArea/ftExtend/ftTierRate calls as ftMismatchDelta above but WITHOUT that function's
+// placed-area clamp: the aggregate FT term (RoutingResult.ft_area_sum, route_cost.hpp's
+// roundCostOfficial / model.hpp's ft_area_sum doc comment) sums REQUIRED areas directly, never
+// placed-vs-required mismatch. Used by routing.cpp's running rr.ft_area_sum accrual (commitRoutePath)
+// and by the ft_pricing_aggressive Dijkstra edge pricing (routing.cpp) to price an FT hop at the exact
+// marginal of the official aggregate penalty instead of the per-block mismatch delta.
+inline double ftRequiredDelta(const Block& b, double acc, double n) {
+    double base = b.ft_base_area > 0.0 ? b.ft_base_area : b.area;
+    double required_before = ftRequiredArea(base, ftExtend(acc, ftTierRate(b, acc)));
+    double required_after = ftRequiredArea(base, ftExtend(acc + n, ftTierRate(b, acc + n)));
+    return required_after - required_before;
+}
+
+// F-FT: per-net epsilon added to an aggressive-mode FT hop's price so an officially-free FT hop (zero
+// marginal aggregate cost) still LOSES ties against a channel route of equal wirelength -- 0.001/net
+// is ~2 orders of magnitude below the smallest real WL delta (alpha*1um*nets at alpha>=0.1), and far
+// above double-precision noise, so it breaks exact ties without perturbing any genuine cost ranking.
+constexpr double kFtAggressiveTieBreak = 0.001;
+
 // Marginal FT penalty (um^2 * weight) -- thin kFtMismatchWeight wrapper over ftMismatchDelta above.
 // B4 (b4-design.md §7.4): no longer called by the router (routing.cpp now weights ftMismatchDelta
 // by the official kBetaFt directly). Kept for its T1 tests.

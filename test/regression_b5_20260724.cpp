@@ -436,7 +436,8 @@ void testAbutmentCreditFlagOffByteIdenticalOnNontrivialFixture() {
 // the budget-mode phase split both depend on iterating this registry, not a hardcoded leg count.
 void testDefaultVariantsRegistryHasEightLegsInOrder() {
     std::vector<SearchVariant> variants = defaultVariants();
-    assert(variants.size() == 8);
+    // F-FT (2026-07-28) appended 2 ft_pricing_aggressive legs: 8 -> 10 (same bump as B5b/B5c).
+    assert(variants.size() == 10);
     assert(variants[0].pricing_official == true && variants[0].elite_admission_v2 == false &&
           variants[0].abutment_credit == false && variants[0].move_portfolio_v2 == false);
     assert(variants[1].pricing_official == false && variants[1].elite_admission_v2 == false &&

@@ -171,7 +171,7 @@ struct SearchResult {
     // established (a raw runPlacementSearch/runHybridPlacementSearch call never stamps this field).
     int picked_seed = 0;
     // B2 (seed-sweep budget phase, .superpowers/sdd/b2-brief.md item 5): total number of portfolio
-    // legs actually executed and folded -- `defaultVariants().size()` (8) for phase 1 alone (budget
+    // legs actually executed and folded -- `defaultVariants().size()` (10) for phase 1 alone (budget
     // off, or budget on but phase 2 never clears even its cheapest leg's floor), plus however many
     // additional seed-sweep legs phase 2 ran (item 1) when it does fire. Telemetry only --
     // surfaced in main.cpp's stderr summary as `legs_run=<n>`, immediately after `seed=`. Defaults
@@ -330,21 +330,37 @@ struct SearchVariant {
     // (defaultVariants()) keep this false -- bit-exact with pre-B5c history; the new moves are
     // exercised only by the 2 legs B5c appends.
     bool move_portfolio_v2;
+    // F-FT (docs/research/2026-07-28-alpha-v5-cost-recalculation-analysis.md §6, Codex finding #1,
+    // same flag-gated-variant lesson B5b/B5c applied): whether this leg's Problem copy carries
+    // ft_pricing_aggressive=true (model.hpp) -- i.e. whether routing.cpp's official-pricing branch
+    // prices FT hops at the exact marginal of the V5 AGGREGATE penalty instead of the per-block
+    // mismatch delta. The pre-existing 8 legs (defaultVariants()) keep this false -- bit-exact with
+    // pre-rung history; only exercised by the 2 legs this rung appends. Conservative (false) pricing
+    // is retained as the floor per the Q4' outline_after_ft ambiguity (qa-draft Q4') -- the
+    // aggregate's exact semantics are not fully pinned, so a leg that never turns this on stays
+    // available as the safety net.
+    bool ft_pricing_aggressive;
 };
 
-// The CURRENT portfolio's 8 legs, in the CURRENT leg order (B5a.1/B5a.2: (official,v1,credit-off),
+// The CURRENT portfolio's 10 legs, in the CURRENT leg order (B5a.1/B5a.2: (official,v1,credit-off),
 // (legacy,v1,credit-off) -- the floor pair -- then (official,v2,credit-off), (legacy,v2,credit-off);
 // B5b appends (official,v2,credit-on), (official,v1,credit-on); B5c appends
-// (official,v2,credit-on,moves-on), (official,v1,credit-on,moves-on)). Extracted from
-// runPricingPortfolio's former hardcoded 4-variable body so both the default (budget-off) and
+// (official,v2,credit-on,moves-on), (official,v1,credit-on,moves-on); F-FT (docs/research/2026-07-28-
+// alpha-v5-cost-recalculation-analysis.md §6, Codex finding #1) appends
+// (official,v2,credit-on,moves-on,ftagg-on), (official,v1,credit-on,moves-on,ftagg-on)). Extracted
+// from runPricingPortfolio's former hardcoded 4-variable body so both the default (budget-off) and
 // phase-1/phase-2 (budget-on) paths below iterate the SAME registry -- adding a variant later means
-// editing this one function, not every call site that used to enumerate legs by hand. B5b's 2 legs
-// and B5c's 2 legs are all OFFICIAL pricing only -- neither the credit nor the move portfolio is a
-// pricing change, so crossing either with the legacy-pricing leg too would double the registry again
-// for no evidenced benefit; the existing (official,*)/(legacy,*) floor legs already hold the
-// per-case Pareto floor every later dimension is folded against. B5c's 2 new legs mirror B5b's own
-// admission split (v2-admission first, then v1-admission), both credit-on (moves are designed to be
-// rewarded by the abutment credit ramp, design §3.3/§8 sequencing rationale -- B5b before B5c).
+// editing this one function, not every call site that used to enumerate legs by hand. B5b's 2 legs,
+// B5c's 2 legs, and F-FT's 2 legs are all OFFICIAL pricing only -- neither the credit, the move
+// portfolio, nor the FT pricing mode is a router-selection change, so crossing any of them with the
+// legacy-pricing leg too would double the registry again for no evidenced benefit; the existing
+// (official,*)/(legacy,*) floor legs already hold the per-case Pareto floor every later dimension is
+// folded against. B5c's 2 legs mirror B5b's own admission split (v2-admission first, then
+// v1-admission), both credit-on (moves are designed to be rewarded by the abutment credit ramp,
+// design §3.3/§8 sequencing rationale -- B5b before B5c). F-FT's 2 legs keep that SAME
+// admission-v2-then-v1 order and stack on top of B5c's moves-on legs -- conservative (ftagg-off)
+// pricing is retained as the floor across every other leg per the Q4' outline_after_ft ambiguity
+// (qa-draft Q4').
 std::vector<SearchVariant> defaultVariants();
 
 // B2 (seed-sweep budget phase + anytime output, .superpowers/sdd/b2-brief.md items 1-2): callback
@@ -399,7 +415,7 @@ bool shouldRunPhase2Leg(double remaining_sec, double leg_phase1_wall_time_sec);
 // addendum") + B5b (abutment-credit registry variant, b5-design.md §3) + B5c (move-portfolio
 // registry variant, b5-design.md §4) + B2 (seed-sweep phase 2 + anytime output,
 // .superpowers/sdd/b2-brief.md): runs the FULL requested engine search ("sp", "bstar", or
-// "hybrid" -- same dispatch main.cpp used to do inline) over `defaultVariants()` (currently 8 legs --
+// "hybrid" -- same dispatch main.cpp used to do inline) over `defaultVariants()` (currently 10 legs --
 // see defaultVariants()'s own doc comment for the exact leg list/order), folding every executed leg
 // with the existing value-gated `paydownBetter` (legality-first, then value; a transitive total
 // preorder, so fold order never changes the winner) via PortfolioFold::admit above, which also

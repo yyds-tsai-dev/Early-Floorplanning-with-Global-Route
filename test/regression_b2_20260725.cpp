@@ -190,7 +190,8 @@ void testAdmitWritesViaRealWriteCfgPath() {
 
 void testDefaultVariantsFloorLegsUnchanged() {
     std::vector<SearchVariant> variants = defaultVariants();
-    assert(variants.size() == 8);
+    // F-FT (2026-07-28) appended 2 ft_pricing_aggressive legs: 8 -> 10 (same bump as B5b/B5c).
+    assert(variants.size() == 10);
     // The two "floor" legs the b2-brief.md pruning policy names as never-droppable: v1-admission
     // crossed with {official,legacy} pricing, both credit-off/moves-off -- indices 0 and 1.
     assert(variants[0].pricing_official && !variants[0].elite_admission_v2 && !variants[0].abutment_credit &&
@@ -206,7 +207,8 @@ void testBudgetOffIsPhase1Only() {
     Problem problem = parseProblem("test/2026 ICCAD_case.case0.csv");
     SearchOptions options;  // defaults: iters=1000, seed=1, budget off
     SearchResult result = runPricingPortfolio(problem, "hybrid", options);
-    assert(result.legs_run == 8);
+    // F-FT (2026-07-28): registry is 10 legs now (2 ft_pricing_aggressive legs appended).
+    assert(result.legs_run == 10);
     assert(!result.budget_phase2);
     assert(result.picked_seed == 1);
     std::cout << "testBudgetOffIsPhase1Only ok (value=" << result.best_score.value << ")\n";

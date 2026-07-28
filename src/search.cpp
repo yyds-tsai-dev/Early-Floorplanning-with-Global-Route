@@ -1004,30 +1004,38 @@ SearchResult runHybridPlacementSearch(const Problem& problem, const SearchOption
 // B5a.2 (variant registry, coordinator adjudication after B5a.1's sweep report,
 // .superpowers/sdd/b5a-report.md "B5a.2 addendum") + B5b (abutment-credit variant,
 // .superpowers/sdd/b5-design.md §3) + B5c (move-portfolio variant, b5-design.md §4, same coordinator
-// flag-gated-variant lesson): the current 8-leg portfolio, in the current leg order --
-// (official,v1), (legacy,v1) [the floor pair], (official,v2), (legacy,v2) [B5a.1's original 4,
-// unchanged, all credit-off/moves-off], then (official,v2,credit-on), (official,v1,credit-on)
-// [B5b's 2 legs, moves-off], then (official,v2,credit-on,moves-on), (official,v1,credit-on,moves-on)
-// [B5c's 2 new legs]. Extracted from runPricingPortfolio's former hardcoded 4-variable body (B5a.1)
-// so a future dimension is one more field on `SearchVariant` and one more entry (or a small
-// cross-product loop) here, not a new hardcoded leg at every call site. B5b's and B5c's new legs are
-// all official-pricing only -- see this function's own doc comment in search.hpp for why neither
+// flag-gated-variant lesson) + F-FT (ft-pricing-aggressive variant, docs/research/2026-07-28-alpha-
+// v5-cost-recalculation-analysis.md §6, Codex finding #1, same lesson again): the current 10-leg
+// portfolio, in the current leg order -- (official,v1), (legacy,v1) [the floor pair], (official,v2),
+// (legacy,v2) [B5a.1's original 4, unchanged, all credit-off/moves-off/ftagg-off], then
+// (official,v2,credit-on), (official,v1,credit-on) [B5b's 2 legs, moves-off/ftagg-off], then
+// (official,v2,credit-on,moves-on), (official,v1,credit-on,moves-on) [B5c's 2 legs, ftagg-off], then
+// (official,v2,credit-on,moves-on,ftagg-on), (official,v1,credit-on,moves-on,ftagg-on) [F-FT's 2 new
+// legs]. Extracted from runPricingPortfolio's former hardcoded 4-variable body (B5a.1) so a future
+// dimension is one more field on `SearchVariant` and one more entry (or a small cross-product loop)
+// here, not a new hardcoded leg at every call site. B5b's, B5c's, and F-FT's new legs are all
+// official-pricing only -- see this function's own doc comment in search.hpp for why neither
 // dimension is also crossed with the legacy-pricing leg.
 std::vector<SearchVariant> defaultVariants() {
     return {
-        SearchVariant{true, false, false, false},
-        SearchVariant{false, false, false, false},
-        SearchVariant{true, true, false, false},
-        SearchVariant{false, true, false, false},
+        SearchVariant{true, false, false, false, false},
+        SearchVariant{false, false, false, false, false},
+        SearchVariant{true, true, false, false, false},
+        SearchVariant{false, true, false, false, false},
         // B5b: 2 legs, both official pricing, credit-on, moves-off -- admission-v2 first, then
         // admission-v1, per the coordinator's specified order.
-        SearchVariant{true, true, true, false},
-        SearchVariant{true, false, true, false},
+        SearchVariant{true, true, true, false, false},
+        SearchVariant{true, false, true, false, false},
         // B5c: 2 new legs, official pricing, credit-on, moves-on -- same admission-v2-then-v1 order
         // B5b established (task brief: "(official, v2-admission, credit-on, moves-on) and
         // (official, v1-admission, credit-on, moves-on)").
-        SearchVariant{true, true, true, true},
-        SearchVariant{true, false, true, true},
+        SearchVariant{true, true, true, true, false},
+        SearchVariant{true, false, true, true, false},
+        // F-FT (docs/research/2026-07-28-alpha-v5-cost-recalculation-analysis.md §6, Codex finding
+        // #1): 2 new legs, official pricing, credit-on, moves-on, ftagg-on -- same admission-v2-then-
+        // v1 order B5b/B5c established, stacked on top of B5c's moves-on legs.
+        SearchVariant{true, true, true, true, true},
+        SearchVariant{true, false, true, true, true},
     };
 }
 
@@ -1086,6 +1094,7 @@ SearchResult runPricingPortfolio(const Problem& problem, const std::string& engi
         Problem p = problem;
         p.route_pricing_official = variant.pricing_official;
         p.abutment_credit = variant.abutment_credit;
+        p.ft_pricing_aggressive = variant.ft_pricing_aggressive;
         SearchOptions opts = leg_options;
         opts.elite_admission_v2 = variant.elite_admission_v2;
         opts.move_portfolio_v2 = variant.move_portfolio_v2;

@@ -127,6 +127,25 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
     // `p_ovf` is P_ovf = kBetaLin*A/C, the exact derivative of the scorer's linear overflow-rate term
     // d(20*A*R)/d(overflow_nets) -- a single scorer-derived rate, not a per-channel area proxy.
     const double outline_area = problem.outline_w * problem.outline_h;
+    // F-FT (docs/research/2026-07-28-alpha-v5-cost-recalculation-analysis.md §6, Codex finding #1):
+    // base FT-converted area (zero crossing nets) summed over EVERY block -- the same per-block value
+    // computeOverflowAndMismatch's own base-area logic (below) degenerates to at nets==0 (soft: base
+    // via ft_base_area/area fallback; everything else: area). Computed once per routeProblem call
+    // (fixed for the whole call, like outline_area/p_ovf below) so `result` and each round's
+    // `round_result` can seed rr.ft_area_sum to this floor at construction; commitRoutePath (below)
+    // then accrues the exact per-hop ftRequiredDelta on top as FT hops commit, giving the
+    // ft_pricing_aggressive Dijkstra pricing (below) a RUNNING rr.ft_area_sum to read mid-route that
+    // matches the official V5 aggregate (route_cost.hpp's roundCostOfficial) without waiting for
+    // computeOverflowAndMismatch's end-of-call recomputation (which reproduces the same total exactly
+    // -- see its own comment below).
+    const double base_ft_area_sum = [&] {
+        double sum = 0.0;
+        for (const auto& block : problem.blocks) {
+            sum += isSoft(block.type) ? (block.ft_base_area > 0.0 ? block.ft_base_area : block.area) : block.area;
+        }
+        return sum;
+    }();
+    result.ft_area_sum = base_ft_area_sum;
     double raw_capacity_total = 0.0;
     for (const auto& ch : result.channels) raw_capacity_total += 25.0 * ch.rect.h + 25.0 * ch.rect.w;
     const double p_ovf = (raw_capacity_total > 0.0) ? kBetaLin * outline_area / raw_capacity_total : 0.0;
@@ -236,15 +255,37 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
                             // and fold the results, restoring the per-case Pareto floor a changed
                             // search trajectory can otherwise miss.
                             if (problem.route_pricing_official) {
-                                // P2 Task 4 (design §4.2): congested-history surcharge, added on top of
-                                // the marginal FT cost above. Zero at round 0 (history_ft is all-zero
-                                // until the FIRST post-round bump), so this is a strict no-op until a
-                                // later round's history has accumulated. B4 (design §7.3): re-scaled
-                                // from kFtMismatchWeight (1e6) to kBetaFt so the surcharge stays the
-                                // same order as the re-denominated base cost (was ~5000x too large
-                                // otherwise).
-                                cost += kBetaFt * ftMismatchDelta(problem.blocks[v], acc, nets, placed_area);
-                                cost += kBetaFt * history_ft[v] * nets;
+                                if (problem.ft_pricing_aggressive) {
+                                    // F-FT (docs/research/2026-07-28-alpha-v5-cost-recalculation-
+                                    // analysis.md §6, Codex finding #1): price this FT hop at the
+                                    // EXACT marginal of the official V5 AGGREGATE FT penalty
+                                    // (route_cost.hpp's roundCostOfficial) -- kBetaFt*max(0,
+                                    // ft_area_sum-OutlineArea) -- instead of the per-block
+                                    // mismatch-vs-placed-area delta in the else branch below. Free
+                                    // (0 marginal cost) while rr.ft_area_sum + dreq stays under
+                                    // outline_area, i.e. while the aggregate has slack; the tie-break
+                                    // epsilon (kFtAggressiveTieBreak) keeps an officially-free hop from
+                                    // beating an equal-WL channel route on an exact tie (see its own
+                                    // doc comment, route_cost.hpp). The Q4' outline_after_ft ambiguity
+                                    // (qa-draft) is why this is opt-in (defaults false) rather than
+                                    // replacing the conservative branch outright -- the conservative
+                                    // per-block pricing is retained as the floor leg.
+                                    double dreq = ftRequiredDelta(problem.blocks[v], acc, nets);
+                                    cost += kBetaFt * (std::max(0.0, rr.ft_area_sum + dreq - outline_area) -
+                                                       std::max(0.0, rr.ft_area_sum - outline_area));
+                                    cost += kFtAggressiveTieBreak * nets;
+                                    cost += kBetaFt * history_ft[v] * nets;
+                                } else {
+                                    // P2 Task 4 (design §4.2): congested-history surcharge, added on top of
+                                    // the marginal FT cost above. Zero at round 0 (history_ft is all-zero
+                                    // until the FIRST post-round bump), so this is a strict no-op until a
+                                    // later round's history has accumulated. B4 (design §7.3): re-scaled
+                                    // from kFtMismatchWeight (1e6) to kBetaFt so the surcharge stays the
+                                    // same order as the re-denominated base cost (was ~5000x too large
+                                    // otherwise).
+                                    cost += kBetaFt * ftMismatchDelta(problem.blocks[v], acc, nets, placed_area);
+                                    cost += kBetaFt * history_ft[v] * nets;
+                                }
                             } else {
                                 cost += softFtMarginalCost(problem.blocks[v], acc, nets, placed_area);
                                 cost += kFtMismatchWeight * history_ft[v] * nets;
@@ -381,6 +422,12 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
         for (std::size_t i = 1; i + 1 < route.node_path.size(); ++i) {
             int node = route.node_path[i];
             if (node < n_blocks && isSoft(problem.blocks[node].type)) {
+                // F-FT: capture the accumulated-before-this-hop crossing-net count BEFORE mutating it,
+                // so ftRequiredDelta prices exactly this hop's marginal required-area contribution --
+                // the RUNNING twin of the aggregate computeOverflowAndMismatch recomputes at the end
+                // (V5 section 1.4; route_cost.hpp's ftRequiredDelta doc comment).
+                double acc = rr.soft_feedthrough_nets[node];
+                rr.ft_area_sum += ftRequiredDelta(problem.blocks[node], acc, nets);
                 rr.soft_feedthrough_nets[node] += nets;
             }
         }
@@ -519,10 +566,19 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
         // (route_cost.hpp's roundCostOfficial, eval.cpp's exact-tier scorer). Soft blocks use the
         // SAME base-area logic as the mismatch loop above; nets==0 makes ftExtend/ftRequiredArea
         // degenerate to exactly `base`, so an untouched soft block still contributes its own area,
-        // same as any non-soft block. rr.ft_area_sum starts at 0.0 (RoutingResult's own default) and
-        // this function runs exactly once per RoutingResult instance (fresh `result` or a fresh
-        // per-round `round_result`), so there is no double-accrual risk -- same invariant
-        // channel_capacity_total above already relies on.
+        // same as any non-soft block.
+        // F-FT (docs/research/2026-07-28-alpha-v5-cost-recalculation-analysis.md §6, Codex finding
+        // #1): rr.ft_area_sum no longer starts this function at 0.0 -- routeProblem now seeds it to
+        // base_ft_area_sum at construction and commitRoutePath accrues ftRequiredDelta incrementally
+        // per FT hop (the RUNNING aggregate the ft_pricing_aggressive Dijkstra pricing above reads
+        // mid-route). This loop is a FULL independent recomputation from rr.soft_feedthrough_nets'
+        // final state, so it must OVERWRITE (reset to 0.0 first) rather than accumulate on top of that
+        // running value -- otherwise it would double-count. The reset makes this function idempotent
+        // (safe regardless of call count, though every call site still calls it exactly once) and its
+        // result is provably the SAME value the running accrual already reached: ftRequiredDelta
+        // telescopes (required(0) + sum-of-per-hop-deltas == required(final acc)) to exactly what this
+        // loop recomputes from scratch.
+        rr.ft_area_sum = 0.0;
         for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
             const Block& block = problem.blocks[i];
             if (isSoft(block.type)) {
@@ -621,6 +677,7 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
         RoutingResult round_result;
         round_result.channels = result.channels;  // reuse rect geometry, usage already 0 on a copy
         round_result.soft_feedthrough_nets.assign(problem.blocks.size(), 0.0);
+        round_result.ft_area_sum = base_ft_area_sum;  // F-FT: same running-aggregate seed as `result`
 
         for (int idx : order) {
             const Bundle& bundle = problem.bundles[idx];
@@ -732,6 +789,20 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
         for (std::size_t b = 0; b < round_result.soft_feedthrough_nets.size(); ++b) {
             double nets = round_result.soft_feedthrough_nets[b];
             if (nets <= 0.0 || !isSoft(problem.blocks[b].type)) continue;
+            if (problem.ft_pricing_aggressive) {
+                // F-FT: the per-block required>placed criterion below prices per-block mismatch,
+                // which in aggressive mode would surcharge FT hops the official V5 aggregate charges
+                // nothing for (Codex finding #1). Bump only when the round's AGGREGATE
+                // (round_result.ft_area_sum, already fully recomputed by computeOverflowAndMismatch
+                // above) exceeds outline_area -- matching what the aggressive Dijkstra pricing itself
+                // charges -- and by a uniform, deterministic amount shared by every FT-carrying block
+                // this round, proportional to how far over the aggregate is.
+                if (round_result.ft_area_sum > outline_area) {
+                    history_ft[b] += kHistoryBump * (round_result.ft_area_sum - outline_area) / outline_area;
+                    any_bump = true;
+                }
+                continue;
+            }
             double base = problem.blocks[b].ft_base_area > 0.0 ? problem.blocks[b].ft_base_area : problem.blocks[b].area;
             double required_area = ftRequiredArea(base, ftExtend(nets, ftTierRate(problem.blocks[b], nets)));
             double placed_area = round2(placement.rects[b].w * placement.rects[b].h);
