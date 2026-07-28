@@ -223,6 +223,23 @@ Score routeAndScoreAt(const Problem& problem, const Placement& placement, double
              ? routing.channel_overflow_nets / routing.channel_capacity_total : 0.0;
     score.penalty += officialOverflowPenalty(R, score.outline_area);
     score.penalty += kBetaFt * std::max(0.0, routing.ft_area_sum - score.outline_area);
+    // G4 (edge-LOCATION soft-anchor exploratory lever, docs/research/2026-07-28-alpha-v5-cost-
+    // recalculation-analysis.md): official PENALTY (not a legality FAIL) for an edge block sitting
+    // off its declared LOCATION -- kGammaEdge (route_cost.hpp) per um of edgeLocationViolationDistance
+    // (same header), summed over every edge block. Gated behind problem.edge_soft_anchor so a
+    // flag-off run's exact-tier score is byte-identical to pre-G4 (every edge block is hard-anchored
+    // by legalizeEdgeBlocks/placeEdge regardless of the flag, so this term is 0 even when computed
+    // unconditionally -- gating it anyway keeps the "flag-off touches nothing new" contract explicit
+    // and skips the extra O(edge blocks) walk on the default hot path).
+    if (problem.edge_soft_anchor) {
+        double edge_location_penalty = 0.0;
+        for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
+            if (!isEdge(problem.blocks[i].type)) continue;
+            edge_location_penalty +=
+                edgeLocationViolationDistance(placement.rects[i], scoped, problem.blocks[i].locations);
+        }
+        score.penalty += kGammaEdge * edge_location_penalty;
+    }
     score.value = score.outline_area + problem.alpha * score.wirelength + score.penalty;
     if (routing_out) *routing_out = routing;
     return score;

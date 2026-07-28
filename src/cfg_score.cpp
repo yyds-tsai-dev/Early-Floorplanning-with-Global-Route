@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstddef>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -24,6 +25,11 @@ constexpr double kBetaTail = 1.5;    // tail term coefficient (R > threshold)
 constexpr double kThreshold = 0.05;  // overflow-rate threshold
 constexpr double kCapPerUm = 25.0;   // wire density limit: 25 nets / um
 constexpr double kBetaFt = 3.0;      // FT aggregate-slack penalty coefficient (analysis doc section 1.4)
+// G4 (edge-LOCATION soft-anchor exploratory lever, analysis doc section 1 item 4 / section 6):
+// official per-um edge-LOCATION violation-distance coefficient. Locked copy of route_cost.hpp's
+// kGammaEdge (oracle-duplication policy, same as this file's other constants above) -- charged
+// UNCONDITIONALLY below (officialScoreCfg), unlike eval.cpp's flag-gated solver-side term.
+constexpr double kGammaEdge = 1.0;
 
 // V5 wirelength chain (docs/research/2026-07-28-alpha-v5-cost-recalculation-analysis.md, section
 // 1.1): replaces the retired CENTER-anchored guiding-point chain. Two guiding-point kinds, walked
@@ -76,6 +82,96 @@ struct ResolvedStep {
     int edge;
     Rect rect;
 };
+
+// G4 (edge-LOCATION soft-anchor exploratory lever, analysis doc section 1 item 4 / section 6): this
+// oracle's OWN independent copy of route_cost.hpp's edgeLocationViolationDistance geometry (oracle-
+// duplication policy, same twin relationship as crossGuidingPoint/cornerGuidingPoint above vs
+// route_geometry.hpp) -- deliberately re-derived here rather than including route_cost.hpp, so this
+// file stays independent ground truth. See route_cost.hpp's copy for the full doc comment (semantics,
+// the OR-vs-AND single/multi-side split, and the CAVEAT that the official per-violation distance
+// metric has never been observed nonzero on any alpha-test case -- this is a best-guess, not a
+// verified reproduction).
+char edgeLocSide(const std::string& loc) { return loc.empty() ? '\0' : loc[0]; }
+
+std::pair<double, double> edgeLocSegment(double outline_w, double outline_h, const std::string& loc) {
+    double third_w = outline_w / 3.0;
+    double third_h = outline_h / 3.0;
+    if (loc == "TL" || loc == "BL") return {0.0, third_w};
+    if (loc == "TM" || loc == "BM") return {third_w, 2.0 * third_w};
+    if (loc == "TR" || loc == "BR") return {2.0 * third_w, outline_w};
+    if (loc == "LB" || loc == "RB") return {0.0, third_h};
+    if (loc == "LM" || loc == "RM") return {third_h, 2.0 * third_h};
+    if (loc == "LT" || loc == "RT") return {2.0 * third_h, outline_h};
+    return {0.0, 0.0};
+}
+
+bool edgeLocPositiveOverlap(double a0, double a1, double b0, double b1) {
+    return std::min(a1, b1) - std::max(a0, b0) > kEps;
+}
+
+bool edgeLocSatisfied(const Rect& r, double outline_w, double outline_h, const std::string& loc) {
+    char side = edgeLocSide(loc);
+    auto [lo, hi] = edgeLocSegment(outline_w, outline_h, loc);
+    if (side == 'T') return std::abs(r.top() - outline_h) < kEps && edgeLocPositiveOverlap(r.x, r.right(), lo, hi);
+    if (side == 'B') return std::abs(r.y) < kEps && edgeLocPositiveOverlap(r.x, r.right(), lo, hi);
+    if (side == 'L') return std::abs(r.x) < kEps && edgeLocPositiveOverlap(r.y, r.top(), lo, hi);
+    if (side == 'R') return std::abs(r.right() - outline_w) < kEps && edgeLocPositiveOverlap(r.y, r.top(), lo, hi);
+    return true;
+}
+
+double edgeLocRangeGap(double p0, double p1, double lo, double hi) {
+    if (p1 <= lo) return lo - p1;
+    if (p0 >= hi) return hi - p0;
+    return 0.0;
+}
+
+std::pair<double, double> edgeLocDelta(const Rect& r, double outline_w, double outline_h, const std::string& loc) {
+    char side = edgeLocSide(loc);
+    auto [lo, hi] = edgeLocSegment(outline_w, outline_h, loc);
+    double dx = 0.0, dy = 0.0;
+    if (side == 'T' || side == 'B') {
+        dy = (side == 'T') ? (outline_h - r.h - r.y) : (0.0 - r.y);
+        dx = edgeLocRangeGap(r.x, r.right(), lo, hi);
+    } else if (side == 'L' || side == 'R') {
+        dx = (side == 'L') ? (0.0 - r.x) : (outline_w - r.w - r.x);
+        dy = edgeLocRangeGap(r.y, r.top(), lo, hi);
+    }
+    return {dx, dy};
+}
+
+double edgeLocationViolationDistance(const Rect& r, const Problem& scoped, const std::vector<std::string>& locs) {
+    if (locs.empty()) return 0.0;
+    std::vector<char> sides;
+    for (const auto& loc : locs) {
+        char side = edgeLocSide(loc);
+        if (std::find(sides.begin(), sides.end(), side) == sides.end()) sides.push_back(side);
+    }
+    const bool single_side = sides.size() == 1;
+
+    if (single_side) {
+        double best = std::numeric_limits<double>::infinity();
+        for (const auto& loc : locs) {
+            if (edgeLocSatisfied(r, scoped.outline_w, scoped.outline_h, loc)) return 0.0;
+            auto [dx, dy] = edgeLocDelta(r, scoped.outline_w, scoped.outline_h, loc);
+            best = std::min(best, std::abs(dx) + std::abs(dy));
+        }
+        return best;
+    }
+
+    bool all_satisfied = true;
+    for (const auto& loc : locs) {
+        if (!edgeLocSatisfied(r, scoped.outline_w, scoped.outline_h, loc)) { all_satisfied = false; break; }
+    }
+    if (all_satisfied) return 0.0;
+
+    double dx = 0.0, dy = 0.0;
+    for (const auto& loc : locs) {
+        auto [ldx, ldy] = edgeLocDelta(r, scoped.outline_w, scoped.outline_h, loc);
+        if (std::abs(ldx) > std::abs(dx)) dx = ldx;
+        if (std::abs(ldy) > std::abs(dy)) dy = ldy;
+    }
+    return std::abs(dx) + std::abs(dy);
+}
 
 }  // namespace
 
@@ -283,8 +379,35 @@ OfficialBreakdown officialScoreCfg(const Problem& problem, const CfgSolution& cf
     }
     out.ft_penalty = kBetaFt * std::max(0.0, ft_area_sum - out.outline_area);
 
+    // G4 (edge-LOCATION soft-anchor exploratory lever, docs/research/2026-07-28-alpha-v5-cost-
+    // recalculation-analysis.md section 1 item 4 / section 6): official PENALTY, charged
+    // UNCONDITIONALLY -- unlike the solver's own eval.cpp (gated behind problem.edge_soft_anchor,
+    // since only a flag-on search run may legitimately place an edge block off-anchor), the OFFICIAL
+    // checker this file reproduces has no such flag: every edge block's LOCATION mismatch is priced
+    // at kGammaEdge/um regardless of how the .cfg was produced. Scoped to the .cfg's OWN declared
+    // outline (cfg.outline_w/h, matching out.outline_area above), not problem.outline_w/h (CSV MAX) --
+    // LOCATION thirds/flush are relative to the outline actually used, same convention validate.cpp's
+    // validateSolution uses (scoped to placement.outline_w/h when stamped). All 5 alpha-test .cfgs
+    // place every edge block exactly on a satisfying LOCATION (see test/run_cfg_score_regressions.sh),
+    // so this term is measured 0 on the golden suite -- CAVEAT: the official per-violation DISTANCE
+    // metric itself has never been observed nonzero, so edgeLocationViolationDistance above is a
+    // best-guess reproduction (see its own doc comment), not a verified one.
+    Problem outline_scoped = problem;
+    outline_scoped.outline_w = cfg.outline_w;
+    outline_scoped.outline_h = cfg.outline_h;
+    double edge_location_penalty = 0.0;
+    for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
+        const Block& block = problem.blocks[i];
+        if (!isEdge(block.type)) continue;
+        auto it = cfg.blocks.find(block.name);
+        if (it == cfg.blocks.end()) continue;  // unknown object -> skip (defensive; legal .cfg never hits this)
+        edge_location_penalty += edgeLocationViolationDistance(it->second, outline_scoped, block.locations);
+    }
+    out.edge_location_penalty = kGammaEdge * edge_location_penalty;
+
     out.checker_cost = A + problem.alpha * out.wirelength + out.overflow_penalty;
     out.checker_cost += out.ft_penalty;
+    out.checker_cost += out.edge_location_penalty;
     return out;
 }
 

@@ -13,8 +13,8 @@ int main(int argc, char** argv) {
     efgr::OfficialBreakdown b = efgr::officialScoreCfg(problem, cfg);
     // Machine-readable single line; the benchmark script derives ranking cost from these fields.
     std::printf("area=%.3f wl=%.3f overflow=%.3f capacity=%.3f rate=%.9f "
-                "overflow_penalty=%.3f ft_penalty=%.3f checker_cost=%.3f alpha=%.3f\n",
+                "overflow_penalty=%.3f ft_penalty=%.3f edge_location_penalty=%.3f checker_cost=%.3f alpha=%.3f\n",
                 b.outline_area, b.wirelength, b.overflow_nets, b.capacity_nets, b.rate,
-                b.overflow_penalty, b.ft_penalty, b.checker_cost, problem.alpha);
+                b.overflow_penalty, b.ft_penalty, b.edge_location_penalty, b.checker_cost, problem.alpha);
     return 0;
 }

@@ -334,6 +334,42 @@ void legalizeEdgeBlocks(const Problem& problem, Placement& placement) {
     }
 }
 
+// G4 (edge-LOCATION soft-anchor exploratory lever, docs/research/2026-07-28-alpha-v5-cost-
+// recalculation-analysis.md): applies PlacementState.edge_anchor_dx/dy (written only by
+// mutateEdgeAnchorShift below) to every edge block's rect. Callers MUST invoke this at the TAIL of
+// decode() -- AFTER shrinkWrapOutline, never before: shrinkWrapOutline's own commitOutlineAt
+// unconditionally re-legalizes (dimensionFor + legalizeEdgeBlocks) and overwrites every edge rect, so
+// applying the offset any earlier (e.g. inside basePlacement) would be silently wiped before the
+// caller ever saw it. Clamped to the DECLARED (post-shrink-wrap) outline placement.outline_w/h -- not
+// problem.outline_w/h (MAX) -- so a shifted block can never trip the exact tier's own out-of-outline
+// 1e12 penalty against the outline it is actually scored/routed at (eval.cpp's routeAndScoreAt scopes
+// cheapScore's containment check to that same w/h). No overlap check: like every other mutate move in
+// this file (mutateSoftAspect, mutateEdgeChoice), an illegal landing spot is left to cheapScore's
+// existing overlap penalty (1e9/um^2) to reject via SA accept/reject, not guaranteed legal here.
+// No-op whenever problem.edge_soft_anchor is false or the state carries no nonzero offset -- decode()
+// stays byte-identical to pre-G4 in that case (the exact default-off contract).
+//
+// KNOWN GAP (documented, not fixed -- out of this lever's minimal scope): exactScore's one-step
+// corrective grow (eval.cpp) calls anchorAtOutline on open-route candidates, which re-runs
+// commitOutlineAt and so re-wipes any offset this function applied to the ORIGINAL decode() output --
+// a re-scored grown candidate loses its edge-anchor shift. This only affects candidates whose tight/
+// shrink-wrapped outline was too congested to route on the first attempt; it does not corrupt state,
+// it just means that specific re-scored variant reverts to the anchored geometry.
+void applyEdgeSoftAnchor(const Problem& problem, const PlacementState& state, Placement& placement) {
+    if (!problem.edge_soft_anchor) return;
+    double w = placement.outline_w > 0.0 ? placement.outline_w : problem.outline_w;
+    double h = placement.outline_h > 0.0 ? placement.outline_h : problem.outline_h;
+    for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
+        if (!isEdge(problem.blocks[i].type)) continue;
+        double dx = i < state.edge_anchor_dx.size() ? state.edge_anchor_dx[i] : 0.0;
+        double dy = i < state.edge_anchor_dy.size() ? state.edge_anchor_dy[i] : 0.0;
+        if (dx == 0.0 && dy == 0.0) continue;
+        Rect& r = placement.rects[i];
+        r.x = std::max(0.0, std::min(r.x + dx, w - r.w));
+        r.y = std::max(0.0, std::min(r.y + dy, h - r.h));
+    }
+}
+
 std::vector<std::string> chosenEdgeLocation(const Problem& problem, const PlacementState& state, int block_idx) {
     const auto& locs = problem.blocks[block_idx].locations;
     if (locs.empty()) return {"TL"};
@@ -483,6 +519,42 @@ void mutateEdgeChoice(const Problem& problem, PlacementState& state, std::mt1993
         (state.edge_location_choice[idx] + 1) % static_cast<int>(problem.blocks[idx].locations.size());
 }
 
+// G4 (edge-LOCATION soft-anchor exploratory lever): probability mutate() reaches for
+// mutateEdgeAnchorShift below instead of the engine's normal move set, when problem.edge_soft_anchor
+// is true. A tuning knob (like kHistoryBump, route_cost.hpp) -- picked high enough that a 1000-
+// iteration run gets a meaningful number of draws (~100) without crowding out the existing move
+// portfolio's own exploration.
+constexpr double kEdgeAnchorMoveProb = 0.10;
+
+// G4: half-width of the per-draw random shift applied to one axis of an edge block's offset. A
+// tuning knob (not derived from any scorer unit the way kGammaEdge is): a few percent of a typical
+// alpha-case outline span (O(1e3) um), big enough to reach a neighboring block in a handful of
+// draws, small enough that most single draws stay in the "small violation" regime the lever's
+// WL-savings thesis is about.
+constexpr double kEdgeAnchorShiftHalfWidth = 25.0;
+
+// G4: only ever invoked when problem.edge_soft_anchor is true (each engine's mutate() gates the call
+// with an `if`, not a probability folded into move_dist/unit's existing draws), so a flag-off run's
+// mutate() RNG stream is completely untouched by this function's existence. Perturbs ONE random edge
+// block's PlacementState.edge_anchor_dx/dy by a small random delta -- an ADDITIVE nudge (not a fresh
+// re-draw), so repeated draws can random-walk a block progressively farther off-anchor or back
+// toward 0, mirroring mutateSoftAspect's multiplicative-nudge shape above. The actual rect shift is
+// applied later, at decode() time, by applyEdgeSoftAnchor -- this function only ever touches `state`.
+void mutateEdgeAnchorShift(const Problem& problem, PlacementState& state, std::mt19937& rng) {
+    std::vector<int> edges;
+    for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
+        if (isEdge(problem.blocks[i].type)) edges.push_back(static_cast<int>(i));
+    }
+    if (edges.empty()) return;
+    if (state.edge_anchor_dx.size() < problem.blocks.size()) state.edge_anchor_dx.assign(problem.blocks.size(), 0.0);
+    if (state.edge_anchor_dy.size() < problem.blocks.size()) state.edge_anchor_dy.assign(problem.blocks.size(), 0.0);
+    std::uniform_int_distribution<int> pick(0, static_cast<int>(edges.size()) - 1);
+    int idx = edges[pick(rng)];
+    std::uniform_real_distribution<double> delta(-kEdgeAnchorShiftHalfWidth, kEdgeAnchorShiftHalfWidth);
+    state.edge_anchor_dx[idx] += delta(rng);
+    state.edge_anchor_dy[idx] += delta(rng);
+}
+
 bool sameElements(std::vector<int> a, std::vector<int> b) {
     std::sort(a.begin(), a.end());
     std::sort(b.begin(), b.end());
@@ -623,6 +695,16 @@ public:
 
     void mutate(const Problem& problem, PlacementState& state, std::mt19937& rng) const override {
         if (state.sequence_pos.empty() || state.sequence_neg.empty()) state = initialState(problem, rng);
+        // G4 (edge-LOCATION soft-anchor exploratory lever): a flag-gated `if`, not a probability
+        // folded into the move_dist/unit draws below -- a flag-off run's mutate() RNG stream is
+        // completely unaffected by this branch's existence (byte-identical mutate()).
+        if (problem.edge_soft_anchor) {
+            std::uniform_real_distribution<double> gate(0.0, 1.0);
+            if (gate(rng) < kEdgeAnchorMoveProb) {
+                mutateEdgeAnchorShift(problem, state, rng);
+                return;
+            }
+        }
         if (!move_portfolio_v2_) {
             // Flag-off: BYTE-IDENTICAL to pre-B5c (hard acceptance gate) -- this branch is verbatim
             // the pre-existing body, untouched.
@@ -729,6 +811,7 @@ public:
             placeWithContour(problem, placement, placed, idx, placement.rects[idx].x, placement.rects[idx].y);
         }
         shrinkWrapOutline(problem, placement);
+        applyEdgeSoftAnchor(problem, state, placement);
         return placement;
     }
 
@@ -849,6 +932,16 @@ public:
 
     void mutate(const Problem& problem, PlacementState& state, std::mt19937& rng) const override {
         if (!isValidState(problem, state)) state = initialState(problem, rng);
+        // G4 (edge-LOCATION soft-anchor exploratory lever): a flag-gated `if`, not a probability
+        // folded into the move_dist/unit draws below -- a flag-off run's mutate() RNG stream is
+        // completely unaffected by this branch's existence (byte-identical mutate()).
+        if (problem.edge_soft_anchor) {
+            std::uniform_real_distribution<double> gate(0.0, 1.0);
+            if (gate(rng) < kEdgeAnchorMoveProb) {
+                mutateEdgeAnchorShift(problem, state, rng);
+                return;
+            }
+        }
         if (!move_portfolio_v2_) {
             // Flag-off: BYTE-IDENTICAL to pre-B5c (hard acceptance gate) -- this branch is verbatim
             // the pre-existing body, untouched.
@@ -902,6 +995,7 @@ public:
         Placement placement = basePlacement(problem, state);
         if (state.root < 0 || state.nodes.empty()) {
             shrinkWrapOutline(problem, placement);
+            applyEdgeSoftAnchor(problem, state, placement);
             return placement;
         }
 
@@ -937,6 +1031,7 @@ public:
             if (!seen[i]) placeWithContour(problem, placement, placed, state.nodes[i], 0.0, 0.0);
         }
         shrinkWrapOutline(problem, placement);
+        applyEdgeSoftAnchor(problem, state, placement);
         return placement;
     }
 

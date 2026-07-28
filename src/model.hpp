@@ -104,6 +104,21 @@ struct Problem {
     // (qa-draft Q4') -- the aggregate's exact semantics (Sum base+delta vs Sum delta,
     // outline_after_ft) are not fully pinned, so a leg that never turns this on stays the safety net.
     bool ft_pricing_aggressive = false;
+    // G4 (edge-LOCATION soft-anchor exploratory lever, docs/research/2026-07-28-alpha-v5-cost-
+    // recalculation-analysis.md section 1 item 4 / section 6): solver-internal knob that treats an
+    // edge block's LOCATION mismatch as the OFFICIAL checker does -- a PENALTY (kGammaEdge=1.0/um of
+    // minimum translation distance, route_cost.hpp's edgeLocationViolationDistance, charged in
+    // eval.cpp's exact tier) rather than validate.cpp's hard FAIL -- so the search may trade a small,
+    // gamma-priced LOCATION violation for a larger alpha*WL saving. false (default) reproduces every
+    // pre-G4 code path byte-identically: legalizeEdgeBlocks/placeEdge keep hard-anchoring edge blocks
+    // to a satisfying LOCATION and validate.cpp keeps hard-failing any miss. NEVER parsed from the
+    // input CSV (io.cpp does not touch this field) -- exists purely so main.cpp's hidden
+    // --edge-soft-anchor measurement flag can opt a run into this exploration, the same flag-gated-
+    // variant precedent as route_pricing_official/abutment_credit/ft_pricing_aggressive above.
+    // CAVEAT: the official per-violation DISTANCE metric itself has never been observed nonzero on
+    // any alpha-test case -- edgeLocationViolationDistance is a best-guess reproduction, not a
+    // verified one (see its own doc comment, route_cost.hpp).
+    bool edge_soft_anchor = false;
 };
 
 struct Placement {

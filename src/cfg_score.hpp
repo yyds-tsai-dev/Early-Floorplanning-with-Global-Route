@@ -59,7 +59,14 @@ struct OfficialBreakdown {
     double rate = 0.0;               // overflow_nets / capacity_nets
     double overflow_penalty = 0.0;   // officialOverflowPenalty(rate, outline_area) -- V5 piecewise tail
     double ft_penalty = 0.0;         // V5 aggregate FT slack penalty; 0 on the alpha package (no FT used)
-    double checker_cost = 0.0;       // A + problem.alpha*WL + overflow_penalty
+    // G4 (edge-LOCATION soft-anchor exploratory lever, docs/research/2026-07-28-alpha-v5-cost-
+    // recalculation-analysis.md): kGammaEdge * Sigma edgeLocationViolationDistance over every edge
+    // block, charged UNCONDITIONALLY (the official checker has no opt-in flag, unlike the solver's
+    // own eval.cpp) -- 0 on the alpha package (every edge block sits exactly on a satisfying
+    // LOCATION); best-guess distance metric, see cfg_score.cpp's edgeLocationViolationDistance doc
+    // comment for the caveat.
+    double edge_location_penalty = 0.0;
+    double checker_cost = 0.0;       // A + problem.alpha*WL + overflow_penalty + ft_penalty + edge_location_penalty
     std::map<std::string, std::pair<double, double>> demand_by_channel;  // name -> (H, V)
 };
 

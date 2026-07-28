@@ -97,6 +97,12 @@ int main(int argc, char** argv) {
         double alpha = argDouble(argc, argv, "--alpha", problem.alpha);
         problem.alpha = alpha;
         std::string engine_name = argString(argc, argv, "--engine", "hybrid");
+        // G4 (edge-LOCATION soft-anchor exploratory lever, docs/research/2026-07-28-alpha-v5-cost-
+        // recalculation-analysis.md): hidden/undocumented measurement flag -- intentionally NOT in
+        // the usage banner above (a flag-gated exploration, not a supported user-facing knob yet).
+        // Default false (Problem.edge_soft_anchor's own default, model.hpp), so an absent flag keeps
+        // every downstream path (search, eval, validate) byte-identical to pre-G4.
+        problem.edge_soft_anchor = hasFlag(argc, argv, "--edge-soft-anchor");
 
         // B4.1 (route-pricing portfolio, b4-report.md): runs the requested engine under both the
         // official (B4) and retained pre-B4 router pricing, folding by value -- restores the

@@ -22,6 +22,16 @@ struct PlacementState {
 
     std::vector<double> soft_aspect;
     std::vector<int> edge_location_choice;
+    // G4 (edge-LOCATION soft-anchor exploratory lever, docs/research/2026-07-28-alpha-v5-cost-
+    // recalculation-analysis.md): per-block (index-aligned, like edge_location_choice above) x/y
+    // translation applied to an EDGE block's rect by placement_engine.cpp's applyEdgeSoftAnchor,
+    // AFTER legalizeEdgeBlocks/shrinkWrapOutline have anchored it at a LOCATION-satisfying position
+    // -- only ever written by mutateEdgeAnchorShift and only ever read when problem.edge_soft_anchor
+    // is true (model.hpp), so a flag-off run never touches these fields even though every state
+    // technically carries them. Empty/short vectors read as an all-zero offset (no shift), matching
+    // edge_location_choice/soft_aspect's own defensive short-vector handling.
+    std::vector<double> edge_anchor_dx;
+    std::vector<double> edge_anchor_dy;
 };
 
 class PlacementEngine {

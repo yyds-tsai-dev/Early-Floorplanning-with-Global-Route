@@ -91,7 +91,18 @@ ValidationResult validateSolution(const Problem& problem, const Placement& place
         }
         if (isEdge(problem.blocks[i].type)) {
             if (!satisfiesEdgeLocations(r, scoped, problem.blocks[i].locations)) {
-                fail("edge location violation: " + problem.blocks[i].name);
+                // G4 (edge-LOCATION soft-anchor exploratory lever, docs/research/2026-07-28-alpha-v5-
+                // cost-recalculation-analysis.md): officially a PENALTY (gamma*distance, eval.cpp/
+                // route_cost.hpp's edgeLocationViolationDistance), not a legality FAIL -- downgrade to
+                // a warning when the search was explicitly allowed to explore off-anchor placements
+                // (problem.edge_soft_anchor, main.cpp's hidden --edge-soft-anchor flag); unchanged
+                // hard FAIL otherwise. The flag defaults false everywhere, so this branch is dead code
+                // (and main.cpp's exit-code gate on vr.ok unaffected) on every default run.
+                if (problem.edge_soft_anchor) {
+                    vr.messages.push_back("warning: edge location violation: " + problem.blocks[i].name);
+                } else {
+                    fail("edge location violation: " + problem.blocks[i].name);
+                }
             }
         }
         for (std::size_t j = i + 1; j < placement.rects.size(); ++j) {

@@ -26,7 +26,8 @@ for engine in bstar hybrid; do
     line=$(bin/efgr_rescore "$csv" "$out")
     eval "$(echo "$line" | tr ' ' '\n' | sed 's/^/B_/')"   # B_area= B_wl= ...
     rank=$(awk -v a="$B_area" -v w="$B_wl" -v al="${RANK_ALPHA[$i]}" -v op="$B_overflow_penalty" \
-               -v ft="$B_ft_penalty" -v rt="$rt" 'BEGIN{printf "%.3f", a + al*w + op + ft + 0.5*rt*sqrt(a)}')
+               -v ft="$B_ft_penalty" -v ep="${B_edge_location_penalty:-0}" -v rt="$rt" \
+               'BEGIN{printf "%.3f", a + al*w + op + ft + ep + 0.5*rt*sqrt(a)}')
     printf "%-6s %-8s %14.0f %14.0f %14.3f %14.0f %7.2fs\n" \
            "case$i" "$engine" "$B_checker_cost" "$rank" "$B_overflow" "$B_wl" "$rt"
     total_checker=$(awk -v t="$total_checker" -v c="$B_checker_cost" 'BEGIN{printf "%.3f", t+c}')

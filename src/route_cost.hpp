@@ -39,6 +39,15 @@ constexpr double kBetaLin = 20.0;                 // linear overflow-rate coeffi
 constexpr double kBetaTail = 1.5;                 // steeper tail coefficient (R > threshold)
 constexpr double kOverflowRateThreshold = 0.05;   // overflow-rate threshold for the tail
 constexpr double kBetaFt = 3.0;                   // flat per-um^2 FT required-area shortfall weight
+// G4 (edge-LOCATION soft-anchor exploratory lever, docs/research/2026-07-28-alpha-v5-cost-
+// recalculation-analysis.md section 1 item 4 / section 6): official per-um-of-violation-distance
+// coefficient for an edge block sitting off its declared LOCATION -- a PENALTY, not a legality FAIL
+// (unlike validate.cpp's satisfiesEdgeLocations gate, which still hard-fails it unless
+// problem.edge_soft_anchor is set; see validate.cpp's edge-location branch). src/cfg_score.cpp keeps
+// its OWN locked copy of this constant (oracle-duplication policy, same as kBetaLin/kBetaTail/
+// kBetaFt's twins there) and charges it UNCONDITIONALLY -- officially the penalty always applies;
+// gamma=1 is confirmed from the alpha-test "PATH Detail Cost Calculation" page's constant table.
+constexpr double kGammaEdge = 1.0;                // per-um edge-LOCATION violation-distance weight
 
 // V5 overflow-penalty tail (docs/research/2026-07-28-alpha-v5-cost-recalculation-analysis.md,
 // section 1.3): EXACT official piecewise formula -- the linear term caps at kOverflowRateThreshold
@@ -206,6 +215,128 @@ constexpr double kFtAggressiveTieBreak = 0.001;
 // by the official kBetaFt directly). Kept for its T1 tests.
 inline double softFtMarginalCost(const Block& b, double acc, double n, double placed_area) {
     return kFtMismatchWeight * ftMismatchDelta(b, acc, n, placed_area);
+}
+
+// G4 (edge-LOCATION soft-anchor exploratory lever): per-LOCATION-string satisfaction test + minimum
+// translation distance, mirroring validate.cpp's satisfiesEdgeLocation/locSegment/positiveOverlap and
+// placement_engine.cpp's placeEdge/edgeRectLegal geometry (T/B pin the y coordinate flush to the
+// scoped outline's top/bottom border and require the x-interval to overlap a third-of-width segment;
+// L/R pin x flush to the left/right border and require the y-interval to overlap a third-of-height
+// segment -- see either file's own locSegment thirds-of-outline table). Kept here as the ONE shared,
+// external-linkage copy eval.cpp calls -- validate.cpp/placement_engine.cpp both keep this geometry
+// file-local (anonymous namespace) for their own pass/fail and placement purposes, unchanged by G4.
+// src/cfg_score.cpp keeps its own independent anonymous-namespace copy (oracle-duplication policy,
+// matching route_geometry.hpp's crossGuidingPoint / cfg_score.cpp's twin relationship).
+inline char edgeLocSide(const std::string& loc) { return loc.empty() ? '\0' : loc[0]; }
+
+inline std::pair<double, double> edgeLocSegment(double outline_w, double outline_h, const std::string& loc) {
+    double third_w = outline_w / 3.0;
+    double third_h = outline_h / 3.0;
+    if (loc == "TL" || loc == "BL") return {0.0, third_w};
+    if (loc == "TM" || loc == "BM") return {third_w, 2.0 * third_w};
+    if (loc == "TR" || loc == "BR") return {2.0 * third_w, outline_w};
+    if (loc == "LB" || loc == "RB") return {0.0, third_h};
+    if (loc == "LM" || loc == "RM") return {third_h, 2.0 * third_h};
+    if (loc == "LT" || loc == "RT") return {2.0 * third_h, outline_h};
+    return {0.0, 0.0};
+}
+
+inline bool edgeLocPositiveOverlap(double a0, double a1, double b0, double b1) {
+    return std::min(a1, b1) - std::max(a0, b0) > kEps;
+}
+
+// True exactly when validate.cpp's (file-local) satisfiesEdgeLocation(r, problem, loc) would be true
+// -- same pin + range-overlap test, re-derived from (outline_w, outline_h) instead of a Problem&.
+inline bool edgeLocSatisfied(const Rect& r, double outline_w, double outline_h, const std::string& loc) {
+    char side = edgeLocSide(loc);
+    auto [lo, hi] = edgeLocSegment(outline_w, outline_h, loc);
+    if (side == 'T') return std::abs(r.top() - outline_h) < kEps && edgeLocPositiveOverlap(r.x, r.right(), lo, hi);
+    if (side == 'B') return std::abs(r.y) < kEps && edgeLocPositiveOverlap(r.x, r.right(), lo, hi);
+    if (side == 'L') return std::abs(r.x) < kEps && edgeLocPositiveOverlap(r.y, r.top(), lo, hi);
+    if (side == 'R') return std::abs(r.right() - outline_w) < kEps && edgeLocPositiveOverlap(r.y, r.top(), lo, hi);
+    return true;
+}
+
+// Signed 1-D gap to close between projection [p0,p1] and target segment [lo,hi]: positive/negative
+// tells the caller which direction to translate; 0 when already overlapping (or touching within
+// kEps). Shared by both axes of edgeLocDelta below.
+inline double edgeLocRangeGap(double p0, double p1, double lo, double hi) {
+    if (p1 <= lo) return lo - p1;
+    if (p0 >= hi) return hi - p0;
+    return 0.0;
+}
+
+// Minimum (dx,dy) translation of `r` that would satisfy ONE given LOCATION string alone (pin the
+// required border axis flush, close any gap on the other axis to the assigned third-segment) -- both
+// 0 if already satisfied. Signed (not magnitude) since the multi-LOCATION "corner" combination in
+// edgeLocationViolationDistance below needs direction, not just distance.
+inline std::pair<double, double> edgeLocDelta(const Rect& r, double outline_w, double outline_h,
+                                              const std::string& loc) {
+    char side = edgeLocSide(loc);
+    auto [lo, hi] = edgeLocSegment(outline_w, outline_h, loc);
+    double dx = 0.0, dy = 0.0;
+    if (side == 'T' || side == 'B') {
+        dy = (side == 'T') ? (outline_h - r.h - r.y) : (0.0 - r.y);
+        dx = edgeLocRangeGap(r.x, r.right(), lo, hi);
+    } else if (side == 'L' || side == 'R') {
+        dx = (side == 'L') ? (0.0 - r.x) : (outline_w - r.w - r.x);
+        dy = edgeLocRangeGap(r.y, r.top(), lo, hi);
+    }
+    return {dx, dy};
+}
+
+// CAVEAT (task G4): the official per-violation DISTANCE metric has never been observed nonzero on any
+// alpha-test case (every alpha .cfg's edge blocks sit exactly on a satisfying LOCATION) -- there is no
+// byte-verified reference for what "distance" means beyond gamma=1/um (docs/research/2026-07-28-
+// alpha-v5-cost-recalculation-analysis.md section 1 item 4 / section 6), so this is a BEST-GUESS
+// (minimum |dx|+|dy| translation reaching a satisfying position), not a verified reproduction:
+//   * single-side blocks (all `locs` share one border letter T/B/L/R -- the common case, OR
+//     semantics: any ONE of the listed LOCATION strings satisfying `r` is enough, matching validate.
+//     cpp's satisfiesEdgeLocations) -- EXACT: the minimum over each individual LOCATION's own
+//     edgeLocDelta magnitude.
+//   * multi-side "corner" blocks (locs span >1 distinct border letter -- AND semantics: `r` must
+//     satisfy EVERY listed LOCATION simultaneously, e.g. "TL"+"LT" = touch top AND left) --
+//     APPROXIMATE: combines every loc's own (dx,dy) by keeping, per axis, the larger-magnitude
+//     requirement seen across the set (same-side locs pin identically; a translation covering the
+//     most demanding single-axis requirement satisfies every corner case in the current test data,
+//     but this is not proven optimal in general).
+// 0 exactly when the (re-derived, byte-identical) satisfiesEdgeLocations predicate holds -- that
+// zero-case, not the nonzero magnitude, is the property callers actually depend on (eval.cpp only
+// adds a nonzero term when a real violation exists; the golden alpha suite must see 0 on all cases).
+// Pure and deterministic -- no mutation, no I/O.
+inline double edgeLocationViolationDistance(const Rect& r, const Problem& scoped,
+                                            const std::vector<std::string>& locs) {
+    if (locs.empty()) return 0.0;
+    std::vector<char> sides;
+    for (const auto& loc : locs) {
+        char side = edgeLocSide(loc);
+        if (std::find(sides.begin(), sides.end(), side) == sides.end()) sides.push_back(side);
+    }
+    const bool single_side = sides.size() == 1;
+
+    if (single_side) {
+        double best = std::numeric_limits<double>::infinity();
+        for (const auto& loc : locs) {
+            if (edgeLocSatisfied(r, scoped.outline_w, scoped.outline_h, loc)) return 0.0;
+            auto [dx, dy] = edgeLocDelta(r, scoped.outline_w, scoped.outline_h, loc);
+            best = std::min(best, std::abs(dx) + std::abs(dy));
+        }
+        return best;
+    }
+
+    bool all_satisfied = true;
+    for (const auto& loc : locs) {
+        if (!edgeLocSatisfied(r, scoped.outline_w, scoped.outline_h, loc)) { all_satisfied = false; break; }
+    }
+    if (all_satisfied) return 0.0;
+
+    double dx = 0.0, dy = 0.0;
+    for (const auto& loc : locs) {
+        auto [ldx, ldy] = edgeLocDelta(r, scoped.outline_w, scoped.outline_h, loc);
+        if (std::abs(ldx) > std::abs(dx)) dx = ldx;
+        if (std::abs(ldy) > std::abs(dy)) dy = ldy;
+    }
+    return std::abs(dx) + std::abs(dy);
 }
 
 // Wirelength term in Cost units for a hop of guiding-point distance `dist` carrying `n` nets

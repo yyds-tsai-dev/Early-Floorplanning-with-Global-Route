@@ -36,10 +36,11 @@ for seed in $SEEDS; do
         opn=$(printf '%s' "$log" | grep -oE 'open_routes=[0-9]+' | cut -d= -f2); opn=${opn:-NA}
         val=$(printf '%s' "$log" | grep -oE 'validation=[a-z]+' | cut -d= -f2); val=${val:-NA}
         itr=$(printf '%s' "$log" | grep -oE 'iters=[0-9]+' | head -1 | cut -d= -f2); itr=${itr:-NA}
-        B_area=0 B_wl=0 B_overflow=0 B_overflow_penalty=0 B_ft_penalty=0 B_checker_cost=0
+        B_area=0 B_wl=0 B_overflow=0 B_overflow_penalty=0 B_ft_penalty=0 B_edge_location_penalty=0 B_checker_cost=0
         eval "$(bin/efgr_rescore "$csv" "$out" 2>/dev/null | tr ' ' '\n' | sed 's/^/B_/')" || true
         rank=$(awk -v a="$B_area" -v w="$B_wl" -v al="${RANK_ALPHA[$i]}" -v op="$B_overflow_penalty" \
-                   -v ft="$B_ft_penalty" -v rt="$rt" 'BEGIN{printf "%.3f", a + al*w + op + ft + 0.5*rt*sqrt(a)}')
+                   -v ft="$B_ft_penalty" -v ep="$B_edge_location_penalty" -v rt="$rt" \
+                   'BEGIN{printf "%.3f", a + al*w + op + ft + ep + 0.5*rt*sqrt(a)}')
         echo "$seed,$budget,$engine,case$i,$B_checker_cost,$rank,$B_overflow,$B_wl,$rt,$opn,$val,$itr" >> "$OUT"
         printf "%-4s %-6s %-6s %-5s %14.0f %14.0f %7.2fs %5s %7s\n" \
                "$seed" "$budget" "$engine" "case$i" "$B_checker_cost" "$rank" "$rt" "$opn" "$itr"
