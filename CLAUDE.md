@@ -22,7 +22,7 @@ Run the solver:
 ```bash
 bin/efgr input.csv [output.cfg] [--engine sp|bstar|hybrid] [--iters N] [--seed N] [--alpha X] [--exact-interval N] [--time-budget S]
 ```
-- Default engine is `hybrid` (sweep-selected beta default, 2026-07-23); default iters `1000`, seed `1`, exact-interval `50`. `--time-budget S` enables a wall-clock stop (default off — measured to degrade results until the elite-pass cheap-score mis-ranking under integer geometry is fixed; see `.superpowers/sdd/beta-task-5-report.md`).
+- Default engine is `hybrid` (sweep-selected beta default, 2026-07-23); default iters `1000`, seed `1`, exact-interval `50`. **Budget semantics (F1, 2026-07-29)**: a BARE invocation (neither `--iters` nor `--time-budget` — the contest harness's calling style) self-imposes a **600 s** wall-clock budget (sweep-selected: Σrank monotone in budget, `docs/research/2026-07-29-f1-budget-selection.md`); explicit `--iters N` without `--time-budget` keeps the budget OFF (dev/test style); `--time-budget S` is explicit (0 = off). B2's fold guarantees budget never degrades value; anytime output covers overruns.
 - If `output.cfg` is omitted it defaults to the input path with a `.cfg` extension.
 - `main.cpp` prints a one-line summary to **stderr** (engine, iters, score, overflow, validation, …). Exit code is `0` only when validation passes **and** there are no open routes; otherwise `1`.
 

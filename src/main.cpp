@@ -43,6 +43,15 @@ bool hasFlag(int argc, char** argv, const std::string& name) {
     return false;
 }
 
+// F1 decision (2026-07-29 sweep, docs to follow): the contest organizer's harness invokes the
+// binary BARE -- no flags at all (confirmed by docs/official/alpha_test/*/run.log) -- so main()
+// self-imposes this budget whenever NEITHER --iters nor --time-budget is explicitly passed. Every
+// explicit invocation (regression suites, scripts/benchmark.sh, scripts/sweep.sh, manual debugging)
+// keeps its own semantics untouched. Hoisted to namespace scope so both the usage banner and the
+// parsing block in main() reference the same literal. See the parsing block for the full 3-mode
+// rationale.
+constexpr double kBareInvocationTimeBudgetSec = 600.0;
+
 std::string defaultOutputPath(const std::string& input_path) {
     const std::size_t slash = input_path.find_last_of("/\\");
     const std::size_t dot = input_path.find_last_of('.');
@@ -58,7 +67,11 @@ int main(int argc, char** argv) {
     if (argc < 2) {
         std::cerr << "usage: " << argv[0]
                   << " input.csv [output.cfg] [--engine sp|bstar|hybrid] [--iters N] [--seed N] [--alpha X]"
-                  << " [--exact-interval N] [--time-budget S] [--adaptive-interval]\n";
+                  << " [--exact-interval N] [--time-budget S] [--adaptive-interval]\n"
+                  << "  F1: a BARE call (neither --iters nor --time-budget) self-imposes a "
+                  << kBareInvocationTimeBudgetSec << "s time budget; pass --time-budget 0 for the"
+                  << " old iters-only default, or --iters N for an explicit iteration bound (budget"
+                  << " off).\n";
         return 2;
     }
 
@@ -71,25 +84,49 @@ int main(int argc, char** argv) {
         options.iters = argInt(argc, argv, "--iters", 1000);
         options.seed = argInt(argc, argv, "--seed", 1);
         options.exact_interval = std::max(1, argInt(argc, argv, "--exact-interval", 50));
-        // Beta Task 5: baked sweep-selected beta defaults. A no-flag run uses the chosen wall-clock
-        // budget (time is the binding stop); an explicit --iters WITHOUT --time-budget selects
-        // deterministic iteration-bounded search (budget OFF) so every regression suite stays
-        // byte-reproducible. An explicit --time-budget always wins. kDefaultTimeBudgetSec and the
-        // --engine fallback below are the two sweep-selected knobs.
+        // Beta Task 5 (bare-invocation default superseded by F1 below): baked sweep-selected beta
+        // defaults. An explicit --iters WITHOUT --time-budget selects deterministic iteration-bounded
+        // search (budget OFF) so every regression suite stays byte-reproducible -- unchanged by F1.
+        // An explicit --time-budget always wins, any value including 0 -- unchanged by F1.
         //
-        // scripts/sweep.sh over the 5 official cases: the iters=1000 reference (budget 0) minimizes
-        // checker_cost for BOTH engines. A wall-clock budget raises the iteration count, but the
-        // elite-pass cheap-score selection mis-ranks candidates under integer geometry (Task 4 known
-        // issue), so more iters inflate routed overflow and REGRESS checker_cost (e.g. hybrid case4
-        // 113.98M -> 162.87M at budget 15; bstar Sigma 273.5M -> ~325M). Best measured cell:
-        // engine=hybrid, budget 0 (Sigma checker_cost 252.7M vs bstar 273.5M). So the budget defaults
-        // OFF; --time-budget stays available for when that search interaction is fixed post-beta.
+        // scripts/sweep.sh over the 5 official cases (original Task 5 measurement, budgets <=15-90s):
+        // the iters=1000 reference (budget 0) minimized checker_cost for both engines at those short
+        // budgets -- the elite-pass cheap-score selection mis-ranks candidates under integer geometry
+        // (Task 4 known issue), so a short budget raised iteration count without fixing that mis-rank,
+        // inflating routed overflow (e.g. hybrid case4 113.98M -> 162.87M at budget 15).
+        //
+        // F1 (2026-07-29 sweep, docs to follow): re-ran the sweep to LARGER budgets and found Sigma
+        // rank_cost is actually monotone-DECREASING in time budget, 600s best measured (Sigma checker
+        // 153.93M -> 138.82M, Sigma rank 120.20M -> 115.79M). The Task 4 mis-rank risk above is
+        // structurally capped by B2's value-gated portfolio fold (runPricingPortfolio /
+        // PortfolioFold::admit, search.hpp/.cpp): phase 1 of a budgeted run is ALWAYS the plain
+        // budget-off default computed first and folded in, so spending a budget can never make the
+        // folded result worse than the default, only possibly better. The contest organizer's harness
+        // invokes the binary BARE -- no flags at all (docs/official/alpha_test/*/run.log) -- so a bare
+        // run now self-imposes kBareInvocationTimeBudgetSec (600s) to capture this gain: 8 cases x
+        // ~600s fits the 2h contest limit with ~33% margin, and B2's anytime output (the on_improved
+        // callback below) covers any overrun by leaving the latest fold-best .cfg on disk even if the
+        // process is killed mid-budget. kDefaultTimeBudgetSec and the --engine fallback below are the
+        // two sweep-selected knobs.
         constexpr double kDefaultTimeBudgetSec = 0.0;
         const bool has_iters = hasFlag(argc, argv, "--iters");
         const bool has_budget = hasFlag(argc, argv, "--time-budget");
-        options.time_budget_sec = (has_iters && !has_budget)
-                                      ? 0.0
-                                      : argDouble(argc, argv, "--time-budget", kDefaultTimeBudgetSec);
+        if (has_budget) {
+            options.time_budget_sec = argDouble(argc, argv, "--time-budget", kDefaultTimeBudgetSec);
+        } else if (has_iters) {
+            options.time_budget_sec = 0.0;
+        } else {
+            options.time_budget_sec = kBareInvocationTimeBudgetSec;
+        }
+        // F1 regression probe (test/run_f1_regressions.sh): cheap marker printed BEFORE the
+        // (potentially long, up to 600s) portfolio search runs, so a test can timeout-kill a bare
+        // invocation and still observe which parsing mode was selected without waiting out the
+        // budget. Field names deliberately avoid every substring the existing regression/benchmark/
+        // sweep scripts already grep for out of the FINAL summary line below (score=, wirelength=,
+        // channel_overflow_nets=, open_routes=, validation=, engine=, iters=<digit>).
+        std::cerr << "budget_parse: iters_explicit=" << (has_iters ? 1 : 0)
+                  << " time_budget_explicit=" << (has_budget ? 1 : 0)
+                  << " resolved_time_budget_sec=" << options.time_budget_sec << "\n";
         // B6 (flag-gated adaptive interval, .superpowers/sdd/b6-brief.md): DEFAULT OFF -- absent,
         // runPlacementSearch's exact_interval stays constant exactly as before B6 (hard byte-
         // identity acceptance gate). See SearchOptions.adaptive_interval's doc comment (search.hpp).

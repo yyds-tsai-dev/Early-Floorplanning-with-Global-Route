@@ -21,7 +21,13 @@ for engine in bstar hybrid; do
   for i in 0 1 2 3 4; do
     csv="test/2026 ICCAD_case.case$i.csv"; out="/tmp/bench_${engine}_case$i.cfg"
     start=$(date +%s.%N)
-    bin/efgr "$csv" "$out" --engine "$engine" "$@" 2>/dev/null
+    # F1 bare-call guard (2026-07-29): "$@" (this script's own extra args) can be empty when the
+    # caller invokes `scripts/benchmark.sh` with no extra flags, which would otherwise leave this
+    # call bare (no --iters, no --time-budget) -- src/main.cpp now self-imposes a 600s budget on a
+    # bare call, which would balloon this loop to 10 runs x 600s. Appended AFTER "$@" so an explicit
+    # --time-budget the caller passes (e.g. `scripts/benchmark.sh --time-budget 60`) is still found
+    # first by bin/efgr's flag scan and wins; this only fires as a safety-net default.
+    bin/efgr "$csv" "$out" --engine "$engine" "$@" --time-budget 0 2>/dev/null
     rt=$(awk -v e="$(date +%s.%N)" -v s="$start" 'BEGIN{printf "%.2f", e-s}')
     line=$(bin/efgr_rescore "$csv" "$out")
     eval "$(echo "$line" | tr ' ' '\n' | sed 's/^/B_/')"   # B_area= B_wl= ...
