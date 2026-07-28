@@ -482,15 +482,29 @@ RespaceResult respaceFixedPoint(const Problem& problem, const Placement& base, c
 
 // B7 (capacity-profit interior-gap rungs, .superpowers/sdd/b7-brief.md; research doc
 // 2026-07-23 §3c): see respace.hpp's doc comment for the field/contract summary. Profit
-// derivation -- a first-order linearization of exactScore's own official overflow-rate penalty
-// term kBetaLin*A*R (R=O/C, route_cost.hpp; the tail term kBetaTail is deliberately NOT included,
-// matching the brief's own formula): holding O fixed and treating value ~= A*(1+kBetaLin*O/C) +
-// alpha*WL, d(value)/dA = 1+kBetaLin*O/C and d(value)/dC = -kBetaLin*A*O/C^2, so widening a gap
+// derivation, linear regime (R = O/C <= kOverflowRateThreshold, where every current benchmark
+// case sits) -- a first-order linearization of exactScore's own official overflow-rate penalty
+// term kBetaLin*A*R (route_cost.hpp), kept VERBATIM from B7 so linear-regime ranking stays
+// bit-identical: holding O fixed and treating value ~= A*(1+kBetaLin*O/C) + alpha*WL,
+// d(value)/dA = 1+kBetaLin*O/C and d(value)/dC = -kBetaLin*A*O/C^2, so widening a gap
 // that adds capacity DeltaC (free -- no WL/routing change) and outline area DeltaA changes value
 // by -[kBetaLin*A*O/C^2]*DeltaC + [1+kBetaLin*O/C]*DeltaA; profit is the negation (the value
-// decrease). This key only RANKS candidates -- correctness of the eventual adoption never depends
-// on its precision, since every applied candidate is still gated by a real exactCached call +
-// outlineSweepBetter (legality-first, then value) at the call site (search.cpp).
+// decrease).
+//
+// V5 tail branch (Codex V5-port review finding #2; analysis doc 2026-07-28 section 6): B7
+// deliberately omitted the tail term (the brief predates the V5 sqrt tail), but past the
+// threshold the linear coefficients are badly wrong in BOTH directions -- deep in the tail
+// d(penalty)/dC collapses to kBetaTail*A*R/(2C*sqrt(R-theta)) (the linear key overvalues added
+// capacity ~26x at R=1), while just past theta a modest DeltaC pulls R back BELOW theta and
+// collects the whole sqrt-tail cliff (the linear key undervalues it ~3.6x at R=0.0501). Since
+// every candidate's (DeltaC, DeltaA) is concrete here, the tail branch prices the EXACT piecewise
+// penalty delta per candidate -- officialOverflowPenalty at (O/C, A) minus at (O/(C+DeltaC),
+// A+DeltaA), minus the DeltaA outline-area cost itself -- which handles the downward
+// theta-straddle exactly and needs no derivative singularity guard. Deterministic: a pure
+// function of the (O, C, A) snapshot and the candidate's own deltas. This key only RANKS
+// candidates -- correctness of the eventual adoption never depends on its precision, since every
+// applied candidate is still gated by a real exactCached call + outlineSweepBetter
+// (legality-first, then value) at the call site (search.cpp).
 //
 // DeltaC(g,delta) = 25*delta*count, where `count` is the number of distinct channels in
 // `routing.channels` whose channelBounds resolves to exactly this (from,to) pair on this axis --
@@ -525,6 +539,10 @@ std::vector<CapacityGapCandidate> capacityGapCandidates(const Problem& problem, 
     double rate = O / C;
     double coeff_c = kBetaLin * A * rate / C;  // 20*A*O/C^2
     double coeff_a = 1.0 + kBetaLin * rate;    // 1 + 20*O/C
+    // V5 tail branch (doc comment above): past the threshold, rank by the exact piecewise penalty
+    // delta instead of the linear coefficients. penalty_before is shared by every candidate.
+    const bool tail = rate > kOverflowRateThreshold;
+    const double penalty_before = officialOverflowPenalty(rate, A);
 
     // Per-axis tight span + slack (computed once, reused by every gap on that axis).
     std::size_t n = problem.blocks.size();
@@ -564,7 +582,15 @@ std::vector<CapacityGapCandidate> capacityGapCandidates(const Problem& problem, 
         for (double delta : kDeltas) {
             double delta_c = 25.0 * delta * static_cast<double>(count);
             double delta_a = std::max(0.0, delta - slack);
-            double profit = coeff_c * delta_c - delta_a * coeff_a;
+            double profit;
+            if (tail) {
+                // Exact piecewise delta (V5 tail branch, doc comment above): the official penalty
+                // drop from adding DeltaC capacity (and any DeltaA outline growth), minus the
+                // DeltaA area cost itself. Crossing back below theta is priced exactly.
+                profit = penalty_before - officialOverflowPenalty(O / (C + delta_c), A + delta_a) - delta_a;
+            } else {
+                profit = coeff_c * delta_c - delta_a * coeff_a;
+            }
             candidates.push_back(CapacityGapCandidate{from, to, horizontal, delta, profit});
         }
     }

@@ -117,15 +117,28 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
     std::vector<std::array<double, 2>> history_channel(n_channels, std::array<double, 2>{0.0, 0.0});
     std::vector<double> history_ft(n_blocks, 0.0);
 
-    // B4 (design b4-design.md §3.1/§7.2): official per-overflow-net price, fixed for this whole
-    // routeProblem call. `outline_area` is the scorer's own A (eval.cpp's routeAndScoreAt scopes
-    // problem.outline_w/h to exactly the outline this call routes at, before calling routeProblem --
-    // so this IS that same declared outline). `raw_capacity_total` is C = Sum_ch(25*h + 25*w), RAW
-    // (no max(1.0,.) clamp), over the channels extracted once above -- both fixed for the whole
-    // pass, matching computeOverflowAndMismatch's own channel_capacity_total accumulation exactly
-    // (same channel list, same RAW formula), just computed up front since neither depends on usage.
-    // `p_ovf` is P_ovf = kBetaLin*A/C, the exact derivative of the scorer's linear overflow-rate term
-    // d(20*A*R)/d(overflow_nets) -- a single scorer-derived rate, not a per-channel area proxy.
+    // B4 (design b4-design.md §3.1/§7.2): official per-overflow-net price. `outline_area` is the
+    // scorer's own A (eval.cpp's routeAndScoreAt scopes problem.outline_w/h to exactly the outline
+    // this call routes at, before calling routeProblem -- so this IS that same declared outline).
+    // `raw_capacity_total` is C = Sum_ch(25*h + 25*w), RAW (no max(1.0,.) clamp), over the channels
+    // extracted once above -- both fixed for the whole pass, matching computeOverflowAndMismatch's
+    // own channel_capacity_total accumulation exactly (same channel list, same RAW formula), just
+    // computed up front since neither depends on usage. The initial `p_ovf` is P_ovf = kBetaLin*A/C,
+    // the exact derivative of the scorer's linear overflow-rate term d(20*A*R)/d(overflow_nets) --
+    // a single scorer-derived rate, not a per-channel area proxy.
+    //
+    // V5 tail-aware re-pricing (Codex V5-port review finding #2; analysis doc section 6): no longer
+    // const -- the official penalty is piecewise (sqrt tail past kOverflowRateThreshold), so the
+    // negotiation loop below re-prices p_ovf at the START of every round >= 1 from the PREVIOUS
+    // round's global overflow level via roundOverflowPrice (route_cost.hpp: linear derivative /
+    // theta-entry secant / past-theta average -- see its doc comment for why a full-rip-up round
+    // must charge the AVERAGE, not the endpoint marginal, on the concave tail). Round 0 always
+    // keeps this pristine linear expression (there is no previous round), and roundOverflowPrice
+    // returns the bit-identical expression while the previous round's (O+1)/C stayed <= threshold
+    // -- so any call whose every round sits in the linear regime (all current benchmark cases,
+    // R <= 0.00906) prices byte-identically to the pre-refinement router. Only the cost_driven
+    // negotiation rounds read p_ovf; the legacy pricing branch and the
+    // route_pricing_official=false portfolio leg never touch it.
     const double outline_area = problem.outline_w * problem.outline_h;
     // F-FT (docs/research/2026-07-28-alpha-v5-cost-recalculation-analysis.md §6, Codex finding #1):
     // base FT-converted area (zero crossing nets) summed over EVERY block -- the same per-block value
@@ -148,7 +161,7 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
     result.ft_area_sum = base_ft_area_sum;
     double raw_capacity_total = 0.0;
     for (const auto& ch : result.channels) raw_capacity_total += 25.0 * ch.rect.h + 25.0 * ch.rect.w;
-    const double p_ovf = (raw_capacity_total > 0.0) ? kBetaLin * outline_area / raw_capacity_total : 0.0;
+    double p_ovf = (raw_capacity_total > 0.0) ? kBetaLin * outline_area / raw_capacity_total : 0.0;
 
     // P2 Task 3 (design p2-design.md §5.1-5.4; plan Global Constraint 8): `routeChunk` is split into
     // a pathfinding phase (`findRoutePath`, priced Dijkstra only, no accrual/mutation of `result`
@@ -641,6 +654,11 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
 
     bool have_best = false;
     RoutingResult best;
+    // V5 tail-aware re-pricing state: the previous round's global overflow nets (0.0 before any
+    // round has completed, so round 0's price is untouched). Updated right after each round's
+    // computeOverflowAndMismatch -- a pure function of that round's own deterministic result, so
+    // the re-priced rounds stay deterministic (no iteration-order dependence).
+    double prev_overflow_nets = 0.0;
     // Lexicographic round cost (design §4.1/requirement 5; B4 design §7.2 re-denomination): (open_routes,
     // then the SAME units eval.cpp's exact scorer charges -- alpha*WL + kBetaLin*A*R +
     // kBetaTail*A*max(0,R-threshold) + kBetaFt*mismatch, via the shared roundCostOfficial helper
@@ -669,6 +687,25 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
                 h[1] *= kHistoryDecay;
             }
             for (auto& h : history_ft) h *= kHistoryDecay;
+        }
+
+        // V5 tail-aware re-pricing (Codex V5-port review finding #2; analysis doc section 6):
+        // rounds >= 1 price overflow at the CURRENT global overflow level -- the previous round's
+        // channel_overflow_nets against the fixed raw capacity -- via roundOverflowPrice
+        // (route_cost.hpp): the linear derivative while (O+1)/C <= threshold (bit-identical to
+        // the kBetaLin*A/C expression p_ovf already holds, so linear-regime calls are
+        // byte-identical to the pre-refinement router), the exact theta-entry secant on a
+        // straddle, and the exact AVERAGE P(R)/O past the threshold (a full-rip-up round rebuilds
+        // its overflow from zero, so the average -- not the endpoint marginal -- is the price
+        // whose round total reproduces the true concave penalty; see the helper's doc). Once a
+        // round lands past the threshold, the next round's Dijkstra pricing and history
+        // surcharges (both denominated in p_ovf) follow that true tail price instead of the flat
+        // linear rate. Round selection and the legacy comparison gate already judge full
+        // roundCostOfficial (exact piecewise), unchanged. Guarded on route_pricing_official: the
+        // retained pre-B4 portfolio leg never reads p_ovf, and keeping the guard makes that leg's
+        // byte-identity trivially self-evident.
+        if (round >= 1 && problem.route_pricing_official) {
+            p_ovf = roundOverflowPrice(prev_overflow_nets, raw_capacity_total, outline_area);
         }
 
         // Full rip-up: fresh per-round routing state. Channels' RECTANGLE geometry is extracted once
@@ -730,6 +767,7 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
         }
 
         computeOverflowAndMismatch(round_result);
+        prev_overflow_nets = round_result.channel_overflow_nets;
 
 #ifdef EFGR_ROUTE_TRACE
         {
@@ -772,6 +810,15 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
         // clean/overflow-free cases (e.g. case0) at ~1x routing cost instead of paying
         // kNegotiationRounds x, which matters once T6 flips cost_driven on for every exact eval (task
         // requirement 6).
+        //
+        // V5 re-pricing caveat: a bump-free round also carries ZERO overflow, so a follow-up round
+        // would be priced back at the linear rate; if THIS round ran at a tail price (the previous
+        // round overflowed past the threshold), the "provably identical" half of the argument above
+        // no longer strictly applies -- a follow-up would explore under a different p_ovf and could
+        // land on a different trade-off. Breaking anyway is deliberate: `best` already holds this
+        // round's overflow-free result and is only ever REPLACED by a strictly better round on the
+        // same exact key, so the break forgoes at most a marginal improvement and never regresses --
+        // the same trade the pre-refinement router (which also broke here) already made.
         bool any_bump = false;
         for (std::size_t c = 0; c < round_result.channels.size(); ++c) {
             const auto& ch = round_result.channels[c];
