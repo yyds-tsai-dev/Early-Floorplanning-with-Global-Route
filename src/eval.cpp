@@ -192,13 +192,15 @@ Score routeAndScoreAt(const Problem& problem, const Placement& placement, double
     scoped.outline_h = h;
     RoutingResult routing = routeProblem(scoped, placement);
     Score score = cheapScore(scoped, placement);
-    // Beta Task 3 (self-consistency): this exact tier charges REAL routed overflow/FT (the kBeta*
-    // terms below), so strip cheapScore's cheap ROUTE-AWARE overflow/FT PROXY -- keeping both would
+    // Beta Task 3 (self-consistency): this exact tier charges REAL routed overflow/FT (the V5 terms
+    // below), so strip cheapScore's cheap ROUTE-AWARE overflow/FT PROXY -- keeping both would
     // double-charge congestion the exact router already measures. What remains of cheapScore's
-    // penalty is pure legality (out-of-outline + pairwise overlap), which is 0 for a legal placement,
-    // so a legal / zero-open / zero-FT / zero-overflow solution scores EXACTLY the official
-    // checker_cost (A + alpha*WL + overflow_penalty) -- the property test/run_selfconsistency_
-    // regressions.sh proves against the golden re-scorer. routeAwareProxyPenalty is deterministic, so
+    // penalty is pure legality (out-of-outline + pairwise overlap), which is 0 for a legal placement.
+    // V5 (docs/research/2026-07-28-alpha-v5-cost-recalculation-analysis.md): a legal, zero-open
+    // solution now scores EXACTLY `A + alpha*WL + officialOverflowPenalty(R,A) + kBetaFt*max(0,
+    // ft_area_sum-A)` -- the property test/run_selfconsistency_regressions.sh proves against the
+    // golden re-scorer (src/cfg_score.cpp, which independently reproduces the same
+    // officialOverflowPenalty tail on the written .cfg). routeAwareProxyPenalty is deterministic, so
     // the recompute here is bit-identical to cheapScore's addend and cancels it exactly.
     score.penalty -= routeAwareProxyPenalty(scoped, placement);
     // C1 milestone: explicit plain W*H (the declared outline this call is scoping/scoring at),
@@ -207,20 +209,20 @@ Score routeAndScoreAt(const Problem& problem, const Placement& placement, double
     score.outline_area = w * h;
     score.wirelength = routing.total_wirelength;
     score.penalty += routing.open_routes * 1e15;
-    // C1 milestone (byte-verified against the official checker's report.json cost_breakdown): the scorer now
-    // charges the OFFICIAL checker's GLOBAL overflow-rate penalty, deliberately DECOUPLED from the
-    // router's own per-channel area-denominated marginal pricing (route_cost.hpp's
+    // V5 (docs/research/2026-07-28-alpha-v5-cost-recalculation-analysis.md, sections 1.3/1.4;
+    // byte-verified against the official "PATH Detail Cost Calculation" page): the scorer charges the
+    // OFFICIAL checker's GLOBAL overflow-rate penalty via the exact piecewise tail
+    // (officialOverflowPenalty, route_cost.hpp) applied to R = channel_overflow_nets /
+    // channel_capacity_total (routing.cpp, RAW 25*h/25*w capacity, nets units) -- deliberately
+    // DECOUPLED from the router's own per-channel area-denominated marginal pricing (route_cost.hpp's
     // kOverflowAreaWeight/channelMarginalCost, which still guides the router toward low-overflow
-    // paths but is no longer required to equal this weight -- see route_cost.hpp's updated comment).
-    // R = channel_overflow_nets / channel_capacity_total (routing.cpp, RAW 25*h/25*w capacity, nets
-    // units) is the checker's own overflow RATE; beta_lin prices it linearly everywhere and beta_tail
-    // adds a steeper tail once R exceeds kOverflowRateThreshold. FT excess stays a flat per-um^2
-    // charge (kBetaFt), no longer sharing a weight with the overflow term.
+    // paths but is no longer required to equal this weight). The FT term is now the AGGREGATE excess
+    // of ft_area_sum (routing.cpp's computeOverflowAndMismatch, summed over EVERY block) over the
+    // outline area, replacing the retired flat per-block feedthrough_mismatch charge.
     double R = routing.channel_capacity_total > 0.0
              ? routing.channel_overflow_nets / routing.channel_capacity_total : 0.0;
-    score.penalty += kBetaLin * score.outline_area * R
-                   + kBetaTail * score.outline_area * std::max(0.0, R - kOverflowRateThreshold);
-    score.penalty += kBetaFt * routing.feedthrough_mismatch;
+    score.penalty += officialOverflowPenalty(R, score.outline_area);
+    score.penalty += kBetaFt * std::max(0.0, routing.ft_area_sum - score.outline_area);
     score.value = score.outline_area + problem.alpha * score.wirelength + score.penalty;
     if (routing_out) *routing_out = routing;
     return score;

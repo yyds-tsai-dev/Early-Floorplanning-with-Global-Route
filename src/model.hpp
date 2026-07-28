@@ -125,6 +125,15 @@ struct RoutingResult {
     double total_wirelength = 0.0;
     double channel_overflow = 0.0;
     double feedthrough_mismatch = 0.0;
+    // V5 (docs/research/2026-07-28-alpha-v5-cost-recalculation-analysis.md, section 1.4): sum, over
+    // ALL problem.blocks, of the FT-converted area -- soft blocks with crossing nets contribute
+    // ftRequiredArea(base, ftExtend(nets, tier rate)) (nets==0 degenerates to `base`); every other
+    // block (edge/macro, and soft blocks with zero crossing nets) contributes its declared CSV area.
+    // Populated by computeOverflowAndMismatch (routing.cpp). Official V5 FTPenalty = kBetaFt *
+    // max(0, ft_area_sum - OutlineArea) -- an AGGREGATE slack across every block's FT-converted area,
+    // NOT the per-block feedthrough_mismatch sum below (which stays, unchanged, as respace/search
+    // telemetry -- it is not what the official checker charges).
+    double ft_area_sum = 0.0;
     // C1 milestone: checker-unit (nets / nets-capacity) overflow accrual, RAW 25*h / 25*w capacity
     // (no max(1.0, ·) clamp -- the official checker capacitates on the true channel dimension, e.g.
     // case0 CH6 capacity_h = 25*1.231 = 30.775). Populated by computeOverflowAndMismatch alongside

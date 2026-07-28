@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local replica of the official ICCAD 2026 Problem E checker cost.
+"""Local replica of the official ICCAD 2026 Problem E checker cost -- Cost Function V5.
 
 Milestone C1 acceptance gate: independently recompute the official checker's cost from a solved
 ``output.cfg`` (OUTLINE / BLOCK / CHANNEL / PATH sections, contest output format -- see
@@ -7,49 +7,71 @@ Milestone C1 acceptance gate: independently recompute the official checker's cos
 CONVERSION rates -- see ``src/io.cpp``'s ``parseProblem``), and compare against the official
 checker's own ``report.json`` output.
 
-Formula (LOCKED by the C1 task brief; the beta_lin*OutlineArea*R term is byte-verified exact against
-docs/official/alpha_test/cade0002/case{0..4}/report.json's "cost_breakdown" block on all 5 cases --
-see module note 4 below for the one narrow, documented gap in the beta_tail term):
+V5 PORT (2026-07-28): the official checker moved to "Cost Function V5" -- see
+docs/research/2026-07-28-alpha-v5-cost-recalculation-analysis.md (evidence:
+docs/official/alpha_test/cade0002_calculation.html, "PATH Detail Cost Calculation", eval run
+2026-07-19). This module mirrors tools/verify_v5_alpha.py, which is byte/example-verified EXACT
+against that page, while keeping this script's own CLI/report structure. Module notes 1-4 below
+predate the V5 port; notes 2-4 are now resolved/superseded by it (marked inline) and kept for
+provenance -- they explain WHY the V5 rules below look the way they do.
+
+Formula (V5; see the analysis doc above for the byte-verified derivation of each term):
 
     Cost = OutlineArea + alpha*WL + overflow_penalty + ft_penalty
-    overflow_penalty = beta_lin*OutlineArea*R + beta_tail*OutlineArea*max(0, R - theta)
+    WL = sum over PATHs of nets * manhattan_chain_length(guiding points); guiding points are a
+        `cross_gp` for every step between two different objects, and a `corner_gp` (or nothing,
+        for a same-axis straight pass-through) for every step that stays on one object -- see
+        `path_wl_v5`.
+    overflow_penalty = beta_lin*OutlineArea*R                                           if R<=theta
+                      = beta_lin*theta*OutlineArea + beta_tail*OutlineArea*sqrt(R-theta) if R>theta
     R = channel_overflow_nets / channel_total_capacity
     channel_overflow_nets = sum over channels of
         max(0, horizontal_usage - 25*h) + max(0, vertical_usage - 25*w)      (nets)
     channel_total_capacity = sum over channels of (25*h + 25*w)              (nets; RAW, unclamped)
+    horizontal_usage/vertical_usage: each PATH traversal of a channel charges its nets ONCE per
+        axis touched -- a straight pass-through charges 1 axis, an L-turn charges both.
     ft_penalty = beta_ft * ft_area_excess
+    ft_area_excess = max(0, ft_area_sum - OutlineArea)
+    ft_area_sum = sum over ALL blocks of CSV base AREA, plus (required_area - base_area) for every
+        SOFT block that carried feedthrough nets as a PATH intermediate.
     beta_lin=20.0, beta_tail=1.5, theta=0.05, beta_ft=3.0 (src/model.hpp kBetaLin/kBetaTail/
     kOverflowRateThreshold/kBetaFt -- kept in sync manually; this script has no C++ dependency).
 
-Independently RECOMPUTED by this script, EXACTLY matching report.json (validated to float
-precision on all 5 alpha_test cases -- see the pred/report table this script prints):
+Independently RECOMPUTED by this script (validated to <=5e-6 against the V5 page's five official
+example-path WL subtotals and five per-case overflow/capacity totals -- see
+tools/verify_v5_alpha.py and the pred/report table this script prints):
   - OutlineArea: from the cfg's own OUTLINE line (W*H).
-  - channel_overflow_nets / channel_total_capacity: by replaying each PATH's channel touches into
-    per-channel usage -- EVERY (object, edge) occurrence in a PATH's step list that names a channel
-    contributes `nets` to that channel's horizontal (edge in {1,3}) or vertical (edge in {2,4})
-    usage, independently for the entry-hop AND exit-hop of a pass-through visit (see module note 2
-    below) -- then applying raw 25*h/25*w capacity from the cfg's own CHANNEL rects.
+  - total_wirelength: the V5 guiding-point chain above, replayed per PATH from its (object, edge)
+    token sequence -- see `path_wl_v5`. Previously a report.json fallback (module note 3); that
+    gap is now closed, so this is independently exact rather than a diagnostic-only estimate.
+  - channel_overflow_nets / channel_total_capacity: by replaying each PATH's channel touches,
+    pairing each channel visit's (entry, exit) edges and charging nets once per axis touched
+    (module note 2's old per-token double-charge is superseded) -- then applying raw 25*h/25*w
+    capacity from the cfg's own CHANNEL rects.
   - ft_area_excess: by replaying which SOFT blocks appear as PATH intermediates (feedthrough) and
-    how many nets cross them, then applying the same ft.hpp formula (ftTierRate/ftExtend/
-    ftRequiredArea) against each such block's CSV AREA column (input nominal area) and its cfg
-    placed w*h. (Not exercised by the alpha_test set -- always 0 -- but implemented per spec.)
+    how many nets cross them, applying the same ft.hpp formula (ftTierRate/ftExtend/
+    ftRequiredArea) against each such block's CSV AREA column, then summing the aggregate margin
+    across every block in the problem rather than a per-block mismatch (the official semantics,
+    per the analysis doc's section 4). (Not exercised by the alpha_test set -- always 0 -- but
+    implemented per spec.)
 
-total_wirelength: FALLBACK, read from report.json -- NOT independently recomputed to full fidelity.
-See module note 3 below (KNOWN GAP). This script still computes an independent geometric ESTIMATE
-(see `guide_point`/`compute_cost`'s `total_wirelength` field) for diagnostic purposes, clearly
-labeled "independent estimate, NOT exact" in the printed table -- it is within roughly 1-13% of
-report.json across the 5 cases, not the <=0.1% this script otherwise achieves for every other
-quantity, so it is NOT used for the pass/fail cost gate. The gate instead plugs report.json's own
-total_wirelength into the (independently-verified-correct) Cost formula above, per this task's own
-sanctioned fallback clause: "if replaying to full fidelity is too involved to match exactly in one
-pass, fall back ... and clearly label which quantities are independently recomputed vs read from
-report.json." Everything else in the Cost formula (OutlineArea, overflow_penalty, ft_penalty) is
-independently recomputed; only the alpha*WL term's WL input is read from report.json.
+`wl_override` (an optional `compute_cost` parameter) lets a caller pin `alpha_times_wl`/`cost` to an
+external WL instead of this script's own V5 estimate. It is no longer needed to route around a gap
+-- there isn't one now -- so every prediction this script computes on its own defaults to
+`wl_override=None` (pure V5): both the default 5-case sweep (`run_case`) and the ad hoc `--cfg` path
+compute `pred` independently of report.json. (Codex #3 fix: `run_case` used to default to pinning WL
+to report.json here, which leaked into `alpha_times_wl`/`cost` and made the printed "pred cost" not
+pure V5.) `wl_override` remains wired through the ad hoc path's `--report` flag for a caller who
+explicitly wants to pin WL to an external value; the default sweep never sets it, and instead prints
+report.json's numbers alongside `pred` purely as a labeled historical (pre-V5) reference. Those
+reference columns are EXPECTED to diverge from `pred` now (other than OutlineArea/matrix_sum/
+path_sum), since report.json predates the V5 rule change (see the analysis doc's section 3 old-vs-V5
+comparison table); this script's own `pred` values are fully independent of it.
 
-Two non-obvious things this replay gets right, discovered by cross-referencing case0's
-routing_details/channel.demand_h_by_channel/demand_v_by_channel against a first-draft
-implementation that used routing.cpp's own internal conventions verbatim (which turned out NOT to
-match the checker's on both counts):
+Two things the PRE-V5 replay got right, discovered by cross-referencing case0's routing_details/
+channel.demand_h_by_channel/demand_v_by_channel against a first-draft implementation that used
+routing.cpp's own internal conventions verbatim (which turned out NOT to match the checker's on
+both counts) -- plus two gaps that investigation left open, both now CLOSED by the V5 port above:
 
   1. Guide points must be derived from the PATH tokens' explicit edge label, not by re-deriving
      "does rect a touch rect b" via a coordinate-equality epsilon on the cfg's printed (3-decimal)
@@ -57,77 +79,63 @@ match the checker's on both counts):
      path_idx1 step0: BLK02.right()=1827.948 vs CH11.x=1827.947, gap=0.001) -- a tight epsilon
      (routing.cpp's internal kEps=1e-6, which is fine pre-text-round-trip) misclassifies these as
      non-touching and derives the wrong guide point. The edge label was computed by the router
-     BEFORE text round-tripping and is authoritative; use it to pick the branch (and, within a
-     branch, routing.cpp's guidePoint always takes the .right()/.top() of whichever of {a,b} is the
-     left/below rect -- edge3 (a.right()==b.x) => x=a.right(); edge1 (a.x==b.right()) => x=b.right();
-     edge2 (a.top()==b.y) => y=a.top(); edge4 (a.y==b.top()) => y=b.top()).
-  2. A channel's usage is accrued PER HOP-TOUCH, not per through-traversal direction. A straight
-     pass-through channel (entry and exit on the same axis, e.g. left-in/right-out) is charged
-     2*nets on that axis -- confirmed exactly against case0: CH6 carries a single 500-net
-     straight-through path yet report.json's demand_h_by_channel.CH6 is 1000 (500 for the entry
-     touch + 500 for the exit touch); CH8's split entry-vertical/exit-horizontal path similarly
-     reproduces demand_h_by_channel.CH8=500 / demand_v_by_channel.CH8=2300 exactly. This differs
-     from routing.cpp's OWN internal commitRoutePath, which prices a pass-through channel's usage
-     ONCE per direction via the net entry-to-exit guide-point delta (a documented, deliberate
-     router-side simplification/proxy -- see routing.cpp's channel-hop comment in findRoutePath) --
-     that internal convention is what the router uses to find paths, not what the official checker
-     charges, so this script intentionally does NOT mirror it.
-  3. KNOWN GAP (why total_wirelength falls back to report.json): the official checker's guiding
-     point for a channel hop is NOT the touched boundary's overlap midpoint -- routing.cpp's
-     guidePoint() formula (which this task's brief characterized as already-correct "router
-     physics"). Ground truth from the checker's own per-path SVG visualizations
-     (docs/official/alpha_test/cade0002/case0/viz/path_{0..4}.html), which each embed a dashed
-     <polyline> of the actual guide points used AND a title with that exact path's WL (verified: the
-     polyline's own Manhattan length, converted from SVG pixel space back to um via the panel's
-     rect-vs-cfg-OUTLINE scale factor, reproduces the title's WL to within SVG-text rounding):
-       - path_idx0 (case0, BLK02->CH8->BLK03, 900 nets, a plain 2-hop STRAIGHT pass-through, zero
-         borderline gap, zero L-turn -- the simplest possible multi-hop case): title says WL=442.7.
-         The overlap-midpoint chain formula (this script's `guide_point`, matching routing.cpp
-         exactly) gives 157.552 -- a 2.8x difference on the simplest possible case, so this is not a
-         rounding or edge-case issue.
-       - path_idx4 (BLK02->BLK07, direct 1-hop abut): title says WL=0.0, confirming the *only* piece
-         of guiding-point behavior this script's formula gets right is the zero-WL direct-abut case
-         (QA A31).
-     The decoded polyline vertices for the multi-hop paths do not sit at either endpoint rect's own
-     boundary-overlap midpoint, and are NOT explained by any of: overlap-midpoint (this script's
-     current formula), source/target block-centroid projection, or bounding-box HPWL (tested and
-     ruled out -- see the diagnostic trace this task's implementer ran). The pattern looks like a
-     jointly-optimized shortest-Manhattan-path-through-a-corridor-of-successive-boundaries
-     computation (a "taut string"/funnel-style algorithm over the whole hop sequence at once, not an
-     independent per-hop choice), which is a genuinely different and more involved algorithm than
-     what routing.cpp implements today -- and, notably, since routing.cpp's `exactScore` uses this
-     same guidePoint() formula LIVE (not just in this offline validator), the solver's real
-     wirelength may be systematically off from the true contest metric for any path with 2+ hops.
-     This is a substantive, separate finding outside a "byte-verify + remap constants" task's scope
-     to fix by guessing; flagged for a follow-up deep-reasoner investigation rather than guessed at
-     here.
-  4. KNOWN GAP, narrower: the beta_tail term. Among the 5 alpha_test cases, only case1 has R > theta
-     (0.05384... > 0.05; the other 4 all have R well under theta, so their overflow_penalty reduces
-     to the pure-linear beta_lin*OutlineArea*R term, which matches report.json's overflow_penalty to
-     float precision on all 4 -- that exact match is what proves the linear term and R's own
-     definition are exactly right). For case1, the LOCKED tail formula
-     (beta_tail*OutlineArea*max(0, R-theta), using the SAME global R) computed here is
+     BEFORE text round-tripping and is authoritative; use it to pick the branch. STILL TRUE under
+     V5 -- `cross_gp`/`corner_gp` are still driven by the PATH token's edge label; only the
+     within-branch midpoint formula changed (see the Formula section above).
+  2. SUPERSEDED BY V5 (see the Formula section above -- demand is now single-charge-per-axis-per-
+     traversal): a channel's usage used to be accrued PER HOP-TOUCH, not per through-traversal
+     direction. A straight pass-through channel (entry and exit on the same axis, e.g.
+     left-in/right-out) was charged 2*nets on that axis -- confirmed exactly against case0's OLD
+     report.json: CH6 carries a single 500-net straight-through path yet report.json's
+     demand_h_by_channel.CH6 is 1000 (500 for the entry touch + 500 for the exit touch); CH8's
+     split entry-vertical/exit-horizontal path similarly reproduced demand_h_by_channel.CH8=500 /
+     demand_v_by_channel.CH8=2300 exactly. This differed from routing.cpp's OWN internal
+     commitRoutePath (which prices a pass-through channel's usage ONCE per direction via the net
+     entry-to-exit guide-point delta -- a documented, deliberate router-side simplification/proxy
+     -- see routing.cpp's channel-hop comment in findRoutePath) -- it was specifically the OLD
+     (pre-V5) checker's own double-charging convention, not something this script invented.
+  3. RESOLVED BY V5 (formerly "KNOWN GAP", why total_wirelength used to fall back to report.json):
+     the official checker's guiding point for a channel hop is NOT the touched boundary's overlap
+     midpoint that routing.cpp's guidePoint() computes. Ground truth from the checker's own
+     per-path SVG visualizations (docs/official/alpha_test/cade0002/case0/viz/path_{0..4}.html),
+     which each embed a dashed <polyline> of the actual guide points used AND a title with that
+     exact path's WL, showed e.g. path_idx0 (BLK02->CH8->BLK03, 900 nets, a plain 2-hop STRAIGHT
+     pass-through, zero borderline gap, zero L-turn -- the simplest possible multi-hop case):
+     title says WL=442.7, where the old overlap-midpoint chain formula gave 157.552 -- a 2.8x
+     difference on the simplest possible case, so this was never a rounding or edge-case issue.
+     The V5 page (A41 + Figure 6) answers this exactly: a cross guiding point with the
+     across-border coordinate AVERAGED between both rects' near edges (not snapped to one side, as
+     the old formula did), plus a corner point inserted for same-object axis turns -- see
+     `cross_gp`/`corner_gp`, EXACT against all five official example-path subtotals (see
+     tools/verify_v5_alpha.py). This closes the item flagged here as a follow-up deep-reasoner
+     investigation; none is needed. (Since routing.cpp's `exactScore` still uses the OLD
+     guidePoint() formula LIVE, the solver's own real wirelength accounting is a separate,
+     still-open port -- out of scope for this script.)
+  4. RESOLVED BY V5 (formerly "KNOWN GAP, narrower"): the beta_tail term. Among the 5 alpha_test
+     cases, only case1 had R > theta under the OLD (double-charged) demand rule (0.05384... >
+     0.05; the other 4 all had R well under theta, so their overflow_penalty reduced to the
+     pure-linear beta_lin*OutlineArea*R term, which matched report.json's overflow_penalty to
+     float precision on all 4 -- that exact match is what proved the linear term and R's own
+     definition were exactly right even before V5). For case1, the plain-linear tail formula this
+     script used to implement (beta_tail*OutlineArea*max(0, R-theta)) computed
      beta_tail*OutlineArea*(R-theta) = ~45705, giving overflow_penalty=8456726.22 against
-     report.json's 8537517.71 -- short by ~80791 (~1% of overflow_penalty, ~0.3% of total cost,
-     enough to push case1 just outside the 1e-3 cost gate). Investigated and RULED OUT: (a) any
-     tail dependence on PER-CHANNEL overflow/capacity ratios (case0's CH6 has a per-channel ratio of
-     31.5, vastly over theta, yet case0's overflow_penalty matches EXACTLY using the pure global-R
-     linear term alone -- so the tail cannot be a function of any per-channel ratio, only of the
-     global R); (b) capacity-weighted-average and max-per-channel-excess variants of the tail (both
-     tried numerically, both overshoot case1 by a large margin -- see this task's diagnostic trace).
-     With only ONE case exercising R > theta, there is exactly one equation and not enough
-     independent data to uniquely solve for the true tail functional form without guessing -- and
-     the task's formula is explicitly LOCKED ("these are DECISIONS, not suggestions"), so this script
-     implements it exactly as specified rather than substitute a guessed replacement. Net effect:
-     4/5 cases match COST to float precision; case1 is short by rel_err ~3.14e-3 (just over the 1e-3
-     gate), isolated entirely to this one tail term.
+     report.json's 8537517.71 -- short by ~80791 (~1% of overflow_penalty, ~0.3% of total cost),
+     with not enough independent R>theta data points (only case1) to solve the true functional
+     form without guessing. The V5 page's piecewise form -- beta_lin*theta*OutlineArea +
+     beta_tail*OutlineArea*sqrt(R-theta) for R>theta -- reproduces that OLD case1 penalty
+     (8,537,517.705283) to float precision (see tools/verify_v5_alpha.py section 3): the tail was
+     always a sqrt, not a second linear segment. Under V5's single-charge demand rule, all 5
+     alpha_test cases now fall in the pure-linear region (R well under theta), so the sqrt branch
+     is unexercised by this validation set but implemented per the resolved formula
+     (`overflow_penalty_v5`).
 
-Read from report.json: total_wirelength only (the WL fallback above), used solely as an input to
-the independently-verified Cost formula for the pass/fail gate -- never blended into or presented as
-an "independently recomputed" quantity. (All 5 alpha_test cases have ft_area_excess==0 and
-edge_penalty==0, so the FT and edge-penalty code paths are implemented per spec but not exercised by
-this validation set; edge_penalty is not modeled here at all, consistent with the locked cost
-formula, which omits it.)
+Read from report.json: nothing, for the cost computation itself -- OutlineArea, WL,
+overflow_penalty, and ft_penalty are all independently recomputed under V5 (see above).
+`wl_override`/`--report` remain available to pin an external WL and print a pred-vs-report.json
+comparison table. All 5 alpha_test cases have ft_area_excess==0 and edge_penalty==0 either way, so
+the FT and edge-penalty code paths are implemented per spec but not exercised by this validation
+set; edge_penalty is not modeled here at all, consistent with the Cost formula above, which omits
+it.
 
 Usage:
     python3 tools/official_cost.py
@@ -144,8 +152,6 @@ import json
 import math
 import os
 import sys
-
-KEPS = 1e-6
 
 # src/model.hpp kBetaLin/kBetaTail/kOverflowRateThreshold/kBetaFt.
 BETA_LIN = 20.0
@@ -299,42 +305,69 @@ def parse_cfg(path):
 
 
 # ---------------------------------------------------------------------------
-# Geometry replay -- mirrors routing.cpp's guidePoint/commitRoutePath exactly.
+# Geometry replay -- V5 guiding points (cross_gp/corner_gp/path_wl_v5), exact port of
+# tools/verify_v5_alpha.py; PATH token structure still mirrors routing.cpp's commitRoutePath.
 # ---------------------------------------------------------------------------
 
-def rect_right(r):
-    return r[0] + r[2]
+def rect_edge(r, e):
+    """Edge descriptor for guiding-point math: (axis, fixed coord, span lo, span hi). Edges are
+    CCW from left: 1=left, 2=top, 3=right, 4=bottom (matches routing.cpp's/the PATH tokens' edge
+    labels). Exact port of tools/verify_v5_alpha.py's R.edge for this file's (x, y, w, h) tuples."""
+    x, y, w, h = r
+    if e == 1:
+        return ('H', x, y, y + h)
+    if e == 3:
+        return ('H', x + w, y, y + h)
+    if e == 2:
+        return ('V', y + h, x, x + w)
+    if e == 4:
+        return ('V', y, x, x + w)
+    raise ValueError(e)
 
 
-def rect_top(r):
-    return r[1] + r[3]
+def cross_gp(ra, ea, rb, eb):
+    """V5 cross guiding point for a step between two DIFFERENT objects: the midpoint of the
+    overlapping border segment, with the across-border coordinate AVERAGED between both rects'
+    near edges (rather than snapped to one side) -- this absorbs the <=0.001 adjacency gap the
+    cfg's 3-decimal rounding can leave. Exact port of tools/verify_v5_alpha.py's cross_gp."""
+    axa, ca, lo_a, hi_a = rect_edge(ra, ea)
+    _, cb, lo_b, hi_b = rect_edge(rb, eb)
+    mid = 0.5 * (max(lo_a, lo_b) + min(hi_a, hi_b))
+    fixed = 0.5 * (ca + cb)
+    return (fixed, mid) if axa == 'H' else (mid, fixed)
 
 
-def guide_point(a, b, edge):
-    """Guiding point for a hop a->b whose PATH-token edge label (edgeFromTo(a,b)) is `edge`.
-    Branch/coordinate choice matches routing.cpp's guidePoint exactly (see module docstring point
-    1) but is driven by the given label instead of a coordinate-equality epsilon test, since cfg
-    text is rounded to 3 decimals and "touching" rects can differ by ~1e-3 after that round-trip."""
-    if edge == 3:      # a.right() == b.x: a is left, b is right.
-        x = rect_right(a)
-        lo, hi = max(a[1], b[1]), min(rect_top(a), rect_top(b))
-        return (x, (lo + hi) * 0.5)
-    if edge == 1:       # a.x == b.right(): b is left, a is right.
-        x = rect_right(b)
-        lo, hi = max(a[1], b[1]), min(rect_top(a), rect_top(b))
-        return (x, (lo + hi) * 0.5)
-    if edge == 2:       # a.top() == b.y: a is below, b is above.
-        y = rect_top(a)
-        lo, hi = max(a[0], b[0]), min(rect_right(a), rect_right(b))
-        return ((lo + hi) * 0.5, y)
-    # edge == 4: a.y == b.top(): b is below, a is above.
-    y = rect_top(b)
-    lo, hi = max(a[0], b[0]), min(rect_right(a), rect_right(b))
-    return ((lo + hi) * 0.5, y)
+def corner_gp(r, e_in, e_out):
+    """V5 guiding point for a step that stays on the SAME object (a channel's entry/exit edges):
+    the intersection corner of the two edges, or None when they share an axis (straight
+    pass-through -- no point is inserted, per A41/Figure 6). Exact port of
+    tools/verify_v5_alpha.py's corner_gp."""
+    ax_i, c_i, _, _ = rect_edge(r, e_in)
+    ax_o, c_o, _, _ = rect_edge(r, e_out)
+    if ax_i == ax_o:
+        return None
+    return (c_i, c_o) if ax_i == 'H' else (c_o, c_i)
 
 
 def manhattan(ax, ay, bx, by):
     return abs(ax - bx) + abs(ay - by)
+
+
+def path_wl_v5(pairs, resolve_rect):
+    """V5 wirelength for one PATH's full (object, edge) token sequence: `cross_gp` for every step
+    between two different objects, `corner_gp` (or nothing, for a same-axis straight pass-through)
+    for every step that stays on one object, chained by Manhattan distance. Exact port of
+    tools/verify_v5_alpha.py's path_wl_v5 (there driven off a raw dict lookup; here off this
+    module's resolve_rect, so a PATH referencing an unknown object still raises a clear KeyError)."""
+    gps = []
+    for (na, ea), (nb, eb) in zip(pairs, pairs[1:]):
+        if na == nb:
+            g = corner_gp(resolve_rect(na), ea, eb)
+            if g is not None:
+                gps.append(g)
+        else:
+            gps.append(cross_gp(resolve_rect(na), ea, resolve_rect(nb), eb))
+    return sum(manhattan(a[0], a[1], b[0], b[1]) for a, b in zip(gps, gps[1:]))
 
 
 def node_path_from_pairs(pairs):
@@ -383,20 +416,29 @@ def ft_required_area(base_area, extend):
     return round2(side * side)
 
 
+def overflow_penalty_v5(rate, outline_area):
+    """V5 piecewise overflow tail: linear up to theta; beyond theta the linear term caps at theta
+    and the excess gets a diminishing sqrt tail instead of more linear growth. Exact port of
+    tools/verify_v5_alpha.py's overflow_penalty_v5."""
+    if rate <= THETA:
+        return BETA_LIN * outline_area * rate
+    return BETA_LIN * THETA * outline_area + BETA_TAIL * math.sqrt(rate - THETA) * outline_area
+
+
 # ---------------------------------------------------------------------------
 # Core cost computation.
 # ---------------------------------------------------------------------------
 
 def compute_cost(cfg_path, csv_path, wl_override=None):
-    """Computes every Cost component independently from cfg_path/csv_path.
+    """Computes every Cost component independently from cfg_path/csv_path (V5 rules throughout).
 
-    `wl_override`, when given (a float), is substituted for the independently-estimated
-    total_wirelength when computing alpha_times_wl/cost -- this is the sanctioned fallback for the
-    KNOWN GAP in guide-point geometry (module note 3): pass report.json's own total_wirelength here
-    to validate the OTHER cost terms (which independently match report.json exactly) without that
-    known gap contaminating the pass/fail gate. The independently-estimated WL is still computed and
-    returned (as `total_wirelength_estimate`) regardless, for diagnostic visibility into how close
-    the geometric replay gets.
+    `wl_override`, when given (a float), is substituted for the independently-computed
+    total_wirelength when computing alpha_times_wl/cost. Under the pre-V5 script this routed around
+    a known gap in guide-point geometry (module note 3); that gap is now closed -- `path_wl_v5`
+    reproduces the V5 page's five official example-path subtotals EXACTLY -- so `wl_override` is
+    kept only so callers (e.g. the default sweep, via --report) can still pin WL to an external
+    report.json value for comparison. The independently-computed WL is always returned too (as
+    `total_wirelength_estimate`), regardless of whether an override was supplied.
     """
     cfg = parse_cfg(cfg_path)
     csvp = parse_csv_problem(csv_path)
@@ -411,10 +453,10 @@ def compute_cost(cfg_path, csv_path, wl_override=None):
             return channels[name]
         raise KeyError(f"PATH references unknown object '{name}' (not in cfg BLOCK/CHANNEL)")
 
-    # total_wirelength_estimate: independent geometric replay, per-hop overlap-midpoint guide points
-    # (matches routing.cpp's guidePoint exactly). KNOWN to NOT match the official checker's true
-    # guide-point placement for multi-hop paths -- see module note 3 -- kept as a diagnostic, not
-    # used for the cost gate when wl_override is supplied.
+    # total_wirelength_estimate: independent V5 guide-point replay (path_wl_v5) -- EXACT against the
+    # official V5 calculation page's five example-path subtotals (module note 3, resolved). Still
+    # named "_estimate" for compute_cost's return-shape/CLI compatibility; only overridden by
+    # wl_used below when an explicit wl_override is supplied (e.g. for report.json comparison).
     total_wirelength_estimate = 0.0
     channel_h_usage = {name: 0.0 for name in channels}
     channel_v_usage = {name: 0.0 for name in channels}
@@ -423,28 +465,34 @@ def compute_cost(cfg_path, csv_path, wl_override=None):
     for nets, pairs in cfg['paths']:
         if len(pairs) < 2:
             continue
-        num_hops = len(pairs) // 2
         node_path = node_path_from_pairs(pairs)
 
-        # One guide point per hop, from the hop's OWN edge label (pairs[2i] is the "from" endpoint
-        # (obj, edge=edgeFromTo(from,to))) -- see guide_point's docstring / module note 1. This chain
-        # is the total_wirelength_estimate diagnostic (module note 3: known NOT to match the checker
-        # exactly for multi-hop paths).
-        guides = [guide_point(resolve_rect(pairs[2 * i][0]), resolve_rect(pairs[2 * i + 1][0]), pairs[2 * i][1])
-                  for i in range(num_hops)]
-        wl = 0.0
-        for i in range(len(guides) - 1):
-            wl += manhattan(guides[i][0], guides[i][1], guides[i + 1][0], guides[i + 1][1]) * nets
-        total_wirelength_estimate += wl
+        # V5 wirelength: cross_gp for every step between two different objects, corner_gp (or
+        # nothing, for a same-axis straight pass-through) for every step that stays on one object
+        # -- see path_wl_v5's docstring / module note 1/3.
+        total_wirelength_estimate += path_wl_v5(pairs, resolve_rect) * nets
 
-        # Channel usage: every (object, edge) occurrence naming a channel contributes `nets`,
-        # independently per hop-touch -- see module note 2 (NOT a guide-point-delta classification).
-        for obj, edge in pairs:
+        # Channel usage (V5 single-charge-per-axis-per-traversal -- module note 2): group each
+        # channel visit into its (entry, exit) edge pair and charge nets once per axis touched --
+        # a straight pass-through (entry/exit same axis) charges that axis once; an L-turn charges
+        # both axes once each.
+        j = 0
+        while j < len(pairs):
+            obj, edge = pairs[j]
             if obj in channels:
-                if edge in (1, 3):
-                    channel_h_usage[obj] += nets
+                if j + 1 < len(pairs) and pairs[j + 1][0] == obj:
+                    e_in, e_out = edge, pairs[j + 1][1]
+                    j += 2
                 else:
-                    channel_v_usage[obj] += nets
+                    e_in, e_out = edge, edge
+                    j += 1
+                for axis in {'H' if ee in (1, 3) else 'V' for ee in (e_in, e_out)}:
+                    if axis == 'H':
+                        channel_h_usage[obj] += nets
+                    else:
+                        channel_v_usage[obj] += nets
+            else:
+                j += 1
 
         # FT feedthrough: soft blocks visited as PATH intermediates (not source/target endpoints).
         for i in range(1, len(node_path) - 1):
@@ -467,9 +515,10 @@ def compute_cost(cfg_path, csv_path, wl_override=None):
         if vu > cap_v:
             channel_overflow_nets += vu - cap_v
 
-    # FT area excess: replay which soft blocks carried feedthrough nets, price via ft.hpp's formula
-    # against the CSV's nominal AREA column (ft_base_area semantics) and the cfg's placed w*h.
-    ft_area_excess = 0.0
+    # FT area excess (V5 aggregate margin, not a per-block mismatch): sum every block's CSV base
+    # area, plus the FT conversion delta (required_area - base_area, from the same ftTierRate/
+    # ftExtend/ftRequiredArea replay as before) for each SOFT block that carried feedthrough nets.
+    ft_area_sum = sum(info.get('area', 0.0) for info in csvp['blocks'].values())
     for name, nets in soft_feedthrough_nets.items():
         if nets <= 0.0:
             continue
@@ -478,18 +527,16 @@ def compute_cost(cfg_path, csv_path, wl_override=None):
         rate = ft_tier_rate(ft_rates, nets)
         extend = ft_extend(nets, rate)
         required_area = ft_required_area(base_area, extend)
-        _x, _y, w, h = blocks[name]
-        actual_area = round2(w * h)
-        if actual_area + KEPS < required_area:
-            ft_area_excess += required_area - actual_area
+        ft_area_sum += required_area - base_area
 
     outline_area = cfg['outline_w'] * cfg['outline_h']
     alpha = csvp['alpha']
-    # wl_used: the fallback (report.json's own WL) when supplied, else the independent (approximate)
-    # estimate -- see compute_cost's docstring and module note 3.
+    # wl_used: the fallback (report.json's own WL) when supplied, else this script's own
+    # independently computed V5 estimate -- see compute_cost's docstring.
     wl_used = wl_override if wl_override is not None else total_wirelength_estimate
     R = channel_overflow_nets / channel_capacity_total if channel_capacity_total > 0.0 else 0.0
-    overflow_penalty = BETA_LIN * outline_area * R + BETA_TAIL * outline_area * max(0.0, R - THETA)
+    overflow_penalty = overflow_penalty_v5(R, outline_area)
+    ft_area_excess = max(0.0, ft_area_sum - outline_area)
     ft_penalty = BETA_FT * ft_area_excess
     cost = outline_area + alpha * wl_used + overflow_penalty + ft_penalty
 
@@ -539,9 +586,12 @@ def run_case(case_dir, csv_path, label):
     cb = report.get('cost_breakdown', {})
     ref_wl = cb.get('total_wirelength', report.get('total_wirelength'))
 
-    # wl_override=ref_wl: sanctioned fallback (module note 3) -- every OTHER term below is still
-    # independently recomputed from cfg_path/csv_path alone.
-    pred = compute_cost(cfg_path, csv_path, wl_override=ref_wl)
+    # wl_override=None: pred is pure V5, independent of report.json (Codex #3 fix -- this call used
+    # to pin WL to report.json's pre-V5 value here, which leaked into alpha_times_wl/cost and made
+    # the printed "pred cost" not pure V5). report.json predates Cost Function V5 (see the module
+    # docstring's V5 PORT note), so EVERY term below is expected to diverge from it; ref_wl etc. are
+    # only ever used as printed historical-reference columns, never fed back into pred.
+    pred = compute_cost(cfg_path, csv_path, wl_override=None)
 
     print(f"[{label}] cfg={cfg_path}")
     print(f"  csv={csv_path}")
@@ -555,10 +605,10 @@ def run_case(case_dir, csv_path, label):
     ref_cost = cb.get('cost', report.get('cost'))
 
     print_row('outline_area', pred['outline_area'], ref_outline_area)
-    print(f"  {'total_wirelength (est)':<24} pred={pred['total_wirelength_estimate']:>18.4f}  report={ref_wl:>18.4f}"
-          f"  rel_err={rel_err(pred['total_wirelength_estimate'], ref_wl):>10.2e}  DIAGNOSTIC ONLY (see module note 3 -- known gap, not gated)")
+    print(f"  {'total_wirelength (V5)':<24} pred={pred['total_wirelength_estimate']:>18.4f}  report={ref_wl:>18.4f}"
+          f"  rel_err={rel_err(pred['total_wirelength_estimate'], ref_wl):>10.2e}  V5 vs PRE-V5 report.json -- expected to diverge, not gated")
     print(f"  {'total_wirelength (used)':<24} pred={pred['total_wirelength_used']:>18.4f}  report={ref_wl:>18.4f}"
-          f"  {'<- fallback: read from report.json, see module note 3' if pred['wl_is_fallback'] else ''}")
+          f"  {'<- pinned to report.json (pre-V5) for this comparison table only' if pred['wl_is_fallback'] else '<- pure V5 (same as above; no override)'}")
     if ref_alpha_wl is not None:
         print_row('alpha_times_wl', pred['alpha_times_wl'], ref_alpha_wl)
     print_row('channel_overflow_nets', pred['channel_overflow_nets'], ref_overflow_total)
@@ -567,7 +617,7 @@ def run_case(case_dir, csv_path, label):
     print_row('ft_area_excess', pred['ft_area_excess'], ref_ft_excess if ref_ft_excess is not None else 0.0)
     if ref_ft_penalty is not None:
         print_row('ft_penalty', pred['ft_penalty'], ref_ft_penalty)
-    print_row('COST (using WL fallback)', pred['cost'], ref_cost)
+    print_row('COST (pure V5)', pred['cost'], ref_cost)
     conn_check = report.get('conn_check', {})
     ref_matrix_sum = conn_check.get('matrix_sum')
     ref_path_sum = conn_check.get('path_sum')
@@ -631,10 +681,12 @@ def main():
     if n_pass == len(DEFAULT_CASES) and len(results) == len(DEFAULT_CASES):
         print('ALL PASS')
     else:
-        print(f"{n_pass}/{len(DEFAULT_CASES)} PASS. total_wirelength uses the report.json fallback "
-              f"(module note 3); any remaining FAIL is expected to be case1's isolated beta_tail-term "
-              f"gap (module note 4) unless a different case/component is failing above -- check the "
-              f"per-case table for which row(s) actually diverge before assuming it's the known gap.")
+        print(f"{n_pass}/{len(DEFAULT_CASES)} PASS against report.json. report.json predates Cost "
+              f"Function V5 (docs/research/2026-07-28-alpha-v5-cost-recalculation-analysis.md), so "
+              f"FAIL rows here are EXPECTED now -- V5 changed the WL/demand/tail/ft rules, this is "
+              f"not a regression in this script. To check V5 correctness itself, compare the "
+              f"per-case pred wirelength/overflow/capacity printed above against the V5 calculation "
+              f"page's own values, or run tools/verify_v5_alpha.py (byte-verified exact against it).")
     sys.exit(0 if all_pass and len(results) == len(DEFAULT_CASES) else 1)
 
 

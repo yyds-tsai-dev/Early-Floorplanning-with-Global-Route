@@ -40,6 +40,18 @@ constexpr double kBetaTail = 1.5;                 // steeper tail coefficient (R
 constexpr double kOverflowRateThreshold = 0.05;   // overflow-rate threshold for the tail
 constexpr double kBetaFt = 3.0;                   // flat per-um^2 FT required-area shortfall weight
 
+// V5 overflow-penalty tail (docs/research/2026-07-28-alpha-v5-cost-recalculation-analysis.md,
+// section 1.3): EXACT official piecewise formula -- the linear term caps at kOverflowRateThreshold
+// and a sqrt tail takes over beyond it. src/cfg_score.cpp keeps its OWN locked copy of this exact
+// formula (it is a calibration oracle, independent of the solver's headers, and does not include
+// this file); this duplication is intentional and gate-enforced, the same policy as
+// crossGuidingPoint's solver/oracle twin relationship (route_geometry.hpp).
+inline double officialOverflowPenalty(double rate, double outline_area) {
+    if (rate <= kOverflowRateThreshold) return kBetaLin * rate * outline_area;
+    return kBetaLin * kOverflowRateThreshold * outline_area +
+           kBetaTail * std::sqrt(rate - kOverflowRateThreshold) * outline_area;
+}
+
 // Channel overflow AREA for a given direction at `usage` nets (design p2-design.md §8.1 / T0
 // denomination, routing.cpp:221-243): horizontal usage is capacitated by 25*h (missing capacity is
 // a height deficit spanning the channel's WIDTH); vertical usage is capacitated by 25*w (missing
@@ -86,28 +98,28 @@ inline double marginalOverflowNets(const Channel& ch, bool horizontal, double us
     return std::max(0.0, usage + n - cap) - std::max(0.0, usage - cap);
 }
 
-// B4 (design b4-design.md §4): per-node channel slack for the greedy bottleneck-chunking loop's
-// `pathSlack`, extracted as a pure function of the channel's two incident rects (predecessor,
-// successor) so it is directly unit-testable (design §8(iii)) -- routing.cpp's `pathSlack` lambda
-// calls this for every interior channel node, passing `rects[node_path[i-1]]` (predecessor),
-// `rr.channels[...]` (this channel), `rects[node_path[i+1]]` (successor). Counts EVERY charge this
-// node's two incident hops place on each axis (entry from the predecessor hop, exit to the successor
-// hop) -- not just the entry edge the pre-B4 code looked at. A straight pass-through (both hops on
-// the same axis) places TWO charges on that axis, so the residual capacity on that axis is HALVED
-// before it can be safely committed; an L-turn (hops on different axes) places one charge per axis,
-// so each axis's residual divides by 1 and the TIGHTER axis binds. RAW caps (25*ch.rect.h/w),
+// V5 (docs/research/2026-07-28-alpha-v5-cost-recalculation-analysis.md, section 1.2): per-node
+// channel slack for the greedy bottleneck-chunking loop's `pathSlack`, extracted as a pure function
+// of the channel's two incident rects (predecessor, successor) so it is directly unit-testable --
+// routing.cpp's `pathSlack` lambda calls this for every interior channel node, passing
+// `rects[node_path[i-1]]` (predecessor), `rr.channels[...]` (this channel), `rects[node_path[i+1]]`
+// (successor). An axis is either TOUCHED by this node's entry or exit edge -- its residual capacity
+// counts as-is, no division -- or UNTOUCHED by both, meaning it is never charged and so carries
+// infinite slack. This replaces the retired B4 per-edge-charge-count halving (an axis touched by
+// BOTH the entry and exit edge -- a straight pass-through -- used to have its residual divided by 2,
+// matching the old double-charge-per-hop demand model); V5 charges a touched axis only ONCE per
+// traversal regardless of whether one or both edges land on it (route_geometry.hpp's
+// accumulatePathUsage), so the residual is never divided here either. RAW caps (25*ch.rect.h/w),
 // matching marginalOverflowNets/computeOverflowAndMismatch.
 inline double channelPathSlack(const Rect& pred_rect, const Channel& ch, const Rect& succ_rect) {
     int entry_dir = edgeFromTo(pred_rect, ch.rect);  // charge from the p->k hop (k's entry edge)
     int exit_dir = edgeFromTo(ch.rect, succ_rect);   // charge from the k->s hop (k's exit edge)
     bool entry_h = (entry_dir == 1 || entry_dir == 3);
     bool exit_h = (exit_dir == 1 || exit_dir == 3);
-    int h_charges = (entry_h ? 1 : 0) + (exit_h ? 1 : 0);
-    int v_charges = (entry_h ? 0 : 1) + (exit_h ? 0 : 1);
-    double res_h = (h_charges > 0) ? (25.0 * ch.rect.h - ch.horizontal_usage) / h_charges
-                                    : std::numeric_limits<double>::infinity();
-    double res_v = (v_charges > 0) ? (25.0 * ch.rect.w - ch.vertical_usage) / v_charges
-                                    : std::numeric_limits<double>::infinity();
+    bool h_touched = entry_h || exit_h;
+    bool v_touched = (!entry_h) || (!exit_h);
+    double res_h = h_touched ? (25.0 * ch.rect.h - ch.horizontal_usage) : std::numeric_limits<double>::infinity();
+    double res_v = v_touched ? (25.0 * ch.rect.w - ch.vertical_usage) : std::numeric_limits<double>::infinity();
     return std::max(0.0, std::min(res_h, res_v));
 }
 
@@ -142,26 +154,30 @@ inline double wireCost(double alpha, double n, double dist) { return alpha * n *
 
 // B4 (design b4-design.md §7.2): the negotiation round-selection / legacy-vs-cost-driven
 // comparison-gate key, re-denominated to the SAME units eval.cpp's exact scorer charges --
-// `(open_routes, alpha*WL + kBetaLin*A*R + kBetaTail*A*max(0,R-threshold) + kBetaFt*mismatch)`,
-// where `R = channel_overflow_nets/channel_capacity_total` (RAW-capacity nets rate, model.hpp
-// fields populated by computeOverflowAndMismatch) and `outline_area` is the SAME declared W*H
-// eval.cpp's routeAndScoreAt scores this routing at. Unlike the per-edge Dijkstra pricing (design
-// §3.4), the tail term IS included here -- R is known globally and cheaply once a full routing
-// exists, so the gate stays exactly scorer-faithful even in the (never-yet-seen) R>threshold
-// regime. Returned as (open_routes, value) so std::pair's lexicographic operator< sorts open
-// routes first, mirroring eval.cpp's open_routes*1e15 dominance.
+// `(open_routes, alpha*WL + officialOverflowPenalty(R,A) + kBetaFt*max(0, ft_area_sum-A))`, where
+// `R = channel_overflow_nets/channel_capacity_total` (RAW-capacity nets rate, model.hpp fields
+// populated by computeOverflowAndMismatch) and `outline_area` is the SAME declared W*H eval.cpp's
+// routeAndScoreAt scores this routing at. V5 (docs/research/2026-07-28-alpha-v5-cost-recalculation-
+// analysis.md): the overflow term is now the exact officialOverflowPenalty tail (section 1.3, above)
+// and the FT term is the AGGREGATE excess of ft_area_sum over the outline (section 1.4, ft_area_sum
+// populated by computeOverflowAndMismatch), replacing the retired per-block feedthrough_mismatch sum.
+// Unlike the per-edge Dijkstra pricing (design §3.4), the tail term IS included here -- R is known
+// globally and cheaply once a full routing exists, so the gate stays exactly scorer-faithful even in
+// the R>threshold regime. Returned as (open_routes, value) so std::pair's lexicographic operator<
+// sorts open routes first, mirroring eval.cpp's open_routes*1e15 dominance.
 //
 // Algebraic identity (test-pinned, design §8(v)/R2): for a routing with open_routes==0 and zero
 // legality penalty (no overlap / out-of-outline), roundCostOfficial(rr, alpha, outline_area).second
 // == exactScore(...).value - outline_area EXACTLY -- this identity is what makes the gate
-// scorer-faithful (ranking candidates by this key ranks them exactly as the scorer would). A free
-// function (not a routeProblem-local lambda) specifically so this identity is unit-testable against
-// the SAME code routing.cpp's gate calls, not a reimplementation of the formula.
+// scorer-faithful (ranking candidates by this key ranks them exactly as the scorer would), and stays
+// intact under V5 (both sides moved to the same new formula together, eval.cpp). A free function
+// (not a routeProblem-local lambda) specifically so this identity is unit-testable against the SAME
+// code routing.cpp's gate calls, not a reimplementation of the formula.
 inline std::pair<int, double> roundCostOfficial(const RoutingResult& rr, double alpha, double outline_area) {
     double rate = (rr.channel_capacity_total > 0.0) ? rr.channel_overflow_nets / rr.channel_capacity_total : 0.0;
-    double overflow_penalty = kBetaLin * outline_area * rate +
-                               kBetaTail * outline_area * std::max(0.0, rate - kOverflowRateThreshold);
-    double value = alpha * rr.total_wirelength + overflow_penalty + kBetaFt * rr.feedthrough_mismatch;
+    double overflow_penalty = officialOverflowPenalty(rate, outline_area);
+    double ft_penalty = kBetaFt * std::max(0.0, rr.ft_area_sum - outline_area);
+    double value = alpha * rr.total_wirelength + overflow_penalty + ft_penalty;
     return std::pair<int, double>(rr.open_routes, value);
 }
 

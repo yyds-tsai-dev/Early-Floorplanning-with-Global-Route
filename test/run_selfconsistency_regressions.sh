@@ -1,27 +1,29 @@
 #!/usr/bin/env bash
-# Beta Task 3 self-consistency gate.
+# Beta Task 3 self-consistency gate (V5: docs/research/2026-07-28-alpha-v5-cost-recalculation-
+# analysis.md port).
 #
-# Proves the solver's INTERNAL accounting -- per-edge channel demand + center-anchored guiding-point
-# wirelength (src/route_geometry.hpp) charged into the exact scorer (src/eval.cpp) -- agrees with the
-# golden re-scorer (src/cfg_score.cpp, locked to the official alpha reports) on the SAME written .cfg.
-# For each contest case, run the solver, then rescore its own output and require, to <=REL_TOL
-# relative (residual is pure 3-decimal .cfg coordinate rounding; measured <=3e-7 across all 5 cases,
-# so 1e-6 is a ~3x-headroom gate, not a fudge):
+# Proves the solver's INTERNAL accounting -- V5 single-charge-per-axis-per-traversal channel demand
+# + V5 cross/corner guiding-point wirelength (src/route_geometry.hpp) + V5 aggregate FT penalty
+# (src/eval.cpp) -- agrees with the golden re-scorer (src/cfg_score.cpp, locked to the official V5
+# calculation page) on the SAME written .cfg. For each contest case, run the solver, then rescore
+# its own output and require, to <=REL_TOL relative (residual is pure 3-decimal .cfg coordinate
+# rounding; measured <=3e-7 across all 5 cases, so 1e-6 is a ~3x-headroom gate, not a fudge):
 #   * wirelength       : solver-reported == rescorer wl                  (<= REL_TOL relative)
-#   * score            : solver score - 1e15*open_routes - kBetaFt*ft_mismatch == rescorer checker_cost
-#                        (<= REL_TOL relative; cfg_score charges no FT term, so a legal/zero-open/
-#                        zero-FT/zero-overflow run has score == checker_cost up to rounding)
+#   * score            : solver score == rescorer checker_cost           (<= REL_TOL relative, NO
+#                        adjustment term -- cfg_score.cpp now computes the SAME V5 aggregate FT
+#                        penalty eval.cpp charges, so a legal/zero-open run has score == checker_cost
+#                        up to rounding, whether or not it carries feedthrough)
 #   * channel overflow : solver-reported channel_overflow_nets == rescorer overflow, to OVF_TOL =
-#                        max(1.0, 1e-5*overflow) nets. The per-edge USAGE matches the judge EXACTLY
-#                        (edges are written as integer tokens the re-scorer reads back verbatim); the
-#                        only slack is the CAPACITY denominator 25*dim, computed from the solver's
-#                        full-precision channel dims here but from the .cfg's 3-DECIMAL dims in the
-#                        re-scorer. That ~0.01-0.03-net rounding is amplified relative to a small
-#                        overflow (a difference of two large numbers), so a strict 1e-6-relative bound
-#                        is not attainable for the raw overflow -- but the OVERFLOW PENALTY it feeds is
-#                        still validated at REL_TOL through the score check above. A genuine per-edge
-#                        model error would shift overflow by ~2x (thousands of nets), far outside this
-#                        rounding-scale bound, so discriminating power is retained.
+#                        max(1.0, 1e-5*overflow) nets. The per-axis-per-traversal USAGE matches the
+#                        judge EXACTLY (edges are written as integer tokens the re-scorer reads back
+#                        verbatim); the only slack is the CAPACITY denominator 25*dim, computed from
+#                        the solver's full-precision channel dims here but from the .cfg's 3-DECIMAL
+#                        dims in the re-scorer. That ~0.01-0.03-net rounding is amplified relative to a
+#                        small overflow (a difference of two large numbers), so a strict 1e-6-relative
+#                        bound is not attainable for the raw overflow -- but the OVERFLOW PENALTY it
+#                        feeds is still validated at REL_TOL through the score check above. A genuine
+#                        demand-model error would shift overflow far outside this rounding-scale bound,
+#                        so discriminating power is retained.
 # Also requires open_routes == 0 on every case (an open route is a hard solver failure here).
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -35,7 +37,6 @@ g++ -std=c++17 -O2 -Wall -Wextra -pedantic -I. \
     -o bin/efgr_rescore >/dev/null
 
 REL_TOL=1e-6
-KBETAFT=3.0   # must match route_cost.hpp kBetaFt (eval.cpp's FT weight, absent from cfg_score)
 status=0
 printf "%-7s %11s %11s %11s %6s\n" case rel_score rel_wl rel_ovf open
 for i in 0 1 2 3 4; do
@@ -48,7 +49,6 @@ for i in 0 1 2 3 4; do
   swl=$(printf '%s' "$log" | grep -oE ' wirelength=[0-9.eE+-]+' | cut -d= -f2)
   sovf=$(printf '%s' "$log" | grep -oE 'channel_overflow_nets=[0-9.eE+-]+' | cut -d= -f2)
   sopen=$(printf '%s' "$log" | grep -oE 'open_routes=[0-9]+' | cut -d= -f2)
-  sft=$(printf '%s' "$log" | grep -oE 'feedthrough_mismatch=[0-9.eE+-]+' | cut -d= -f2)
 
   rline=$(bin/efgr_rescore "$csv" "$out")
   rwl=$(printf '%s' "$rline" | grep -oE ' wl=[0-9.eE+-]+' | cut -d= -f2)
@@ -57,8 +57,8 @@ for i in 0 1 2 3 4; do
 
   read -r rels relw relo ok <<EOF
 $(awk -v ss="$sscore" -v rc="$rcc" -v sw="$swl" -v rw="$rwl" -v so="$sovf" -v ro="$rovf" \
-      -v op="$sopen" -v ft="$sft" -v bft="$KBETAFT" -v tol="$REL_TOL" 'BEGIN{
-    adj = ss - 1e15*op - bft*ft;
+      -v op="$sopen" -v tol="$REL_TOL" 'BEGIN{
+    adj = ss - 1e15*op;
     ad = adj-rc; if (ad<0) ad=-ad; rels = (rc>1 ? ad/rc : ad);
     wd = sw-rw;  if (wd<0) wd=-wd; relw = (rw>1 ? wd/rw : wd);
     od = so-ro;  if (od<0) od=-od; relo = (ro>1 ? od/ro : od);

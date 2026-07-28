@@ -68,14 +68,18 @@ void testVerticalOverflowIsAreaDenominatedByChannelHeight() {
     for (const auto& ch : r.channels) {
         if (std::abs(ch.rect.w - 80.0) < kEps && std::abs(ch.rect.h - 610.0) < kEps) {
             found = true;
-            assert(std::abs(ch.vertical_usage - 7200.0) < kEps);
+            // V5 (docs/research/2026-07-28-alpha-v5-cost-recalculation-analysis.md, section 1.2):
+            // a straight pass-through channel traversal is charged its axis ONCE per traversal, so
+            // vertical_usage is exactly the bundle's own 3600 nets -- not the retired double-charge-
+            // per-hop model's 7200 (entry edge + exit edge charged separately).
+            assert(std::abs(ch.vertical_usage - 3600.0) < kEps);
             assert(std::abs(ch.horizontal_usage) < kEps);
         }
     }
     assert(found);
 
-    double expected = ((7200.0 - 2000.0) / 25.0) * 610.0;  // 208 * 610 = 126,880  (per-edge: entry+exit charge 3600 each = 7200)
-    assert(std::abs(expected - 126880.0) < kEps);
+    double expected = ((3600.0 - 2000.0) / 25.0) * 610.0;  // 64 * 610 = 39,040 (V5: single charge)
+    assert(std::abs(expected - 39040.0) < kEps);
     assert(std::abs(r.channel_overflow - expected) < 1e-3);
     // Direction assert against the OLD (pre-T0) denomination: nets-over-capacity was 1600, a much
     // smaller number than the area-denominated 39,040 -- the fix must have strictly increased the
@@ -114,13 +118,15 @@ void testHorizontalOverflowIsAreaDenominatedByChannelWidth() {
     for (const auto& ch : r.channels) {
         if (std::abs(ch.rect.h - 80.0) < kEps && std::abs(ch.rect.w - 610.0) < kEps) {
             found = true;
-            assert(std::abs(ch.horizontal_usage - 7200.0) < kEps);
+            // V5 (docs/research/2026-07-28-alpha-v5-cost-recalculation-analysis.md, section 1.2):
+            // single charge per traversal -- 3600, not the retired double-charge model's 7200.
+            assert(std::abs(ch.horizontal_usage - 3600.0) < kEps);
             assert(std::abs(ch.vertical_usage) < kEps);
         }
     }
     assert(found);
 
-    double expected = ((7200.0 - 2000.0) / 25.0) * 610.0;  // 126,880 (per-edge doubling)
+    double expected = ((3600.0 - 2000.0) / 25.0) * 610.0;  // 39,040 (V5: single charge per traversal)
     assert(std::abs(r.channel_overflow - expected) < 1e-3);
     assert(r.channel_overflow > 1600.0);
     std::cout << "testHorizontalOverflowIsAreaDenominatedByChannelWidth ok\n";
@@ -339,19 +345,23 @@ void testMarginalOverflowNetsRawCapDivergesFromOldClampedCapOnSubMicronChannel()
 // Problem/Placement/routing needed. Numbers are design §4's own worked examples verbatim.
 
 // Straight pass-through: predecessor and successor both meet the channel on the SAME axis (here,
-// horizontal -- pred touches the channel's left edge, channel's right edge touches succ), so
-// h_charges=2 and the residual (cap-usage=100) is HALVED to 50.
+// horizontal -- pred touches the channel's left edge, channel's right edge touches succ).
+// V5 (docs/research/2026-07-28-alpha-v5-cost-recalculation-analysis.md, section 1.2) removed the
+// retired B4 per-edge-charge-count halving: the horizontal axis is TOUCHED (by both the entry and
+// exit edge, but charged only ONCE per traversal), so its residual (cap-usage=100) is used AS-IS,
+// not divided by the old h_charges=2 -- slack is now 100, not 50. Function name kept (not renamed)
+// to minimize diff churn; the halving it describes is retired, see this comment.
 void testChannelPathSlackStraightPassThroughHalves() {
     Rect pred{0.0, 0.0, 10.0, 10.0};       // x=[0,10)
     Rect succ{15.0, 0.0, 10.0, 10.0};      // x=[15,25)
     Channel ch;
     ch.name = "CH1";
     ch.rect = Rect{10.0, 0.0, 5.0, 8.0};   // x=[10,15), touches pred's right and succ's left
-    // cap_H = 25*8 = 200; usage=100 -> cap-usage=100, halved by h_charges=2 -> 50.
+    // cap_H = 25*8 = 200; usage=100 -> cap-usage=100. V5: touched-once, used as-is (no halving) -> 100.
     ch.horizontal_usage = 100.0;
     ch.vertical_usage = 0.0;
     double slack = channelPathSlack(pred, ch, succ);
-    assert(std::abs(slack - 50.0) < kEps);
+    assert(std::abs(slack - 100.0) < kEps);
     std::cout << "testChannelPathSlackStraightPassThroughHalves ok\n";
 }
 
@@ -444,12 +454,25 @@ ChannelVsFtFixture makeChannelVsFtFixture() {
 // ft.hpp/channelOverflowArea directly -- functions B4 does not touch) still holds unchanged and is
 // kept; a NEW cross-check adds the OFFICIAL per-net exchange rate from design §5's worked formula:
 // FT is chosen iff Delta(required area)/n < (20/3)*(A/C).
+//
+// V5 RE-BASELINE (docs/research/2026-07-28-alpha-v5-cost-recalculation-analysis.md, section 1.2;
+// re-verified via a scratch probe against the built router, same discipline as the B4 re-baseline
+// above): single-charge-per-axis-per-traversal demand means the channel's REAL capacity is no
+// longer halved by double-charging -- it now genuinely carries 2000 nets (exactly its
+// 25*width=2000 cap, "channel filled to its true 25*dim capacity") before saturating, vs. the
+// B4-era double-charge model's effective 1000, so only the REMAINING 1600 nets (not 2600) divert to
+// FT. Total wirelength also shifts (1,533,000 -> 2,356,000): a different SPLIT of the bundle now
+// routes via each path (2000 through the channel vs 1600 through S, instead of 1000/2600), stacked
+// on top of the V5 cross/corner guiding-point rule change itself.
 void testCostDrivenPrefersFtOverSaturatedChannel() {
     ChannelVsFtFixture f = makeChannelVsFtFixture();
 
     RoutingResult legacy = routeProblem(f.problem, f.placement, /*cost_driven=*/false);
     assert(legacy.open_routes == 0);
-    double expected_legacy_overflow = ((7200.0 - 2000.0) / 25.0) * 610.0;  // 126,880 (per-edge doubling)
+    // V5 (docs/research/2026-07-28-alpha-v5-cost-recalculation-analysis.md, section 1.2): single
+    // charge per traversal, same fix as the T0 overflow fixtures above -- 39,040, not the retired
+    // double-charge model's 126,880.
+    double expected_legacy_overflow = ((3600.0 - 2000.0) / 25.0) * 610.0;  // 39,040
     assert(std::abs(legacy.channel_overflow - expected_legacy_overflow) < 1e-3);
     assert(legacy.soft_feedthrough_nets[2] == 0.0);  // legacy pass-0 never touches S
 
@@ -483,8 +506,21 @@ void testCostDrivenPrefersFtOverSaturatedChannel() {
     assert(cd.channel_overflow == 0.0);
     assert(cd.channel_overflow_nets == 0.0);
     assert(cd.feedthrough_mismatch == 0.0);
-    assert(std::abs(cd.soft_feedthrough_nets[2] - 2600.0) < kEps);
-    assert(std::abs(cd.total_wirelength - 1533000.0) < 1.0);
+
+    // V5 re-baseline: the channel now carries its TRUE capacity (2000, exactly 25*width=25*80) --
+    // not the B4-era double-charge model's effective 1000 -- confirmed directly on the channel's own
+    // usage, not just inferred from zero overflow.
+    bool found_channel = false;
+    for (const auto& ch : cd.channels) {
+        if (std::abs(ch.rect.w - 80.0) < kEps && std::abs(ch.rect.h - 610.0) < kEps) {
+            found_channel = true;
+            assert(std::abs(ch.vertical_usage - 2000.0) < kEps);
+            assert(ch.horizontal_usage == 0.0);
+        }
+    }
+    assert(found_channel);
+    assert(std::abs(cd.soft_feedthrough_nets[2] - 1600.0) < kEps);
+    assert(std::abs(cd.total_wirelength - 2356000.0) < 1.0);
 
     // The gate's own key (roundCostOfficial) must rank cd decisively ahead of legacy -- the SAME
     // key routeProblem's internal gate used to keep cd's own result (used_fallback==false).
@@ -713,7 +749,17 @@ void testBottleneckFixtureNowDivertsEntirelyToFtUnderOfficialPricing() {
     // cheaper-than-the-channel) mismatch.
     assert(r.feedthrough_mismatch > 0.0);
     assert(std::abs(r.feedthrough_mismatch - 12023.39) < 1.0);
-    assert(std::abs(r.total_wirelength - 330000.0) < 1.0);
+    // V5 (docs/research/2026-07-28-alpha-v5-cost-recalculation-analysis.md, section 1.1): the
+    // ROUTING DECISION is unchanged (single 3000-net chunk A -> S -> B, confirmed above), and FT
+    // mismatch is untouched (ft.hpp itself didn't change) -- only wirelength shifts, and purely from
+    // the new guiding-point rule. A and B both meet S on S's SAME (left) edge, so S's own traversal
+    // is a same-edge U-turn (cornerGuidingPoint inserts nothing, per the corner-suppression rule);
+    // the path's only two guiding points are crossGuidingPoint(A,S) and crossGuidingPoint(S,B), each
+    // now the OVERLAP-interval midpoint of the touching pair (y=50 and y=270 respectively) instead of
+    // the retired center-anchored rule's facing-edge-midpoint average (y=112.5 and y=222.5) -- the
+    // vertical gap between guides doubles (110 -> 220), and wirelength with it (re-verified via a
+    // scratch probe against the built router, matching this file's established practice).
+    assert(std::abs(r.total_wirelength - 660000.0) < 1.0);
 
     std::cout << "testBottleneckFixtureNowDivertsEntirelyToFtUnderOfficialPricing ok (mismatch="
                << r.feedthrough_mismatch << ")\n";
@@ -722,22 +768,29 @@ void testBottleneckFixtureNowDivertsEntirelyToFtUnderOfficialPricing() {
 // B4 NEW (design b4-design.md §8 fixture (i)): straight pass-through both-edges pricing, the
 // canonical case the design's Q-A/Q-B sections build the whole fix around. A minimal, purpose-built
 // fixture (channel cap_H=100 exactly) rather than a re-tune of BottleneckFixture above, so the
-// numbers are clean round ones traceable directly to design §4's own worked example (pathSlack
-// halves 100 -> 50) instead of depending on a near-threshold coincidence between two competing
-// rates. L (source) and R (target) sit side by side with a narrow horizontal gap between them
-// (channel height 4 -> cap_H = 25*4 = 100); S is a soft block spanning the full width ABOVE both L
-// and R (touching each directly, a zero-channel FT bypass), with NO starting slack
-// (ft_base_area==its placed area) so any diverted nets are genuinely priced.
+// numbers are clean round ones. L (source) and R (target) sit side by side with a narrow horizontal
+// gap between them (channel height 4 -> cap_H = 25*4 = 100); S is a soft block spanning the full
+// width ABOVE both L and R (touching each directly, a zero-channel FT bypass), with NO starting
+// slack (ft_base_area==its placed area) so any diverted nets would be genuinely priced -- kept even
+// though V5 (below) never actually diverts to it, so a future regression that DOES divert still
+// prices correctly.
 //
-// Bundle = 100 nets, exactly filling cap_H if routed as one lump. B4: pathSlack (both-edges,
-// design §4) returns 50 for the first probe (h_charges=2, (100-0)/2), so the greedy loop commits
-// only 50 nets through the channel -- exactly saturating it (hu=100=cap, zero overflow). The
-// remaining 50 nets reprice against the now-saturated channel (marginal cost > 0) vs. S's modest FT
-// growth, and divert entirely to S. RED under the OLD (pre-B4) code: entry-axis-only pathSlack
-// returns 100 (unhalved -- both old and new channelMarginalCost/marginalOverflowNets price a
-// probe of exactly 100 nets against a cap of exactly 100 as FREE, so the OLD code's greedy loop
-// commits the WHOLE bundle in one chunk since it sees no reason to split), so hu ends at 2*100=200,
-// overflowing the cap by 100 nets that the OLD code never priced -- exactly design §2.2's overshoot.
+// V5 RETIRES THE PREMISE (docs/research/2026-07-28-alpha-v5-cost-recalculation-analysis.md, section
+// 1.2; re-verified via a scratch probe against the built router, this file's established practice
+// for deriving fixture constants): the original B4-era premise here was that pathSlack's
+// both-edges-halving (100 -> 50) forces a 50/50 channel/FT split. V5 retires the halving itself --
+// a touched axis is charged ONCE per traversal, not once per edge, so a straight pass-through's
+// residual is the FULL cap-usage (100), not half of it. This is a DIFFERENT mechanism from the
+// pre-B4 bug the halving originally fixed (which also never halved, but only because it never
+// looked at the exit edge at all): V5 arrives at "don't halve" deliberately, via correctly counting
+// a touched axis once, not by omission -- and unlike the pre-B4 bug it does NOT overshoot, because
+// usage+n (0+100) does not EXCEED cap_H (100). The whole 100-net probe still prices as free, so the
+// greedy loop commits the ENTIRE bundle in a SINGLE chunk, filling the channel to EXACTLY its true
+// capacity (hu=100=cap_H=100, zero overflow) and never touching S at all. The fixture's INTENT is
+// unchanged (the search-time price must agree with what commit-time accrual will actually charge,
+// so the greedy loop never splits when it doesn't need to and never overshoots when it commits a
+// whole probe) -- only the asserted landscape changes: a straight pass-through can now fill a
+// channel to full capacity in ONE lump, not a forced 50/50 split.
 void testStraightPassThroughBothEdgesPricingSaturatesChannelExactly() {
     Problem p;
     p.outline_w = 110.0;
@@ -776,21 +829,26 @@ void testStraightPassThroughBothEdgesPricingSaturatesChannelExactly() {
     for (const auto& ch : r_.channels) {
         if (std::abs(ch.rect.w - 10.0) < kEps && std::abs(ch.rect.h - 4.0) < kEps) {
             found_channel = true;
-            // GREEN under B4: exactly saturated, never overshot.
+            // V5: exactly saturated, never overshot -- the channel's TRUE 25*dim capacity
+            // (cap_H = 25*4 = 100), filled by the whole bundle in one lump (see comment above).
             assert(ch.horizontal_usage <= 100.0 + kEps);
             assert(std::abs(ch.horizontal_usage - 100.0) < kEps);
+            assert(ch.vertical_usage == 0.0);
         }
     }
     assert(found_channel);
     assert(r_.channel_overflow_nets == 0.0);
     assert(r_.channel_overflow == 0.0);
 
-    // The split: 50 nets through the channel (fills it exactly), 50 diverted to S.
-    assert(r_.routes.size() == 2);
-    assert(r_.routes[0].nets == 50);
-    assert(r_.routes[1].nets == 50);
-    assert(std::abs(r_.soft_feedthrough_nets[2] - 50.0) < kEps);
-    assert(r_.feedthrough_mismatch > 0.0);  // S has no starting slack -- diverted nets do cost something
+    // V5: the whole bundle fits through the channel in a SINGLE chunk, exactly saturating it -- S
+    // (the FT bypass) is never touched. This is the load-bearing change from the retired B4-era
+    // halving premise (a forced 50/50 split): V5's single-charge-per-traversal pathSlack sees the
+    // FULL 100-net residual, and since 100 does not exceed cap_H (100), the whole probe still prices
+    // free, so there is no bottleneck to split at.
+    assert(r_.routes.size() == 1);
+    assert(r_.routes[0].nets == 100);
+    assert(r_.soft_feedthrough_nets[2] == 0.0);
+    assert(r_.feedthrough_mismatch == 0.0);
 
     std::cout << "testStraightPassThroughBothEdgesPricingSaturatesChannelExactly ok (chunks="
               << r_.routes.size() << ")\n";
@@ -1253,6 +1311,22 @@ ElbowMispricingFixture makeElbowMispricingFixture(int elbow_nets = 300) {
 // scratch probe: overflow now 0, not the pre-B4 code's residual 4,880 um^2) -- an even stronger
 // result than before, because pathSlack's halving (design §4) ALSO stops the filler itself from
 // blindly overshooting CH1's cap the way the old single-charge slack view did.
+//
+// V5 RE-BASELINE (docs/research/2026-07-28-alpha-v5-cost-recalculation-analysis.md, section 1.2;
+// re-verified via a scratch probe against the built router): single-charge-per-axis-per-traversal
+// demand means the 900-net straight filler alone no longer overshoots CH1 (it now genuinely accrues
+// vertical_usage=900, not the retired double-charge model's 1800) -- so LEGACY itself now reaches
+// overflow=0 here too, not 19,520. With CH1 correctly priced as already carrying 900/1000 of its
+// true capacity, cost-driven's OWN Dijkstra now also avoids the CH1 elbow entirely (not merely
+// avoids overflowing it) and detours via CH4, converging on the EXACT SAME route legacy already
+// takes -- a genuine, verified TIE, not a strict cost-driven win. The gate's tie-break rule (ties go
+// to cost-driven, exercised identically by testNegotiationClearsRoundZeroOverflow and
+// testFeasibilityFallbackNeverWorseThanLegacyOnGenuineDeadEnd above) is what this fixture now
+// exercises: `!r.used_fallback` remains the load-bearing, sufficient check (it is the gate's OWN
+// decision flag, not inferred from output differences) -- but because cd and legacy now tie on
+// every observable field, this fixture can no longer ALSO corroborate that via a numeric
+// non-substitution proof (see testComparisonGateSwitchesToLegacyWhenCostDrivenFullyRoutedButWorse
+// below for the sibling fixture that still exercises genuine, numerically-divergent used_fallback).
 void testComparisonGateKeepsCostDrivenWhenItWins() {
     ElbowMispricingFixture f = makeElbowMispricingFixture();
 
@@ -1261,33 +1335,32 @@ void testComparisonGateKeepsCostDrivenWhenItWins() {
     // engaged here (nothing was open). This fixture's whole point is that the amendment's full
     // AREA-cost comparison must still catch and correct this case.
     assert(r.open_routes == 0);
-    assert(!r.used_fallback);  // cost-driven wins, so the gate keeps cost-driven's own result
+    assert(!r.used_fallback);  // gate keeps cost-driven's own result (tie-break: ties go to cd)
 
-    // Non-substitution proof: r must DIFFER from a direct legacy call on the decisive fields --
-    // proving the gate genuinely kept cost-driven's strictly-better result rather than substituting
-    // legacy wholesale.
+    // V5: cost-driven and legacy now independently converge on the IDENTICAL route (see comment
+    // above) -- an exact tie, not a strict cost-driven win.
     RoutingResult legacy = routeProblem(f.problem, f.placement, /*cost_driven=*/false);
-    assert(r.open_routes == legacy.open_routes);                    // both fully routed (0 == 0)
-    assert(r.total_wirelength < legacy.total_wirelength - kEps);    // cost-driven WL strictly lower
-    assert(r.channel_overflow < legacy.channel_overflow - kEps);    // cost-driven overflow strictly lower
+    assert(r.open_routes == legacy.open_routes);                              // both fully routed
+    assert(std::abs(r.total_wirelength - legacy.total_wirelength) < kEps);    // tied, not lower
+    assert(std::abs(r.channel_overflow - legacy.channel_overflow) < kEps);    // tied, not lower
 
-    // Legacy pricing is UNCHANGED by B4 -- these numbers still hold exactly as before. The 900-net
-    // straight vertical filler alone overshoots CH1 (2*900=1800 > vcap=1000) on BOTH sides regardless
-    // of the elbow bundle's routing choice, so legacy never achieves zero overflow here.
-    assert(std::abs(legacy.channel_overflow - 19520.0) < 1.0);
-    assert(std::abs(legacy.total_wirelength - 625500.0) < 1.0);
+    // V5: the 900-net filler alone no longer overshoots CH1 (single-charge demand), so legacy
+    // itself now reaches overflow=0 and the SAME wirelength as cost-driven (both detour via CH4).
+    assert(std::abs(legacy.channel_overflow - 0.0) < 1.0);
+    assert(std::abs(legacy.total_wirelength - 646500.0) < 1.0);
 
-    // B4 measured (scratch-probe-derived, official units): cost-driven now drives overflow to
-    // EXACTLY 0 (a stronger result than the pre-B4 code's residual 4,880 um^2), and the gate's OWN
-    // key (roundCostOfficial) ranks it decisively ahead of legacy.
+    // Cost-driven still reaches overflow 0 / zero mismatch (unchanged in KIND, just no longer
+    // strictly better than legacy at this fixture's scale), and the gate's OWN key
+    // (roundCostOfficial) ranks it EQUAL to (not decisively ahead of) legacy.
     assert(r.channel_overflow == 0.0);
     assert(r.channel_overflow_nets == 0.0);
     assert(r.feedthrough_mismatch == 0.0);
-    assert(std::abs(r.total_wirelength - 572500.0) < 1.0);
+    assert(std::abs(r.total_wirelength - 646500.0) < 1.0);
     double A = f.problem.outline_w * f.problem.outline_h;
     auto key_legacy = roundCostOfficial(legacy, f.problem.alpha, A);
     auto key_r = roundCostOfficial(r, f.problem.alpha, A);
-    assert(key_r < key_legacy);
+    assert(key_r.first == key_legacy.first);
+    assert(std::abs(key_r.second - key_legacy.second) < 1e-6);
 
     std::cout << "testComparisonGateKeepsCostDrivenWhenItWins ok (cd_overflow="
               << r.channel_overflow << ", legacy_wl=" << legacy.total_wirelength
@@ -1321,17 +1394,20 @@ void testComparisonGateSwitchesToLegacyWhenCostDrivenFullyRoutedButWorse() {
     assert(r.used_fallback);  // the branch this test exists to cover
 
     // The gate must return the legacy pass's result WHOLESALE (not a blend): decisive metrics are
-    // bit-identical to a direct legacy call on the same (problem, placement) -- probe-confirmed
-    // values total_wirelength=15,111,500, channel_overflow(area)=988,720, overflow_nets=76,300,
-    // feedthrough_mismatch=0, routes.size()=9.
+    // bit-identical to a direct legacy call on the same (problem, placement). V5 re-baseline
+    // (docs/research/2026-07-28-alpha-v5-cost-recalculation-analysis.md; re-verified via a scratch
+    // probe against the built router): every metric shifts with the single-charge demand model + GP
+    // rule at this large, heavily-saturated scale -- probe-confirmed values total_wirelength=
+    // 16,924,000 (was 15,111,500), channel_overflow(area)=966,760 (was 988,720), overflow_nets=
+    // 75,400 (was 76,300), feedthrough_mismatch=0, routes.size()=9.
     assert(r.open_routes == legacy.open_routes);
     assert(std::abs(r.total_wirelength - legacy.total_wirelength) < kEps);
     assert(std::abs(r.channel_overflow - legacy.channel_overflow) < kEps);
     assert(std::abs(r.feedthrough_mismatch - legacy.feedthrough_mismatch) < kEps);
     assert(r.routes.size() == legacy.routes.size());
-    assert(std::abs(r.total_wirelength - 15111500.0) < 1.0);
-    assert(std::abs(r.channel_overflow - 988720.0) < 1.0);
-    assert(std::abs(r.channel_overflow_nets - 76300.0) < 1.0);
+    assert(std::abs(r.total_wirelength - 16924000.0) < 1.0);
+    assert(std::abs(r.channel_overflow - 966760.0) < 1.0);
+    assert(std::abs(r.channel_overflow_nets - 75400.0) < 1.0);
 
     // Determinism (same discipline as testComparisonGateDeterministic below): two cost_driven=true
     // calls on the identical (problem, placement) must be bit-identical, including used_fallback.

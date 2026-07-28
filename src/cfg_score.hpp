@@ -57,11 +57,18 @@ struct OfficialBreakdown {
     double overflow_nets = 0.0;
     double capacity_nets = 0.0;
     double rate = 0.0;               // overflow_nets / capacity_nets
-    double overflow_penalty = 0.0;   // 20*A*R + 1.5*A*max(0, R-0.05)
-    double ft_penalty = 0.0;         // 0 for the alpha package (no FT)
+    double overflow_penalty = 0.0;   // officialOverflowPenalty(rate, outline_area) -- V5 piecewise tail
+    double ft_penalty = 0.0;         // V5 aggregate FT slack penalty; 0 on the alpha package (no FT used)
     double checker_cost = 0.0;       // A + problem.alpha*WL + overflow_penalty
     std::map<std::string, std::pair<double, double>> demand_by_channel;  // name -> (H, V)
 };
+
+// V5 overflow-penalty tail (docs/research/2026-07-28-alpha-v5-cost-recalculation-analysis.md,
+// section 1.3): rate <= kThreshold(0.05) -> beta_lin*outline_area*rate; else the linear part caps
+// at kThreshold and a sqrt tail (beta_tail*sqrt(rate-kThreshold)*outline_area) takes over. Exposed
+// standalone (not file-local) so it can be tested directly against the historical R>threshold
+// datapoint (case1's pre-V5 report.json overflow_ft_penalty, which V5 reproduces exactly).
+double officialOverflowPenalty(double rate, double outline_area);
 
 // Score a parsed .cfg against the official cost model. Uses problem.alpha (CSV alpha) for the cost.
 OfficialBreakdown officialScoreCfg(const Problem& problem, const CfgSolution& cfg);

@@ -561,9 +561,12 @@ void testRespaceToDemandCase1BStarSeed1() {
 
     RoutingResult routing;
     exactScore(problem, placement, &routing);
-    // case1 is overflow-prone per the P1 addendum / design §6 (bstar overflow ~38875 pre-P3) --
-    // assert the fixture actually exercises the overflow-relief path this test targets.
-    assert(routing.channel_overflow > kEps);
+    // V5 re-baseline (2026-07-28, docs/research/2026-07-28-alpha-v5-cost-recalculation-analysis.md):
+    // under single-charge demand this decode no longer overflows (was ~38875 pre-P3 under the old
+    // per-edge model; channel_overflow is now exactly 0), so the old overflow-prone precondition went
+    // vacuous. respaceToDemand's input primitive is channelDemands' strip list -- assert THAT is
+    // non-empty so the fixture still provably exercises the widen path.
+    assert(!channelDemands(problem, placement, routing).empty());
 
     double pre_area = sumStampedArea(placement.outline_w, placement.outline_h);
     std::vector<Rect> pre_core;
@@ -711,8 +714,9 @@ void testRespaceFixedPointCase1BStarSeed1NeverRegresses() {
 
     RoutingResult baseline_routing;
     Score baseline_score = exactScore(problem, placement, &baseline_routing);
-    // case1 is overflow-prone -- pin the baseline so this remains a meaningful, non-vacuous fixture.
-    assert(baseline_routing.channel_overflow > kEps);
+    // V5 re-baseline (2026-07-28): the raw decode no longer overflows under single-charge demand, so
+    // pin non-vacuousness on channelDemands (the primitive the respace loop acts on) instead.
+    assert(!channelDemands(problem, placement, baseline_routing).empty());
 
     RespaceResult result = respaceFixedPoint(problem, placement, exactCached);
 

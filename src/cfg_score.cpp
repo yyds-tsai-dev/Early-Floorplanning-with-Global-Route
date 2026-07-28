@@ -8,25 +8,39 @@
 #include <string>
 #include <unordered_map>
 
+#include "ft.hpp"
+
 namespace efgr {
 
 namespace {
 
-// Official overflow-penalty parameters, read byte-verified from every alpha report.json's
-// `cost_breakdown` block (beta-task-2-report.md, Section 1).
+// Official cost-function parameters: unchanged in magnitude across the V5 recalculation (still
+// byte-verified from every alpha report.json's `cost_breakdown` block, beta-task-2-report.md
+// Section 1). What V5 changes is the wirelength guiding-point rule, the channel-demand accounting,
+// and it confirms the overflow-tail formula exact (see docs/research/2026-07-28-alpha-v5-cost-
+// recalculation-analysis.md).
 constexpr double kBetaLin = 20.0;    // linear term coefficient
 constexpr double kBetaTail = 1.5;    // tail term coefficient (R > threshold)
 constexpr double kThreshold = 0.05;  // overflow-rate threshold
 constexpr double kCapPerUm = 25.0;   // wire density limit: 25 nets / um
+constexpr double kBetaFt = 3.0;      // FT aggregate-slack penalty coefficient (analysis doc section 1.4)
 
-// Checker guiding point for the wirelength CHAIN (NOT guidePoint's overlap midpoint).
-// The point sits on the shared border between `a` and `b`; the border is picked by MINIMUM gap so
-// the classification is robust to the .cfg's 3-decimal rounding (abutting edges can differ by up to
-// ~0.001 um -- report.json flags these as "borderline"). Along the border the coordinate is the
-// average of the two rectangles' centers (equivalently, the midpoint of the two facing-edge
-// midpoints); across the border it is the midpoint of the two near edges. Verified to reproduce
-// total_wirelength to <=1e-6 rel on all 5 alpha cases.
-std::pair<double, double> guidingPoint(const Rect& a, const Rect& b) {
+// V5 wirelength chain (docs/research/2026-07-28-alpha-v5-cost-recalculation-analysis.md, section
+// 1.1): replaces the retired CENTER-anchored guiding-point chain. Two guiding-point kinds, walked
+// pairwise over a Path's RAW (object, edge) step list (no more dedup of consecutive identical
+// objects -- the edge values themselves now drive corner insertion):
+//   * crossGuidingPoint(a, b) -- CROSS point between two DIFFERENT consecutive objects. The shared
+//     border is still picked by MINIMUM gap (same classification shape as the retired guidingPoint,
+//     robust to the .cfg's 3-decimal rounding -- abutting edges can differ by up to ~0.001 um);
+//     the ACROSS-border coordinate stays the average of the two near edges, but the ALONG-border
+//     coordinate is now the midpoint of the two rects' OVERLAP interval (not their centers).
+//   * cornerGuidingPoint(r, e_in, e_out, point) -- CORNER point for an internal turn within the
+//     SAME object (a traversal's entry/exit edge pair). Returns false (no point) when e_in/e_out
+//     share an axis (edges 1/3 are x-fixed, 2/4 are y-fixed) -- a straight pass-through or a
+//     same-edge U-turn (e.g. "CH3 3 CH3 3") inserts nothing.
+// Verified EXACT (<=5e-6 abs) against the five official example-path subtotals; see
+// test/regression_cfg_score.cpp.
+std::pair<double, double> crossGuidingPoint(const Rect& a, const Rect& b) {
     const double g_ar_bx = std::abs(a.right() - b.x);  // a.right meets b.left  (vertical border)
     const double g_br_ax = std::abs(b.right() - a.x);  // b.right meets a.left  (vertical border)
     const double g_at_by = std::abs(a.top() - b.y);    // a.top   meets b.bottom(horizontal border)
@@ -35,13 +49,44 @@ std::pair<double, double> guidingPoint(const Rect& a, const Rect& b) {
     const double min_horizontal = std::min(g_at_by, g_bt_ay);
     if (min_vertical <= min_horizontal) {
         const double x = (g_ar_bx <= g_br_ax) ? 0.5 * (a.right() + b.x) : 0.5 * (b.right() + a.x);
-        return {x, 0.5 * (a.cy() + b.cy())};
+        const double y = 0.5 * (std::max(a.y, b.y) + std::min(a.top(), b.top()));
+        return {x, y};
     }
     const double y = (g_at_by <= g_bt_ay) ? 0.5 * (a.top() + b.y) : 0.5 * (b.top() + a.y);
-    return {0.5 * (a.cx() + b.cx()), y};
+    const double x = 0.5 * (std::max(a.x, b.x) + std::min(a.right(), b.right()));
+    return {x, y};
 }
 
+// See crossGuidingPoint's doc comment above. `edge` axis: 1/3 = x-fixed (vertical edges: 1=left,
+// 3=right), 2/4 = y-fixed (horizontal edges: 2=top, 4=bottom).
+bool cornerGuidingPoint(const Rect& r, int e_in, int e_out, std::pair<double, double>& point) {
+    const bool in_is_x = (e_in == 1 || e_in == 3);
+    const bool out_is_x = (e_out == 1 || e_out == 3);
+    if (in_is_x == out_is_x) return false;  // same axis: straight pass-through / U-turn -> no point
+    const int ex = in_is_x ? e_in : e_out;
+    const int ey = in_is_x ? e_out : e_in;
+    point = {(ex == 1) ? r.x : r.right(), (ey == 2) ? r.top() : r.y};
+    return true;
+}
+
+// A Path step resolved to its object's rect (block or channel); unresolved (unknown) names are
+// filtered out defensively before chaining, same as the retired dedup loop used to do.
+struct ResolvedStep {
+    std::string name;
+    int edge;
+    Rect rect;
+};
+
 }  // namespace
+
+// V5 overflow-penalty tail (docs/research/2026-07-28-alpha-v5-cost-recalculation-analysis.md,
+// section 1.3): EXACT official piecewise formula (not an approximation) -- reproduces the
+// historical R>threshold datapoint (case1's pre-V5 report.json penalty) to 1e-9 rel. A free
+// function (not file-local) so it can be tested directly; see test/regression_cfg_score.cpp.
+double officialOverflowPenalty(double rate, double outline_area) {
+    if (rate <= kThreshold) return kBetaLin * outline_area * rate;
+    return kBetaLin * kThreshold * outline_area + kBetaTail * std::sqrt(rate - kThreshold) * outline_area;
+}
 
 CfgSolution parseCfg(const std::string& path) {
     CfgSolution cfg;
@@ -104,7 +149,7 @@ OfficialBreakdown officialScoreCfg(const Problem& problem, const CfgSolution& cf
     OfficialBreakdown out;
     out.outline_area = cfg.outline_w * cfg.outline_h;
 
-    // Name lookups. Channels own mutable H/V demand accumulators (per-edge model).
+    // Name lookups. Channels own mutable H/V demand accumulators (V5 per-axis-per-traversal model).
     std::unordered_map<std::string, int> chan_index;
     std::vector<double> hu(cfg.channels.size(), 0.0);
     std::vector<double> vu(cfg.channels.size(), 0.0);
@@ -118,29 +163,72 @@ OfficialBreakdown officialScoreCfg(const Problem& problem, const CfgSolution& cf
         return false;  // unknown object -> skip (defensive; legal .cfg never hits this)
     };
 
+    // V5 FT crossing-net accrual (analysis doc section 1.4): per-SOFT-block total, accumulated
+    // across ALL paths before any FT-tier conversion happens (see the ft_area_sum block below).
+    std::vector<double> ft_nets_by_block(problem.blocks.size(), 0.0);
+
     double wirelength = 0.0;
     for (const CfgSolution::Path& p : cfg.paths) {
-        // (1) Per-edge channel demand from the RAW step list (each entry/exit edge charges nets).
-        for (const auto& step : p.steps) {
-            auto it = chan_index.find(step.first);
-            if (it == chan_index.end()) continue;  // block step
-            if (step.second == 1 || step.second == 3) hu[it->second] += p.nets;  // left/right
-            else                                      vu[it->second] += p.nets;  // top/bottom
+        // (1) V5 FT crossing-net accrual: walk this path's steps with the same traversal-pairing
+        // shape the channel-demand walk below uses (consecutive same-name steps form one
+        // traversal), but over ALL steps, not just channels. commitRoutePath (routing.cpp) emits
+        // the route's source/target ONCE each (p.steps.front()/.back()) and every intermediate node
+        // TWICE consecutively (entry edge, exit edge), so excluding this path's first and last step
+        // isolates exactly the INTERMEDIATE (feedthrough) traversals. A traversal whose object
+        // resolves to a SOFT block in `problem` (by name) accrues p.nets ONCE.
+        for (std::size_t i = 0; i < p.steps.size();) {
+            std::size_t consumed = (i + 1 < p.steps.size() && p.steps[i + 1].first == p.steps[i].first) ? 2 : 1;
+            bool is_terminal = (i == 0) || (i + consumed == p.steps.size());
+            if (!is_terminal) {
+                auto bi = problem.block_index.find(p.steps[i].first);
+                if (bi != problem.block_index.end() && isSoft(problem.blocks[bi->second].type))
+                    ft_nets_by_block[bi->second] += p.nets;
+            }
+            i += consumed;
         }
-        // (2) Wirelength: dedupe consecutive identical objects -> node sequence, chain guiding pts.
-        std::vector<Rect> nodes;
-        std::string prev;
+
+        // (2) V5 channel demand: each channel TRAVERSAL (a consecutive entry/exit step pair on the
+        // same channel) charges p.nets ONCE per axis touched by {e_in, e_out} -- a straight
+        // pass-through charges one axis once (not each edge separately, unlike the retired per-edge
+        // model); a turn charges both axes once each. A channel step with no following same-name
+        // partner (defensive) charges its own edge's axis once. Block steps are unchanged (no charge).
+        for (std::size_t i = 0; i < p.steps.size();) {
+            auto it = chan_index.find(p.steps[i].first);
+            if (it == chan_index.end()) { ++i; continue; }  // block step
+            const int e_in = p.steps[i].second;
+            int e_out = e_in;
+            std::size_t consumed = 1;
+            if (i + 1 < p.steps.size() && p.steps[i + 1].first == p.steps[i].first) {
+                e_out = p.steps[i + 1].second;
+                consumed = 2;
+            }
+            const bool touches_h = (e_in == 1 || e_in == 3 || e_out == 1 || e_out == 3);
+            const bool touches_v = (e_in == 2 || e_in == 4 || e_out == 2 || e_out == 4);
+            if (touches_h) hu[it->second] += p.nets;
+            if (touches_v) vu[it->second] += p.nets;
+            i += consumed;
+        }
+
+        // (3) Wirelength: V5 chain over the RAW step list (no dedup of consecutive identical
+        // objects -- the edge pairs themselves drive corner insertion; see crossGuidingPoint /
+        // cornerGuidingPoint above). Unknown object names are filtered out first, defensively.
+        std::vector<ResolvedStep> steps;
+        steps.reserve(p.steps.size());
         for (const auto& step : p.steps) {
-            if (step.first == prev) continue;
             Rect r;
-            if (!rect_of(step.first, r)) { prev = step.first; continue; }
-            nodes.push_back(r);
-            prev = step.first;
+            if (rect_of(step.first, r)) steps.push_back({step.first, step.second, r});
         }
-        if (nodes.size() < 2) continue;  // direct abutment (1 node after collapse) -> 0 WL
         std::vector<std::pair<double, double>> guides;
-        guides.reserve(nodes.size() - 1);
-        for (std::size_t i = 0; i + 1 < nodes.size(); ++i) guides.push_back(guidingPoint(nodes[i], nodes[i + 1]));
+        for (std::size_t i = 0; i + 1 < steps.size(); ++i) {
+            if (steps[i].name == steps[i + 1].name) {
+                std::pair<double, double> corner;
+                if (cornerGuidingPoint(steps[i].rect, steps[i].edge, steps[i + 1].edge, corner))
+                    guides.push_back(corner);
+            } else {
+                guides.push_back(crossGuidingPoint(steps[i].rect, steps[i + 1].rect));
+            }
+        }
+        if (guides.size() < 2) continue;  // <2 GPs -> path contributes 0
         double path_len = 0.0;
         for (std::size_t i = 0; i + 1 < guides.size(); ++i)
             path_len += manhattan(guides[i].first, guides[i].second, guides[i + 1].first, guides[i + 1].second);
@@ -163,15 +251,40 @@ OfficialBreakdown officialScoreCfg(const Problem& problem, const CfgSolution& cf
     out.capacity_nets = capacity;
     out.rate = (capacity > 0.0) ? overflow / capacity : 0.0;
 
-    // Overflow penalty (H1 global piecewise-linear). Base 20*A*R reproduces cases 0/2/3/4 exactly;
-    // the beta_tail tail is the best-proven form -- case1 (R>threshold) is ~0.31% of total cost
-    // short (no per-channel / direction-split hypothesis reproduced it; beta-task-2-report.md S4).
+    // Overflow penalty: exact V5 piecewise tail (docs/research/2026-07-28-alpha-v5-cost-
+    // recalculation-analysis.md, section 1.3). All 5 alpha cases sit in the linear region under
+    // V5's halved (single-charge-per-axis) demand accounting; the old case1 H1-tail / 0.31%-cost
+    // doubt is resolved -- that gap was the demand accounting, not the tail formula (section 1.3
+    // reproduces the historical R>threshold datapoint to the last digit).
     const double A = out.outline_area;
     const double R = out.rate;
-    out.overflow_penalty = kBetaLin * A * R + kBetaTail * A * std::max(0.0, R - kThreshold);
-    out.ft_penalty = 0.0;  // alpha package used no feedthrough
+    out.overflow_penalty = officialOverflowPenalty(R, A);
+    // V5 FT penalty = beta_ft * max(0, FT_area_sum - outline_area) -- an AGGREGATE slack across
+    // every block's FT-converted area, not a per-block mismatch sum (beta_ft = 3.0; same analysis
+    // doc, section 1 item 4). Mirrors routing.cpp's computeOverflowAndMismatch ft_area_sum
+    // computation exactly: both sides accumulate each soft block's crossing-net TOTAL first (across
+    // every path/route touching it -- ft_nets_by_block above), THEN convert to area ONCE via
+    // ftRequiredArea/ftExtend/ftTierRate -- required for identical tier evaluation, since a block's
+    // FT tier depends on its cumulative nets, not any single path's contribution. All 5 alpha cases
+    // still resolve to ft_penalty == 0 (no FT-carrying paths in those outputs; see
+    // test/regression_cfg_score.cpp), but this now genuinely computes it rather than hardcoding it,
+    // so the self-consistency identity (test/run_selfconsistency_regressions.sh) also holds for
+    // FT-carrying solver output.
+    double ft_area_sum = 0.0;
+    for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
+        const Block& block = problem.blocks[i];
+        if (isSoft(block.type)) {
+            double base = block.ft_base_area > 0.0 ? block.ft_base_area : block.area;
+            double nets_i = ft_nets_by_block[i];
+            ft_area_sum += ftRequiredArea(base, ftExtend(nets_i, ftTierRate(block, nets_i)));
+        } else {
+            ft_area_sum += block.area;
+        }
+    }
+    out.ft_penalty = kBetaFt * std::max(0.0, ft_area_sum - out.outline_area);
 
     out.checker_cost = A + problem.alpha * out.wirelength + out.overflow_penalty;
+    out.checker_cost += out.ft_penalty;
     return out;
 }
 

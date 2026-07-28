@@ -41,7 +41,11 @@ int testHorizontalChannelCapacityUsesHeight() {
     };
     p.block_index["SRC"] = 0;
     p.block_index["DST"] = 1;
-    p.bundles.push_back(Bundle{0, 1, 1250});  // per-edge: straight pass-through charges 2x, so 2*1250 = 2500 = 25*h
+    // V5 (docs/research/2026-07-28-alpha-v5-cost-recalculation-analysis.md, section 1.2): single
+    // charge per traversal, not the retired per-edge double-charge (1250, well under cap=25*h=2500,
+    // not the old "2*1250=2500=exactly at cap" rationale) -- the assertion below (zero overflow)
+    // still holds, now with slack to spare rather than landing exactly at the boundary.
+    p.bundles.push_back(Bundle{0, 1, 1250});
 
     Placement placement;
     placement.rects = {Rect{0.0, 0.0, 10.0, 100.0}, Rect{60.0, 0.0, 10.0, 100.0}};
@@ -50,7 +54,7 @@ int testHorizontalChannelCapacityUsesHeight() {
     RoutingResult r = routeProblem(p, placement);
     if (r.open_routes != 0) return fail("simple channel route should not be open");
     if (r.channel_overflow > 1e-6) {
-        return fail("1250 horizontal nets should fit in a 50x100 channel (per-edge: 2*1250 = 2500 = 25*h)");
+        return fail("1250 horizontal nets should fit in a 50x100 channel (V5: single charge, 1250 << cap=25*h=2500)");
     }
     return 0;
 }
@@ -121,8 +125,17 @@ int testLargeBundleSplitsAcrossParallelChannels() {
     // the CURRENT observed value with a tight tolerance, same pattern as regression_p2_20260707.cpp's
     // testAdaptiveChunkingSplitsAtBottleneck (pins 4800 +/- 1e-3): confirmed deterministic (re-run
     // twice, bit-identical at setprecision(17)) rather than derived by hand.
-    if (std::abs(r.channel_overflow - 8120.0) >= 1e-3) {
-        return fail("channel_overflow drifted from the pinned 8120 um^2 -- re-measure and update the pin, don't widen blindly");
+    //
+    // V5 RE-BASELINE (docs/research/2026-07-28-alpha-v5-cost-recalculation-analysis.md, section 1.2;
+    // re-measured via a scratch probe against the built router, confirmed deterministic across two
+    // independent calls): the pinned 8120.0 was a B4-era both-edges-pricing artifact. Under V5's
+    // single-charge-per-axis-per-traversal channelPathSlack (no more halving), the greedy split-at-
+    // bottleneck loop now sees each parallel channel's TRUE residual capacity and fills them exactly:
+    // CH2 (below OBS, rect w=10,h=40 -> hcap=25*40=1000) takes exactly 1000 nets (saturated, zero
+    // overflow), CH3 (above OBS, same geometry) takes the remaining 800 (well under its own 1000
+    // cap) -- so total channel_overflow is now exactly 0, not 8120.
+    if (std::abs(r.channel_overflow - 0.0) >= 1e-3) {
+        return fail("channel_overflow drifted from the pinned 0 um^2 -- re-measure and update the pin, don't widen blindly");
     }
     return 0;
 }

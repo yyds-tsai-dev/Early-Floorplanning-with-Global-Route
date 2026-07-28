@@ -262,24 +262,37 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
                             // the same rect-touch geometry; an L-shaped hop that changes both x and y
                             // cannot occur for a single rect-to-rect touch (positiveTouch requires a
                             // shared edge on exactly one axis), so exactly one axis is charged per side
-                            // below. B4 (design §3.3): BOTH sides of the hop are now priced, closing
-                            // the prior entry-axis-only gap -- `u`'s EXIT edge (when u is itself a
-                            // channel) AND `v`'s ENTRY edge (when v is), each on the SAME axis
-                            // classification (axis(u,v) == axis(v,u): a shared border has one
-                            // orientation, so `horizontal` below applies to whichever channel(s) are
-                            // present, computed once regardless of which side(s) are channels). This
-                            // matches, edge-for-edge, the two charges `accumulatePathUsage`
-                            // (route_geometry.hpp) accrues at commit time for this same hop -- the
-                            // search now sees exactly the demand its own commit will accrue (design
-                            // §2.2's straight-pass-through-halves-slack fix, §4, pairs with this).
+                            // below.
+                            //
+                            // V5 (docs/research/2026-07-28-alpha-v5-cost-recalculation-analysis.md,
+                            // section 1.2): a channel traversal is charged once per TOUCHED axis, not
+                            // once per edge -- so pricing `u`'s exit hop must be SUPPRESSED when `u`
+                            // is itself a channel AND this hop's axis is the SAME axis `u` was already
+                            // ENTERED on (that axis was already charged when `prev[u] -> u` was priced,
+                            // one level up the search). `prev[u]` is always settled before `u` is
+                            // relaxed (standard Dijkstra invariant) and can only be unset (-1) when `u`
+                            // is the search source -- always a block, never a channel -- so the
+                            // `prev[u] >= 0` check below is a defensive guard, not a reachable branch;
+                            // it deliberately does NOT suppress (falls back to always pricing `u`) if
+                            // it somehow were unmet. The `v`-side (entry) clause stays unconditional --
+                            // `v`'s entry axis is always a NEW charge from this node's perspective,
+                            // exactly matching `accumulatePathUsage` (route_geometry.hpp)'s per-axis-
+                            // per-traversal accrual at commit time, so the search sees exactly the
+                            // demand its own commit will accrue.
                             int dir = edgeFromTo(rects[u], rects[v]);
                             bool horizontal = (dir == 1 || dir == 3);
+                            bool u_charge_suppressed = false;
+                            if (u >= n_blocks && prev[u] >= 0) {
+                                int entry_dir = edgeFromTo(rects[u], rects[prev[u]]);
+                                bool entry_horizontal_of_u = (entry_dir == 1 || entry_dir == 3);
+                                u_charge_suppressed = (horizontal == entry_horizontal_of_u);
+                            }
                             // B4.1 (route-pricing portfolio, b4-report.md): `route_pricing_official`
-                            // selects official (B4, both-edges) vs the RETAINED pre-B4 (HEAD 207d08c)
-                            // channel pricing (entry-axis-only -- no `u`-side clause existed at all).
-                            // The false branch is byte-identical to that history.
+                            // selects official (V5, single-charge-per-axis) vs the RETAINED pre-B4
+                            // (HEAD 207d08c) channel pricing (entry-axis-only -- no `u`-side clause
+                            // existed at all). The false branch is byte-identical to that history.
                             if (problem.route_pricing_official) {
-                                if (u >= n_blocks) {
+                                if (u >= n_blocks && !u_charge_suppressed) {
                                     const auto& ch_u = rr.channels[u - n_blocks];
                                     double usage = horizontal ? ch_u.horizontal_usage : ch_u.vertical_usage;
                                     cost += p_ovf * marginalOverflowNets(ch_u, horizontal, usage, nets);
@@ -402,19 +415,17 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
     // soft blocks). Returns a value >= 0 (channels/soft blocks already at or past their boundary
     // contribute 0, correctly signaling "no slack left, saturated").
     //
-    // B4 (design b4-design.md §4): channel slack now counts EVERY charge this node's two incident
-    // hops place on each axis, not just the entry-edge charge. For interior channel node `node` with
-    // predecessor `u = node_path[i-1]` and successor `s = node_path[i+1]` (both always exist for an
-    // interior node; a channel is never charged only once -- the block/channel->node hop supplies the
-    // entry, the node->(next) hop supplies the exit): a straight pass-through (both hops on the same
-    // axis) places TWO charges on that axis, so its residual capacity must be halved before it can be
-    // safely committed (`cap - usage` divided by the charge count on that axis) -- committing `n <=
-    // slack` then accrues `2n <= cap` at commit (route_geometry.hpp's accumulatePathUsage), closing
-    // the overshoot the old entry-axis-only slack allowed (design §2.2). An L-turn (entry/exit on
-    // different axes) places one charge per axis, so each axis's residual is divided by 1 (unchanged
-    // from before) and the TIGHTER axis binds -- also a fix vs the old code, which only ever looked at
-    // the entry axis and could miss a saturated exit axis entirely. RAW caps (25*ch.rect.h/w, no
-    // max(1.0,.) clamp), matching marginalOverflowNets/computeOverflowAndMismatch.
+    // V5 (docs/research/2026-07-28-alpha-v5-cost-recalculation-analysis.md, section 1.2): the
+    // official branch's channel slack (channelPathSlack, route_cost.hpp) now counts each TOUCHED axis
+    // ONCE, regardless of whether one or both of this node's incident hops (entry from predecessor
+    // `u = node_path[i-1]`, exit to successor `s = node_path[i+1]`) land on it -- so its residual
+    // capacity (`cap - usage`) is used AS-IS, no longer halved for a straight pass-through (both hops
+    // on the same axis). This matches route_geometry.hpp's accumulatePathUsage, which charges a
+    // touched axis once per traversal, not once per edge -- committing `n <= slack` then accrues
+    // exactly `n <= cap` at commit, never overshooting. An L-turn (entry/exit on different axes) still
+    // charges one per axis and the TIGHTER axis still binds, unchanged from B4. The legacy branch
+    // (`problem.route_pricing_official == false`, below) is UNCHANGED by V5 -- it stays the
+    // entry-axis-only slack, byte-identical to its pre-B4 (HEAD 207d08c) history.
     auto pathSlack = [&](RoutingResult& rr, const std::vector<int>& node_path) {
         double slack = std::numeric_limits<double>::infinity();
         for (std::size_t i = 1; i + 1 < node_path.size(); ++i) {
@@ -500,6 +511,27 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
             double required_area = ftRequiredArea(base, ftExtend(nets, ftTierRate(problem.blocks[i], nets)));
             double actual_area = round2(placement.rects[i].w * placement.rects[i].h);
             if (actual_area + kEps < required_area) rr.feedthrough_mismatch += required_area - actual_area;
+        }
+
+        // V5 (docs/research/2026-07-28-alpha-v5-cost-recalculation-analysis.md, section 1.4):
+        // aggregate FT-converted area across EVERY block (not just soft blocks with a nonzero
+        // mismatch above) -- feeds the official FTPenalty = kBetaFt*max(0, ft_area_sum-OutlineArea)
+        // (route_cost.hpp's roundCostOfficial, eval.cpp's exact-tier scorer). Soft blocks use the
+        // SAME base-area logic as the mismatch loop above; nets==0 makes ftExtend/ftRequiredArea
+        // degenerate to exactly `base`, so an untouched soft block still contributes its own area,
+        // same as any non-soft block. rr.ft_area_sum starts at 0.0 (RoutingResult's own default) and
+        // this function runs exactly once per RoutingResult instance (fresh `result` or a fresh
+        // per-round `round_result`), so there is no double-accrual risk -- same invariant
+        // channel_capacity_total above already relies on.
+        for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
+            const Block& block = problem.blocks[i];
+            if (isSoft(block.type)) {
+                double base = block.ft_base_area > 0.0 ? block.ft_base_area : block.area;
+                double nets_i = rr.soft_feedthrough_nets[i];
+                rr.ft_area_sum += ftRequiredArea(base, ftExtend(nets_i, ftTierRate(block, nets_i)));
+            } else {
+                rr.ft_area_sum += block.area;
+            }
         }
     };
 
