@@ -139,3 +139,16 @@ C solver 端 → D 重新基線化 → E Codex 審查）：
   **有意保守**，= 「FT 積極化」後續 rung；#2（Dijkstra p_ovf 在 R>θ 區仍線性、
   respace.cpp:526 同）已登記為尾項定價精緻化後續（現行全案 R≤0.009 深處線性區，
   且 roundCostOfficial 比較閘已用精確尾項）。
+- **#2 已落地（7/29 尾項定價精緻化）**：新增 `roundOverflowPrice`（route_cost.hpp）三段式
+  round 定價 — `(O+1)/C≤θ` 維持 `kBetaLin*A/C` 原式**逐位元不變**；跨 θ 用單 net 精確
+  secant（入尾 cliff 嚇阻，呼應 §一.3 壓線策略）；`R>θ` 用**平均價 P(R)/O** 而非端點邊際
+  —— full rip-up 每輪從零重建 overflow，凹尾上端點邊際會低收（O·P′(O) ≪ P(O)；p2
+  ChannelVsFt fixture 實測被帶到官方值 3.02M 的全 channel 解、劣於 2.36M 正解且三輪同病，
+  best-round 選擇救不回），平均價是唯一「整輪總收費＝真實罰款」的固定單價。routing.cpp 的
+  p_ovf 改為每輪開始時由**上一輪**全域 overflow 重算（round 0 恆為原式；只依前一輪結果，
+  無 iteration-order 依賴）；respace `capacityGapCandidates` 在 R>θ 逐候選改用**精確分段
+  delta**（θ 下穿 cliff 正確計價），R≤θ 保留 B7 原式逐位元不變。新迴歸
+  `test/run_v5_tail_pricing_regressions.sh`（7 fixtures，含合成 R≈1.8 案例：round≥1 尾價使
+  次要 bundle 改走短路 + overflow，55000→55750、WL 3.84M→3.40M、gate 勝 legacy）；
+  20/20 套件全綠；V5 benchmark 與變更前基線 **.cfg 逐位元相同**、checker/overflow/WL 全欄
+  相同（「線性區結果不變」的最強實證）。

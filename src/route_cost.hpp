@@ -52,6 +52,43 @@ inline double officialOverflowPenalty(double rate, double outline_area) {
            kBetaTail * std::sqrt(rate - kOverflowRateThreshold) * outline_area;
 }
 
+// V5 tail-aware per-overflow-net ROUND price (Codex V5-port review finding #2; analysis doc
+// section 6): the price routing.cpp charges per marginal overflow net during a negotiation round,
+// given the PREVIOUS round's global overflow level O against the fixed raw capacity C. Three
+// regimes:
+//   (O+1)/C <= threshold  ->  the pristine linear derivative kBetaLin*A/C: the SAME operands in
+//       the SAME order routing.cpp historically computed, so linear-regime pricing stays
+//       bit-identical (every current benchmark case sits at R <= 0.00906 << threshold).
+//   O/C <= threshold < (O+1)/C  ->  the exact one-net secant of officialOverflowPenalty: the
+//       theta-entry cliff, finite at threshold+ (where the analytic sqrt derivative diverges) --
+//       deliberately deterrent, matching the analysis doc's section-1.3 strategy note that
+//       staying under theta matters more than previously believed.
+//   O/C > threshold  ->  the exact AVERAGE officialOverflowPenalty(O/C, A) / O, NOT the endpoint
+//       one-net secant. Each negotiation round is a full rip-up that rebuilds its overflow from
+//       ZERO, and the official penalty is CONCAVE past theta -- pricing every net at the endpoint
+//       marginal undercharges a from-zero rebuild (O*P'(O) << P(O)): measured on the p2
+//       ChannelVsFt fixture, endpoint pricing steered every round to the all-channel routing
+//       (official value 3.02M) instead of the channel+FT split (2.36M), and with every round
+//       equally misled, best-round selection could not recover. The average is the unique flat
+//       per-net price whose round total reproduces the true penalty: a round rebuilding the same
+//       O pays exactly P(O), the route carrying the sole overflowing chunk is charged its true
+//       global delta, and concurrent overflowers' shares sum to the exact total. (In the linear
+//       regime average == derivative anyway -- P is linear through the origin -- which is why the
+//       first branch can keep the historical expression verbatim.)
+// Pure and deterministic -- a function of (O, C, A) only; routing.cpp feeds it the previous
+// round's own deterministic result, so re-priced rounds stay iteration-order independent.
+inline double roundOverflowPrice(double overflow_nets, double capacity_total, double outline_area) {
+    if (capacity_total <= 0.0) return 0.0;
+    const double rate_after = (overflow_nets + 1.0) / capacity_total;
+    if (rate_after <= kOverflowRateThreshold) return kBetaLin * outline_area / capacity_total;
+    const double rate_before = overflow_nets / capacity_total;
+    if (rate_before <= kOverflowRateThreshold) {
+        return officialOverflowPenalty(rate_after, outline_area) -
+               officialOverflowPenalty(rate_before, outline_area);
+    }
+    return officialOverflowPenalty(rate_before, outline_area) / overflow_nets;
+}
+
 // Channel overflow AREA for a given direction at `usage` nets (design p2-design.md §8.1 / T0
 // denomination, routing.cpp:221-243): horizontal usage is capacitated by 25*h (missing capacity is
 // a height deficit spanning the channel's WIDTH); vertical usage is capacitated by 25*w (missing
@@ -89,10 +126,12 @@ inline double channelMarginalCost(const Channel& ch, bool horizontal, double usa
 // cfg_score.cpp's officialScoreCfg both use for channel_overflow_nets/capacity_nets. This is the
 // EXACT derivative of the scorer's piecewise-linear `20*A*R` term across the cap kink: 0 while
 // usage+n <= cap (slack, free), n once usage >= cap (fully saturated, every pushed net is
-// marginal overflow), and the exact straddling partial otherwise. Multiplying by P_ovf =
-// kBetaLin*A/C (computed once per routeProblem call, routing.cpp) gives the official per-edge
-// marginal COST in the scorer's own units -- replacing channelMarginalCost's 1e6-area-denominated
-// proxy as the router's channel-hop pricing (design §3.1-3.2).
+// marginal overflow), and the exact straddling partial otherwise. Multiplying by P_ovf
+// (routing.cpp: the linear kBetaLin*A/C for round 0, re-priced at the start of every later
+// negotiation round from the previous round's global overflow via roundOverflowPrice above)
+// gives the official per-edge marginal COST in the scorer's own units -- replacing
+// channelMarginalCost's 1e6-area-denominated proxy as the router's channel-hop pricing
+// (design §3.1-3.2).
 inline double marginalOverflowNets(const Channel& ch, bool horizontal, double usage, double n) {
     double cap = horizontal ? 25.0 * ch.rect.h : 25.0 * ch.rect.w;
     return std::max(0.0, usage + n - cap) - std::max(0.0, usage - cap);
