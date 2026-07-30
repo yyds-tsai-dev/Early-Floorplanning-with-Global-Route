@@ -304,7 +304,13 @@ inline std::pair<double, double> edgeLocDelta(const Rect& r, double outline_w, d
 // zero-case, not the nonzero magnitude, is the property callers actually depend on (eval.cpp only
 // adds a nonzero term when a real violation exists; the golden alpha suite must see 0 on all cases).
 // Pure and deterministic -- no mutation, no I/O.
-inline double edgeLocationViolationDistance(const Rect& r, const Problem& scoped,
+// L2 (edge-free mode, docs/research/2026-07-30-final-levers-design.md §L2.3d): (outline_w, outline_h)
+// base overload -- edgeLocSatisfied/edgeLocDelta above already take (w,h), not a whole Problem, so
+// this is the natural primary signature. The (rect, const Problem&, locs) overload right below just
+// forwards scoped.outline_w/h here (byte-identical result, same body). Lets eval.cpp's cheapScore
+// (hot path, runs every SA iteration) call this directly without copying a Problem, unlike the old
+// exact-tier-only call site this replaces.
+inline double edgeLocationViolationDistance(const Rect& r, double outline_w, double outline_h,
                                             const std::vector<std::string>& locs) {
     if (locs.empty()) return 0.0;
     std::vector<char> sides;
@@ -317,8 +323,8 @@ inline double edgeLocationViolationDistance(const Rect& r, const Problem& scoped
     if (single_side) {
         double best = std::numeric_limits<double>::infinity();
         for (const auto& loc : locs) {
-            if (edgeLocSatisfied(r, scoped.outline_w, scoped.outline_h, loc)) return 0.0;
-            auto [dx, dy] = edgeLocDelta(r, scoped.outline_w, scoped.outline_h, loc);
+            if (edgeLocSatisfied(r, outline_w, outline_h, loc)) return 0.0;
+            auto [dx, dy] = edgeLocDelta(r, outline_w, outline_h, loc);
             best = std::min(best, std::abs(dx) + std::abs(dy));
         }
         return best;
@@ -326,17 +332,25 @@ inline double edgeLocationViolationDistance(const Rect& r, const Problem& scoped
 
     bool all_satisfied = true;
     for (const auto& loc : locs) {
-        if (!edgeLocSatisfied(r, scoped.outline_w, scoped.outline_h, loc)) { all_satisfied = false; break; }
+        if (!edgeLocSatisfied(r, outline_w, outline_h, loc)) { all_satisfied = false; break; }
     }
     if (all_satisfied) return 0.0;
 
     double dx = 0.0, dy = 0.0;
     for (const auto& loc : locs) {
-        auto [ldx, ldy] = edgeLocDelta(r, scoped.outline_w, scoped.outline_h, loc);
+        auto [ldx, ldy] = edgeLocDelta(r, outline_w, outline_h, loc);
         if (std::abs(ldx) > std::abs(dx)) dx = ldx;
         if (std::abs(ldy) > std::abs(dy)) dy = ldy;
     }
     return std::abs(dx) + std::abs(dy);
+}
+
+// (rect, const Problem&, locs) convenience overload, kept for the existing call-site shape --
+// forwards to the (w,h) overload above. Byte-identical result (same body, same values read out of
+// scoped.outline_w/h).
+inline double edgeLocationViolationDistance(const Rect& r, const Problem& scoped,
+                                            const std::vector<std::string>& locs) {
+    return edgeLocationViolationDistance(r, scoped.outline_w, scoped.outline_h, locs);
 }
 
 // Wirelength term in Cost units for a hop of guiding-point distance `dist` carrying `n` nets

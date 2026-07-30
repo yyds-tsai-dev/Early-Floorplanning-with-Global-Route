@@ -149,6 +149,19 @@ int main(int argc, char** argv) {
         // parsing -- parseProblem itself (io.cpp) is never touched.
         problem.undirected_bundles = hasFlag(argc, argv, "--undirected-bundles");
         if (problem.undirected_bundles) problem.bundles = mergeUndirectedBundles(problem.bundles);
+        // L2 (edge-block true un-pinning / "edge-free" mode, docs/research/2026-07-30-final-levers-
+        // design.md sections L2.1-L2.8): hidden/undocumented measurement flag, same precedent as
+        // --edge-soft-anchor/--undirected-bundles above -- intentionally NOT in the usage banner.
+        // Default false (Problem.edge_free's own default, model.hpp), so an absent flag keeps every
+        // isAnchoredEdge(problem, i) call site byte-identical to isEdge(problem.blocks[i].type), i.e.
+        // pre-L2 behavior. Also force-sets edge_soft_anchor=true: edge-free reuses G4's existing
+        // machinery wholesale rather than duplicating it -- the exact-tier gamma penalty (now computed
+        // by cheapScore, see eval.cpp) that prices an off-LOCATION edge block, and validate.cpp's
+        // warning-level downgrade of an edge-LOCATION miss (instead of a hard FAIL), so a freed block
+        // that lands off its declared LOCATION is priced and reported, not silently accepted or hard-
+        // rejected.
+        problem.edge_free = hasFlag(argc, argv, "--edge-free");
+        if (problem.edge_free) problem.edge_soft_anchor = true;
 
         // B4.1 (route-pricing portfolio, b4-report.md): runs the requested engine under both the
         // official (B4) and retained pre-B4 router pricing, folding by value -- restores the

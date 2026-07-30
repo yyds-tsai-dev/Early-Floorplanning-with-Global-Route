@@ -32,3 +32,4 @@ test/v5_tail_pricing_regression_bin
 /tmp
 __pycache__/
 test/undirected_regression_bin
+test/edgefree_regression_bin

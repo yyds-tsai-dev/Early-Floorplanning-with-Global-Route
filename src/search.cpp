@@ -37,7 +37,7 @@ struct ExactEvalEntry {
 Placement compactTowardOrigin(const Problem& problem, Placement placement) {
     std::vector<int> order;
     for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
-        if (!isEdge(problem.blocks[i].type)) order.push_back(static_cast<int>(i));
+        if (!isAnchoredEdge(problem, i)) order.push_back(static_cast<int>(i));
     }
     std::sort(order.begin(), order.end(), [&](int a, int b) {
         double ka = placement.rects[a].x + placement.rects[a].y;

@@ -133,6 +133,21 @@ struct Problem {
     // callers), the same flag-gated-variant precedent as route_pricing_official/abutment_credit/
     // ft_pricing_aggressive/edge_soft_anchor above.
     bool undirected_bundles = false;
+    // L2 (edge-block true un-pinning / "edge-free" mode, docs/research/2026-07-30-final-levers-
+    // design.md sections L2.1-L2.8): solver-internal knob that treats every EDGE block as a free
+    // MACRO -- fixed dimensions, but placed BY the SP/B* topology instead of being anchored to a
+    // LOCATION-satisfying border slot by placeEdge/legalizeEdgeBlocks. Consumed via this header's
+    // isAnchoredEdge(problem, i) predicate below, which every placement_engine.cpp/search.cpp/
+    // respace.cpp site that used to hard-anchor on isEdge(blocks[i].type) now calls instead: OFF
+    // (default) makes isAnchoredEdge degenerate to isEdge(...) exactly, so every one of those sites
+    // reproduces its pre-L2 behavior byte-identically. NEVER parsed from the input CSV (io.cpp does
+    // not touch this field) -- exists purely so main.cpp's hidden --edge-free measurement flag can
+    // opt a run into the un-pinning (which also forces edge_soft_anchor=true, reusing its gamma
+    // penalty -- moved from the exact tier to the cheap tier by this same lever, see eval.cpp's
+    // cheapScore -- and validate.cpp's warning-level LOCATION-mismatch downgrade instead of a hard
+    // FAIL), the same flag-gated-variant precedent as route_pricing_official/abutment_credit/
+    // ft_pricing_aggressive/edge_soft_anchor/undirected_bundles above.
+    bool edge_free = false;
 };
 
 struct Placement {
@@ -208,6 +223,17 @@ struct Score {
 inline bool isSoft(BlockType type) { return type == BlockType::Soft; }
 inline bool isEdge(BlockType type) { return type == BlockType::Edge; }
 inline bool isMacro(BlockType type) { return type == BlockType::Macro; }
+
+// L2 (edge-free mode, docs/research/2026-07-30-final-levers-design.md §L2.3a): true when block `i`
+// is pinned to the outline border and NOT free geometry -- i.e. an EDGE-type block whose position
+// placeEdge/legalizeEdgeBlocks/commitOutlineAt still hard-anchor to a LOCATION-satisfying slot.
+// Flag OFF (problem.edge_free's own default) makes this exactly isEdge(p.blocks[i].type), so every
+// call site that substitutes isEdge(problem.blocks[i].type) -> isAnchoredEdge(problem, i) reproduces
+// its pre-L2 behavior byte-identically. When edge_free is true, every EDGE block reads as NOT
+// anchored -- free to enter the SP/B* topology like a MACRO -- at every one of those sites.
+inline bool isAnchoredEdge(const Problem& p, std::size_t i) {
+    return isEdge(p.blocks[i].type) && !p.edge_free;
+}
 
 inline bool overlaps(const Rect& a, const Rect& b) {
     return a.x + kEps < b.right() && b.x + kEps < a.right() &&

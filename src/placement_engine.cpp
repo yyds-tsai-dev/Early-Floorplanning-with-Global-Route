@@ -315,7 +315,7 @@ Rect firstLegalEdgeSlot(const Problem& problem, const Block& block, const std::v
 void legalizeEdgeBlocks(const Problem& problem, Placement& placement) {
     std::vector<int> edges;
     for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
-        if (isEdge(problem.blocks[i].type)) edges.push_back(static_cast<int>(i));
+        if (isAnchoredEdge(problem, i)) edges.push_back(static_cast<int>(i));
     }
     std::sort(edges.begin(), edges.end(), [&](int a, int b) {
         bool ac = hasMultipleBoundarySides(problem.blocks[a]);
@@ -357,6 +357,14 @@ void legalizeEdgeBlocks(const Problem& problem, Placement& placement) {
 // it just means that specific re-scored variant reverts to the anchored geometry.
 void applyEdgeSoftAnchor(const Problem& problem, const PlacementState& state, Placement& placement) {
     if (!problem.edge_soft_anchor) return;
+    // L2 (edge-free mode, docs/research/2026-07-30-final-levers-design.md sec L2.3e): defensive --
+    // logically redundant with the mutate()-side gate below (`edge_soft_anchor && !edge_free`), since
+    // when that gate never fires, edge_anchor_dx/dy stay all-zero and the per-block loop below is a
+    // no-op anyway (its own `if (dx == 0.0 && dy == 0.0) continue;`). Kept explicit so a freed edge
+    // block's rect -- now placed BY the topology, not anchored by legalizeEdgeBlocks/placeEdge -- can
+    // never be post-hoc translated by a stale/future offset, matching the design's L2.2 decision that
+    // edge-free is all-topology, no anchor-shift move.
+    if (problem.edge_free) return;
     double w = placement.outline_w > 0.0 ? placement.outline_w : problem.outline_w;
     double h = placement.outline_h > 0.0 ? placement.outline_h : problem.outline_h;
     for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
@@ -385,7 +393,7 @@ std::vector<std::string> chosenEdgeLocation(const Problem& problem, const Placem
 std::vector<int> movableBlocks(const Problem& problem) {
     std::vector<int> ids;
     for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
-        if (!isEdge(problem.blocks[i].type)) ids.push_back(static_cast<int>(i));
+        if (!isAnchoredEdge(problem, i)) ids.push_back(static_cast<int>(i));
     }
     return ids;
 }
@@ -416,7 +424,7 @@ Placement basePlacement(const Problem& problem, const PlacementState& state) {
     for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
         double ar = isSoft(problem.blocks[i].type) ? placement.aspect[i] : 1.0;
         placement.rects[i] = dimensionFor(problem.blocks[i], ar);
-        if (isEdge(problem.blocks[i].type)) {
+        if (isAnchoredEdge(problem, i)) {
             placement.rects[i] = placeEdge(problem, problem.blocks[i],
                                            chosenEdgeLocation(problem, state, static_cast<int>(i)));
         }
@@ -609,8 +617,8 @@ bool pickAbutmentPair(const Problem& problem, std::mt19937& rng, int* x, int* p)
     int b_idx = netWeightedBundle(problem, rng);
     if (b_idx < 0) return false;
     const Bundle& b = problem.bundles[b_idx];
-    bool source_edge = isEdge(problem.blocks[b.source].type);
-    bool target_edge = isEdge(problem.blocks[b.target].type);
+    bool source_edge = isAnchoredEdge(problem, b.source);
+    bool target_edge = isAnchoredEdge(problem, b.target);
     if (source_edge && target_edge) return false;
     if (source_edge) {
         *x = b.target;
@@ -698,7 +706,13 @@ public:
         // G4 (edge-LOCATION soft-anchor exploratory lever): a flag-gated `if`, not a probability
         // folded into the move_dist/unit draws below -- a flag-off run's mutate() RNG stream is
         // completely unaffected by this branch's existence (byte-identical mutate()).
-        if (problem.edge_soft_anchor) {
+        // L2 (edge-free mode, docs/research/2026-07-30-final-levers-design.md sec L2.3e): additionally
+        // gated on !edge_free -- under edge-free, an edge block's rect is placed BY this engine's own
+        // topology (movableBlocks/decode), so a post-hoc anchor-shift move would only ever manufacture
+        // an unrepaired overlap, never a legal improvement. edge_free defaults false, so this added
+        // conjunct is a no-op on every pre-L2 path (byte-identical mutate() whenever edge_free is
+        // false, matching the comment above).
+        if (problem.edge_soft_anchor && !problem.edge_free) {
             std::uniform_real_distribution<double> gate(0.0, 1.0);
             if (gate(rng) < kEdgeAnchorMoveProb) {
                 mutateEdgeAnchorShift(problem, state, rng);
@@ -795,7 +809,7 @@ public:
         }
 
         std::vector<bool> placed(problem.blocks.size(), false);
-        for (std::size_t i = 0; i < problem.blocks.size(); ++i) placed[i] = isEdge(problem.blocks[i].type);
+        for (std::size_t i = 0; i < problem.blocks.size(); ++i) placed[i] = isAnchoredEdge(problem, i);
         for (int idx : blocks) {
             placement.rects[idx].x = x[idx];
             placement.rects[idx].y = y[idx];
@@ -935,7 +949,10 @@ public:
         // G4 (edge-LOCATION soft-anchor exploratory lever): a flag-gated `if`, not a probability
         // folded into the move_dist/unit draws below -- a flag-off run's mutate() RNG stream is
         // completely unaffected by this branch's existence (byte-identical mutate()).
-        if (problem.edge_soft_anchor) {
+        // L2 (edge-free mode, docs/research/2026-07-30-final-levers-design.md sec L2.3e): additionally
+        // gated on !edge_free -- see the SequencePairEngine::mutate copy of this comment for the full
+        // rationale (same lever, same reasoning, applies identically to the B*-tree engine).
+        if (problem.edge_soft_anchor && !problem.edge_free) {
             std::uniform_real_distribution<double> gate(0.0, 1.0);
             if (gate(rng) < kEdgeAnchorMoveProb) {
                 mutateEdgeAnchorShift(problem, state, rng);
@@ -1000,7 +1017,7 @@ public:
         }
 
         std::vector<bool> placed(problem.blocks.size(), false);
-        for (std::size_t i = 0; i < problem.blocks.size(); ++i) placed[i] = isEdge(problem.blocks[i].type);
+        for (std::size_t i = 0; i < problem.blocks.size(); ++i) placed[i] = isAnchoredEdge(problem, i);
 
         std::vector<int> stack{state.root};
         std::vector<bool> seen(state.nodes.size(), false);
@@ -1391,7 +1408,7 @@ void lowerBoundNeeds(const Problem& problem, const Placement& placement, double*
     double h_edge = 0.0;
     for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
         const Rect& r = placement.rects[i];
-        if (!isEdge(problem.blocks[i].type)) {
+        if (!isAnchoredEdge(problem, i)) {
             w_core = std::max(w_core, r.right());
             h_core = std::max(h_core, r.top());
             continue;
@@ -1416,7 +1433,7 @@ bool edgeBlocksFeasibleAt(const Problem& problem, const Placement& placement, do
 
     std::vector<int> edges;
     for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
-        if (isEdge(problem.blocks[i].type)) edges.push_back(static_cast<int>(i));
+        if (isAnchoredEdge(problem, i)) edges.push_back(static_cast<int>(i));
     }
     if (edges.empty()) return true;
 
@@ -1432,7 +1449,7 @@ bool edgeBlocksFeasibleAt(const Problem& problem, const Placement& placement, do
 
     std::vector<Rect> rects = placement.rects;
     for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
-        if (isEdge(problem.blocks[i].type)) rects[i] = dimensionFor(problem.blocks[i], 1.0);
+        if (isAnchoredEdge(problem, i)) rects[i] = dimensionFor(problem.blocks[i], 1.0);
     }
     std::vector<bool> placed(problem.blocks.size(), false);
     for (int idx : edges) {
@@ -1469,7 +1486,7 @@ bool placementLegalAt(const Problem& problem, const Placement& placement, double
     scoped.outline_w = w;
     scoped.outline_h = h;
     for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
-        if (!isEdge(problem.blocks[i].type)) continue;
+        if (!isAnchoredEdge(problem, i)) continue;
         if (!edgeRectLegal(scoped, problem.blocks[i], placement.rects[i])) return false;
     }
     return true;
@@ -1500,12 +1517,12 @@ OutlineFit commitOutlineAt(const Problem& problem, Placement& placement, double 
     scoped.outline_h = h;
     Placement trial = placement;
     for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
-        if (isEdge(problem.blocks[i].type)) trial.rects[i] = dimensionFor(problem.blocks[i], 1.0);
+        if (isAnchoredEdge(problem, i)) trial.rects[i] = dimensionFor(problem.blocks[i], 1.0);
     }
     legalizeEdgeBlocks(scoped, trial);
     bool legal = placementLegalAt(scoped, trial, w, h);
     for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
-        if (isEdge(problem.blocks[i].type)) placement.rects[i] = trial.rects[i];
+        if (isAnchoredEdge(problem, i)) placement.rects[i] = trial.rects[i];
     }
     placement.outline_w = w;
     placement.outline_h = h;
@@ -1633,7 +1650,7 @@ OutlineFit shrinkWrapOutline(const Problem& problem, Placement& placement, int m
 
         Placement trial = placement;
         for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
-            if (isEdge(problem.blocks[i].type)) trial.rects[i] = dimensionFor(problem.blocks[i], 1.0);
+            if (isAnchoredEdge(problem, i)) trial.rects[i] = dimensionFor(problem.blocks[i], 1.0);
         }
         legalizeEdgeBlocks(scoped, trial);
         return placementLegalAt(scoped, trial, w, h);

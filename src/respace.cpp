@@ -190,7 +190,7 @@ std::vector<double> relaxAxis(const Problem& problem, const Placement& placement
         const Rect& r = placement.rects[i];
         coord[i] = horizontal ? r.x : r.y;
         size[i] = horizontal ? r.w : r.h;
-        if (!isEdge(problem.blocks[i].type)) core.push_back(static_cast<int>(i));
+        if (!isAnchoredEdge(problem, i)) core.push_back(static_cast<int>(i));
     }
 
     // Frozen topological order: ascending current coordinate, index tie-break (design §2.2/§2.7).
@@ -259,7 +259,7 @@ std::vector<double> relaxAxis(const Problem& problem, const Placement& placement
 double axisSpan(const Problem& problem, const Placement& placement, bool horizontal, const std::vector<double>& coord) {
     double span = 0.0;
     for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
-        if (isEdge(problem.blocks[i].type)) continue;
+        if (isAnchoredEdge(problem, i)) continue;
         double size = horizontal ? placement.rects[i].w : placement.rects[i].h;
         span = std::max(span, coord[i] + size);
     }
@@ -294,7 +294,7 @@ void relaxOneAxis(const Problem& problem, Placement& placement, bool horizontal,
         // guard floating-point slop at the boundary rather than trust it silently. Never shrinks
         // a coordinate below what relaxAxis already folded in (coord[i]), so order/gaps hold.
         for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
-            if (isEdge(problem.blocks[i].type)) continue;
+            if (isAnchoredEdge(problem, i)) continue;
             double size = horizontal ? placement.rects[i].w : placement.rects[i].h;
             double cap = max_extent - size;
             if (result[i] > cap) result[i] = std::max(cap, horizontal ? placement.rects[i].x : placement.rects[i].y);
@@ -302,7 +302,7 @@ void relaxOneAxis(const Problem& problem, Placement& placement, bool horizontal,
     }
 
     for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
-        if (isEdge(problem.blocks[i].type)) continue;
+        if (isAnchoredEdge(problem, i)) continue;
         if (horizontal) {
             placement.rects[i].x = result[i];
         } else {
@@ -562,12 +562,12 @@ std::vector<CapacityGapCandidate> capacityGapCandidates(const Problem& problem, 
     std::map<std::tuple<int, int, bool>, int> gap_counts;
     for (const auto& ch : routing.channels) {
         ChannelBounds bounds = channelBounds(problem, placement, ch.rect);
-        bool left_ok = bounds.left == -1 || !isEdge(problem.blocks[bounds.left].type);
-        bool below_ok = bounds.below == -1 || !isEdge(problem.blocks[bounds.below].type);
-        if (bounds.right >= 0 && !isEdge(problem.blocks[bounds.right].type) && left_ok) {
+        bool left_ok = bounds.left == -1 || !isAnchoredEdge(problem, bounds.left);
+        bool below_ok = bounds.below == -1 || !isAnchoredEdge(problem, bounds.below);
+        if (bounds.right >= 0 && !isAnchoredEdge(problem, bounds.right) && left_ok) {
             gap_counts[std::make_tuple(bounds.left, bounds.right, true)]++;
         }
-        if (bounds.above >= 0 && !isEdge(problem.blocks[bounds.above].type) && below_ok) {
+        if (bounds.above >= 0 && !isAnchoredEdge(problem, bounds.above) && below_ok) {
             gap_counts[std::make_tuple(bounds.below, bounds.above, false)]++;
         }
     }

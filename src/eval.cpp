@@ -162,6 +162,28 @@ Score cheapScore(const Problem& problem, const Placement& placement) {
             penalty += overlapArea(r, placement.rects[j]) * 1e9;
         }
     }
+    // L2 (edge-free mode, docs/research/2026-07-30-final-levers-design.md §L2.3d): edge-LOCATION
+    // gamma penalty, MOVED here from the exact tier (routeAndScoreAt below used to compute this same
+    // term; deleted there -- see that function's own comment) so cheapScore, which runs every SA
+    // iteration unlike the exact tier's periodic routeAndScoreAt, actually carries a gradient toward
+    // freeing an edge block from a costly LOCATION anchor. Equivalent to the deleted exact-tier
+    // block on every routeAndScoreAt call path: that function always calls cheapScore(scoped,
+    // placement) with placement.outline_w/h == (w,h) == scoped.outline_w/h (stamped path: w,h are
+    // read directly from placement.outline_w/h; unset path: shrinkWrapOutline stamps
+    // placement.outline_w/h = fit.w/h before the w,h it returns are used; grow path: anchorAtOutline
+    // stamps placement.outline_w/h = the exact target it was given) -- so the (w,h) resolved above
+    // is bit-identical to what the deleted block computed via scoped.outline_w/h. Gated behind
+    // problem.edge_soft_anchor, same contract as before: a flag-off run's cheapScore stays byte-
+    // identical to pre-L2 (this loop never executes).
+    if (problem.edge_soft_anchor) {
+        double edge_location_penalty = 0.0;
+        for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
+            if (!isEdge(problem.blocks[i].type)) continue;
+            edge_location_penalty +=
+                edgeLocationViolationDistance(placement.rects[i], w, h, problem.blocks[i].locations);
+        }
+        penalty += kGammaEdge * edge_location_penalty;
+    }
     double wire_proxy = 0.0;
     for (const auto& b : problem.bundles) {
         const auto& a = placement.rects[b.source];
@@ -223,23 +245,14 @@ Score routeAndScoreAt(const Problem& problem, const Placement& placement, double
              ? routing.channel_overflow_nets / routing.channel_capacity_total : 0.0;
     score.penalty += officialOverflowPenalty(R, score.outline_area);
     score.penalty += kBetaFt * std::max(0.0, routing.ft_area_sum - score.outline_area);
-    // G4 (edge-LOCATION soft-anchor exploratory lever, docs/research/2026-07-28-alpha-v5-cost-
-    // recalculation-analysis.md): official PENALTY (not a legality FAIL) for an edge block sitting
-    // off its declared LOCATION -- kGammaEdge (route_cost.hpp) per um of edgeLocationViolationDistance
-    // (same header), summed over every edge block. Gated behind problem.edge_soft_anchor so a
-    // flag-off run's exact-tier score is byte-identical to pre-G4 (every edge block is hard-anchored
-    // by legalizeEdgeBlocks/placeEdge regardless of the flag, so this term is 0 even when computed
-    // unconditionally -- gating it anyway keeps the "flag-off touches nothing new" contract explicit
-    // and skips the extra O(edge blocks) walk on the default hot path).
-    if (problem.edge_soft_anchor) {
-        double edge_location_penalty = 0.0;
-        for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
-            if (!isEdge(problem.blocks[i].type)) continue;
-            edge_location_penalty +=
-                edgeLocationViolationDistance(placement.rects[i], scoped, problem.blocks[i].locations);
-        }
-        score.penalty += kGammaEdge * edge_location_penalty;
-    }
+    // L2 (edge-free mode, docs/research/2026-07-30-final-levers-design.md §L2.3d): the exact-tier
+    // edge-LOCATION gamma penalty that used to be computed HERE (G4) is deleted -- it is now charged
+    // by cheapScore itself (see cheapScore's own L2 comment above), and this function's score
+    // already carries it via `score.penalty -= routeAwareProxyPenalty(...)` above, which only strips
+    // the ROUTE-AWARE proxy, not gamma. Recomputing it again here would double-charge every edge
+    // block's LOCATION violation. Proven equivalent to the deleted block (not just non-doubled): see
+    // cheapScore's comment for why the (w,h) it resolves is bit-identical to this function's own
+    // (w,h) on every call path.
     score.value = score.outline_area + problem.alpha * score.wirelength + score.penalty;
     if (routing_out) *routing_out = routing;
     return score;
