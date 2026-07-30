@@ -140,6 +140,15 @@ int main(int argc, char** argv) {
         // Default false (Problem.edge_soft_anchor's own default, model.hpp), so an absent flag keeps
         // every downstream path (search, eval, validate) byte-identical to pre-G4.
         problem.edge_soft_anchor = hasFlag(argc, argv, "--edge-soft-anchor");
+        // L6 (undirected bundle merge, docs/research/2026-07-30-final-levers-design.md): hidden/
+        // undocumented measurement flag, same precedent as --edge-soft-anchor above -- intentionally
+        // NOT in the usage banner. Default false (Problem.undirected_bundles's own default,
+        // model.hpp), so an absent flag keeps parseProblem's directed per-matrix-entry bundles and
+        // every downstream consumer byte-identical to pre-L6. When set, merges each unordered
+        // {source,target} pair into one Bundle (nets summed, direction normalized to min->max) AFTER
+        // parsing -- parseProblem itself (io.cpp) is never touched.
+        problem.undirected_bundles = hasFlag(argc, argv, "--undirected-bundles");
+        if (problem.undirected_bundles) problem.bundles = mergeUndirectedBundles(problem.bundles);
 
         // B4.1 (route-pricing portfolio, b4-report.md): runs the requested engine under both the
         // official (B4) and retained pre-B4 router pricing, folding by value -- restores the

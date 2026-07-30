@@ -119,6 +119,20 @@ struct Problem {
     // any alpha-test case -- edgeLocationViolationDistance is a best-guess reproduction, not a
     // verified one (see its own doc comment, route_cost.hpp).
     bool edge_soft_anchor = false;
+    // L6 (undirected bundle merge, docs/research/2026-07-30-final-levers-design.md): solver-internal
+    // knob that merges every unordered {source,target} CONN-matrix pair into a single Bundle (nets
+    // summed, direction normalized to min(source,target)->max(source,target)) via io.hpp's
+    // mergeUndirectedBundles -- reflecting the official checker's own undirected CONN_MISMATCH rule
+    // (PATH(A->B)+PATH(B->A) compared against m[A][B]+m[B][A], "direction distribution unconstrained",
+    // reference.html:459-460/641-643) instead of routing each matrix entry as its own directed bundle.
+    // false (default) reproduces every pre-L6 code path byte-identically: parseProblem's per-entry
+    // directed bundles pass straight through unmerged. NEVER parsed from the input CSV (io.cpp's
+    // parseProblem itself is untouched by L6) -- exists purely so main.cpp's hidden
+    // --undirected-bundles measurement flag can opt a run into the merge, applied as a POST-PARSE
+    // transform (not a parseProblem signature change, to avoid touching parseProblem's other direct
+    // callers), the same flag-gated-variant precedent as route_pricing_official/abutment_credit/
+    // ft_pricing_aggressive/edge_soft_anchor above.
+    bool undirected_bundles = false;
 };
 
 struct Placement {

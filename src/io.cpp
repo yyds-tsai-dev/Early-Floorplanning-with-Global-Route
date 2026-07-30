@@ -1,10 +1,13 @@
 #include "io.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <fstream>
 #include <iomanip>
+#include <map>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 
 #include "eval.hpp"
 
@@ -194,6 +197,25 @@ Problem parseProblem(const std::string& path) {
     if (p.blocks.empty()) throw std::runtime_error("no blocks parsed from " + path);
     if (p.outline_w <= 0.0 || p.outline_h <= 0.0) throw std::runtime_error("outline MAX missing or invalid");
     return p;
+}
+
+// L6 (undirected bundle merge, docs/research/2026-07-30-final-levers-design.md §L6.1): unordered-pair
+// key (min,max), nets summed over both directed entries, output sorted by (source,target) ascending
+// via the std::map's own iteration order. Idempotent: every emitted Bundle already has source<target
+// and a unique key, so re-merging an already-merged vector reproduces it unchanged.
+std::vector<Bundle> mergeUndirectedBundles(const std::vector<Bundle>& bundles) {
+    std::map<std::pair<int, int>, int> merged;
+    for (const auto& b : bundles) {
+        int lo = std::min(b.source, b.target);
+        int hi = std::max(b.source, b.target);
+        merged[{lo, hi}] += b.nets;
+    }
+    std::vector<Bundle> out;
+    out.reserve(merged.size());
+    for (const auto& [key, nets] : merged) {
+        out.push_back(Bundle{key.first, key.second, nets});
+    }
+    return out;
 }
 
 void writeCfg(const std::string& path, const Problem& problem, const Placement& placement,

@@ -677,6 +677,14 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
         return std::pair<int, double>(rr.open_routes, area_cost);
     };
 
+    // L6.4b (undirected bundle merge, docs/research/2026-07-30-final-levers-design.md): when
+    // undirected_bundles has merged reciprocal (A->B)+(B->A) matrix entries into one Bundle, the
+    // per-BUNDLE kMaxChunks cap now covers what used to be TWO bundles' chunk budgets (32) for that
+    // pair -- restoring the pre-merge per-PAIR budget here avoids prematurely hitting `last_slot`
+    // below, which dumps all remaining nets into a single path and can spike channel overflow (design
+    // doc's R1). Byte-identical (max_chunks == kMaxChunks) when the flag is off.
+    const int max_chunks = problem.undirected_bundles ? 2 * kMaxChunks : kMaxChunks;
+
     for (int round = 0; round < kNegotiationRounds; ++round) {
         // Decay at the START of each round (round >= 1), design §4.2: standard PathFinder hygiene so
         // a resource that is no longer congested relaxes back instead of staying permanently
@@ -724,7 +732,7 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
             double min_chunk = kMinChunkFor(bundle.nets);
             int remaining = bundle.nets;
             int chunks_emitted = 0;
-            while (remaining > 0 && chunks_emitted < kMaxChunks) {
+            while (remaining > 0 && chunks_emitted < max_chunks) {
                 Route probe = findRoutePath(round_result, bundle, remaining);
                 if (probe.node_path.empty()) {
                     probe.source = bundle.source;
@@ -733,7 +741,7 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
                     round_result.routes.push_back(probe);
                     break;
                 }
-                bool last_slot = (chunks_emitted == kMaxChunks - 1);
+                bool last_slot = (chunks_emitted == max_chunks - 1);
                 int n;
                 if (last_slot) {
                     n = remaining;
