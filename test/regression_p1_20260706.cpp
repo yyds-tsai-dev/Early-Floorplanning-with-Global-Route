@@ -225,6 +225,9 @@ void checkShrinkWrapOutlineInvariants(const std::string& path, unsigned seed) {
     }
 
     Problem scoped = scopedAtDeclaredOutline(problem, after.outline_w, after.outline_h);
+    // Placement-only invariant check: no routing is supplied, so exempt this call from
+    // validate.cpp's CONN coverage guard (which requires every bundle to be routed).
+    scoped.bundles.clear();
     RoutingResult empty_routing;
     ValidationResult vr = validateSolution(scoped, after, empty_routing);
     if (!vr.ok) {

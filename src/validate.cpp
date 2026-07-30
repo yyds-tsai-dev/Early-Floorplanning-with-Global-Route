@@ -1,5 +1,8 @@
 #include "validate.hpp"
 
+#include <map>
+#include <utility>
+
 namespace efgr {
 namespace {
 
@@ -129,6 +132,40 @@ ValidationResult validateSolution(const Problem& problem, const Placement& place
             if (step.edge < 1 || step.edge > 4) fail("bad edge id: " + step.object);
         }
     }
+
+    // L6.3 (undirected bundle merge, docs/research/2026-07-30-final-levers-design.md): CONN coverage
+    // check, flag-INDEPENDENT -- both sides aggregate by unordered pair, so the same check covers
+    // problem.bundles in either its parsed directed-per-matrix-entry form or its merged
+    // undirected_bundles form identically (n1+n2 vs (n1+n2), the same total). The official checker's
+    // CONN_MISMATCH rule compares PATH(A->B)+PATH(B->A) against m[A][B]+m[B][A] (reference.html:
+    // 459-460, 641-643); writeCfg (io.cpp) emits every route's nets under a single direction with no
+    // metadata to recover which, so this is the finest granularity we can check -- and it is exactly
+    // what the official checker itself compares.
+    auto pairKey = [](int a, int b) { return a < b ? std::make_pair(a, b) : std::make_pair(b, a); };
+    auto blockName = [&](int idx) -> std::string {
+        return (idx >= 0 && idx < static_cast<int>(problem.blocks.size())) ? problem.blocks[idx].name
+                                                                            : ("#" + std::to_string(idx));
+    };
+    std::map<std::pair<int, int>, long long> conn_want, conn_got;
+    for (const auto& b : problem.bundles) conn_want[pairKey(b.source, b.target)] += b.nets;
+    for (const auto& route : routing.routes) {
+        if (!route.open) conn_got[pairKey(route.source, route.target)] += route.nets;
+    }
+    for (const auto& [key, want_nets] : conn_want) {
+        auto it = conn_got.find(key);
+        long long got_nets = (it != conn_got.end()) ? it->second : 0;
+        if (want_nets != got_nets) {
+            fail("conn mismatch: " + blockName(key.first) + " " + blockName(key.second) +
+                 " want=" + std::to_string(want_nets) + " got=" + std::to_string(got_nets));
+        }
+    }
+    for (const auto& [key, got_nets] : conn_got) {
+        if (conn_want.find(key) == conn_want.end()) {
+            fail("conn mismatch: " + blockName(key.first) + " " + blockName(key.second) +
+                 " want=0 got=" + std::to_string(got_nets));
+        }
+    }
+
     return vr;
 }
 
