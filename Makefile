@@ -5,9 +5,15 @@ OBJ := $(SRC:.cpp=.o)
 BIN := bin/efgr
 OFFICIAL_BIN := bin/EarlyFloorplanning_with_GlobalRoute
 
-.PHONY: all clean
+.PHONY: all clean static
 
 all: $(BIN)
+
+# Contest submission build: fully static so the binary runs on the official
+# eval machine (glibc 2.28-era; dynamic builds from this toolchain loader-fail).
+static:
+	mkdir -p bin
+	$(CXX) $(CXXFLAGS) -static -static-libgcc -static-libstdc++ -o $(OFFICIAL_BIN) $(SRC)
 
 $(BIN): $(OBJ)
 	mkdir -p bin

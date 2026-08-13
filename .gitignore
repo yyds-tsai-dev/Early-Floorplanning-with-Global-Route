@@ -33,3 +33,6 @@ test/v5_tail_pricing_regression_bin
 __pycache__/
 test/undirected_regression_bin
 test/edgefree_regression_bin
+
+# Contest submission binaries (repackaged from tagged source, never committed)
+submission/**/EarlyFloorplanning_with_GlobalRoute
