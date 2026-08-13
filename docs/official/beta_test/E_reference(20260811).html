@@ -1,0 +1,855 @@
+<!DOCTYPE html>
+<html lang="zh-TW"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ICCAD 2026 — Reference: Cost Function / Error Codes / Spec Diff</title>
+<style>
+ *{margin:0;padding:0;box-sizing:border-box}
+ body{font-family:'Segoe UI',Tahoma,sans-serif;background:#f4f4f9;padding:26px;color:#222}
+ .wrap{max-width:1140px;margin:0 auto}
+ h1{font-size:1.8em;margin-bottom:4px}
+ h2{font-size:1.3em;color:#4c1d95;margin:28px 0 12px;border-bottom:2px solid #4c1d95;padding-bottom:4px}
+ h3{font-size:1.1em;color:#5b21b6;margin:16px 0 8px}
+ table{width:100%;border-collapse:collapse;background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 4px 14px rgba(0,0,0,.06);margin:10px 0 20px}
+ th,td{padding:9px 12px;border-bottom:1px solid #eee;font-size:.88em;text-align:left}
+ th{background:#4c1d95;color:#fff}
+ td.num{text-align:right;font-variant-numeric:tabular-nums}
+ a{color:#667eea;text-decoration:none} a:hover{text-decoration:underline}
+ .back{display:inline-block;margin-bottom:14px}
+ .toc{background:#fff;padding:18px 24px;border-radius:10px;margin:16px 0 28px;box-shadow:0 2px 8px rgba(0,0,0,.04)}
+ .toc a{display:block;padding:4px 0;color:#4c1d95}
+</style></head><body><div class="wrap">
+<a class="back" href="summary.html">← 回 summary</a>
+<h1>ICCAD 2026 — 參考規格（Beta）</h1>
+<p style="color:#555;margin:8px 0">Cost Function / Error Codes / Spec Diff / Beta 特定注意事項</p>
+<div class="toc">
+ <b>目錄</b>
+ <a href="#beta-notes">📌 Beta 測資與提交注意事項</a>
+ <a href="#cost">📐 Cost Function (V5) — Beta</a>
+ <a href="#errors">🚨 Error / Warning 代碼</a>
+ <a href="#spec">📜 與 Spec 的放寬差異</a>
+ <a href="#qa-diff">🔍 Q&A 爭議項與 Checker 差異</a>
+ <a href="#coord-precision">📏 座標精度與進位規則（A34/A39）</a>
+</div>
+
+<a id="beta-notes"></a>
+
+<h2>📌 Beta 測資與提交注意事項</h2>
+
+<p style="color:#4c1d95;font-weight:700;margin-bottom:12px">
+  本段為 Beta 評測專屬補充（alpha reference 無此段）。
+  Beta 共評測 <b>41</b> 隊 × 8 case = 328 項，通過 <b>131</b> 項。
+</p>
+
+<div style="background:#eff6ff;padding:16px 20px;border-radius:8px;margin:12px 0;border-left:4px solid #2563eb">
+  <b style="color:#2563eb;font-size:1.05em">📊 Beta 失敗原因分布</b><br>
+  <code style="background:#fff;padding:4px 8px;border-radius:4px;font-size:.9em">NO_EXECUTABLE 120 · CHECKER_FAIL 42 · NO_OUTPUT_CFG 30 · TIMEOUT 5</code><br>
+  <span style="color:#666;font-size:.88em">
+  NO_EXECUTABLE 占大宗（隊伍交的是 desktop.ini 或空目錄）；CHECKER_FAIL 次之（產 cfg 但 solver 品質不佳）；
+  NO_OUTPUT_CFG 多為環境不相容（GLIBCGLIBCXX 太新／缺 .so）或引數 / 命名問題。
+  </span>
+</div>
+
+<h3>case3 對角線歸零（BLK13 123→0）</h3>
+<div style="background:#fef3c7;padding:14px 18px;border-radius:8px;margin:12px 0;font-size:.95em;line-height:1.7">
+  官方 case3 連接矩陣原有一個非零對角：<b>BLK13 自連 123 nets</b>（對角格 BLK13=123）。
+  評審方於 Beta 評測前將其<b>歸零</b>，理由：
+  <ul style="margin:6px 0 6px 20px">
+    <li>多支參賽 binary 的 parser 內含硬性檢查「<code>connection matrix diagonal must be 0</code>」，遇到非零對角會<b>直接拒讀</b>整份測資（case3 0 cfg）。</li>
+    <li>歸零後，若干原本因對角非零而被 parser 拒讀的隊伍，case3 從「0 cfg」變「產 cfg 且 checker <b>PASS</b>」，由 7/8 升為 <b>8/8</b>。</li>
+  </ul>
+  checker 對「self→self PATH 合法」的<b>放寬</b>邏輯仍保留（容忍未來非零對角測資），但<b>現行測資已無非零對角</b>，spec §4/§8 已同步修正。
+  <br><br>
+  <b>對參賽者的啟示</b>：solver 輸出含 <code>BLK13→BLK13</code> 自連 path 不會被當錯誤（self path 合法）；但若你的 parser 內建「對角必為 0」檢查，遇到非零對角測資會被排除——本次已歸零所以不影響。
+</div>
+
+<h3>case6 / case7 格式變體（FT 欄位、行尾）</h3>
+<div style="background:#fef3c7;padding:14px 18px;border-radius:8px;margin:12px 0;font-size:.95em;line-height:1.7">
+  case6/7 為後加的測資（alpha 只有 case0-4），格式對 checker / 內建 solver / 多數隊合法，但<b>部分參賽 binary 的 parser 嚴格要求</b>而失敗：
+  <ul style="margin:6px 0 6px 20px">
+    <li><b>FT 欄位 % 格式</b>：case6 BLK02 的 FT 第一檔為裸 <code>0</code>、case7 BLK06-12 第一檔（≤3000 bucket）為空。spec 表範例是 4 個 % 值，這兩 case 故意邊界。checker / 內建 solver PASS，但部分隊 binary parser 要求完整 4 個 % → 拒絕。</li>
+    <li><b>靜默 rc=1</b>：少數隊對 case6/7 binary 連啟動讀入即 <code>exit(1)</code>、4 種呼叫方式全無輸出、零 stderr（cause=WROTE_NO_CFG，根因在<b> block 定義段</b> parser bug）。</li>
+  </ul>
+  <b>對參賽者</b>：parser 應容許 FT 欄位變體（空、<code>0</code>、少於 4 個 %）；case6 已驗證 CRLF ≠ 根因（將 case6 轉 CRLF 後該隊仍 rc=1）。
+  行尾問題非關——所有 case 已統一為 record CRLF + 引號內軟換行（官方 case0-4 同模式）。
+</div>
+
+<h3>case5：全 SOFT 30-block 大測資</h3>
+<div style="background:#fef3c7;padding:14px 18px;border-radius:8px;margin:12px 0;font-size:.95em;line-height:1.7">
+  case5 為全 SOFT block、30 個 block 的大規模測資，是 Beta <b>TIMEOUT 最常見</b>的 case。
+  多支隊 case5 超時（900s 時限）——數支隊伍各 1 個 case5 TIMEOUT。
+  <b>對參賽者</b>：對全 SOFT 大測資優先「保證產出合法解」而非追求最佳解——超時得 0 分，部分合法解仍有分。
+  調適收斂門檻讓即使未完全收斂也能輸出目前最佳 cfg。
+</div>
+
+<h3>Beta 提交結構與官方呼叫方式</h3>
+<div style="background:#f0f9ff;padding:14px 18px;border-radius:8px;margin:12px 0;font-size:.95em;line-height:1.7">
+  <b>Beta 提交目錄為「扁平」結構</b>：<code><team>/EarlyFloorplanning_with_GlobalRoute</code>
+  （與 alpha 的 <code><team>/alpha_test_submission/...</code> 不同，無中間子目錄）。<br><br>
+  <b>官方呼叫方式（A27）</b>：
+  <code style="background:#fff;padding:4px 8px;border-radius:4px">
+  ./EarlyFloorplanning_with_GlobalRoute "2026 ICCAD_case.case0.csv"</code><br>
+  輸出須為 <code>2026 ICCAD_case.case0.cfg</code>（<b>.csv 換成 .cfg</b>，非附加），且寫在 exe 所在目錄。<br><br>
+  <b>注意</b>：各隊 argument parser 差異大——有的只接單一位置參數（自動命名輸出）、有的接 <code><in> <out></code>、有的需 <code>--output <cfg></code>。
+  評測系統以 5 種 strategy 嘗試，但若你的 binary 對主流呼叫方式 reject 會被標 ARG_HANDLING。
+</div>
+
+<h3>未完成懲罰倍率 M = 1.8</h3>
+<div style="background:#f0fdf4;padding:14px 18px;border-radius:8px;margin:12px 0;font-size:.95em;line-height:1.7">
+  Beta 評測的 <b>incompletion penalty 倍率 M = 1.8</b>（透過 <code>--incompletion-multiplier 1.8</code>）。
+  每個未 PASS 的 case：incompletion_penalty += worst_cost_of_case × M。<br>
+  <b>設計補充</b>：全 fail 的隊伍其 <code>fail_runtime_penalty</code> 一律用<b>全體 PASS 統計</b>（worst_runtimes_per_case × √median_outline_area_per_case），
+  而非該隊自己的 runtime。因此<b>所有 0/8 隊伍的最終總成本相同</b>（皆為 ~1292M）——這是<b>設計結果、非 bug</b>，
+  用意在於：無法產出任何合法解的隊伍其 solver 品質無從比較，給予一致的「最低區」成本。
+</div>
+
+
+<a id="cost"></a>
+
+<h2>📐 Cost Function (V5) — Beta 評測</h2>
+<p style="color:#4c1d95;font-weight:700;margin-bottom:12px">
+  Beta 評測沿用 Alpha 的 V5 公式與預設參數，<b>未完成懲罰倍率 M = 1.8</b>（透過 --incompletion-multiplier 1.8）。
+</p>
+
+<h3>Per-Case Cost Formula</h3>
+<div style="background:#f8f9fa;padding:16px 20px;border-radius:8px;margin:12px 0;font-size:1.05em;line-height:1.8">
+  <b>Cost</b> = OutlineArea + α × TotalWireLength<br>
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;+ OverflowPenalty + FTPenalty<br>
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;+ λ<sub>ft</sub> × IllegalFTDeltaArea<br>
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;+ γ × EdgeLocationPenalty<br>
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;+ δ × runtime_sec × √OutlineArea
+</div>
+
+<h3>OverflowPenalty（分段 piecewise）</h3>
+<div style="background:#f8f9fa;padding:14px 18px;border-radius:8px;margin:12px 0;font-size:.95em;line-height:1.7">
+  overflow_rate = ChannelOverflowTotal / TotalChannelCapacity<br><br>
+  <b>if</b> overflow_rate ≤ threshold:<br>
+  &nbsp;&nbsp;OverflowPenalty = β<sub>lin</sub> × overflow_rate × OutlineArea<br><br>
+  <b>else</b>:<br>
+  &nbsp;&nbsp;OverflowPenalty = β<sub>lin</sub> × threshold × OutlineArea<br>
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;+ β<sub>tail</sub> × √(overflow_rate − threshold) × OutlineArea
+</div>
+
+<h3>FTPenalty</h3>
+<div style="background:#f8f9fa;padding:14px 18px;border-radius:8px;margin:12px 0;font-size:.95em">
+  FTPenalty = β<sub>ft</sub> × FTAreaExcess<br>
+  where FTAreaExcess = max(0, Σft_area_by_block − OutlineArea)
+</div>
+
+<h3>IllegalFTPenalty（依 A1：扣分項，非 hard-fail）</h3>
+<div style="background:#f8f9fa;padding:14px 18px;border-radius:8px;margin:12px 0;font-size:.95em;line-height:1.7">
+  IllegalFTPenalty = λ<sub>ft</sub> × IllegalFTDeltaArea<br>
+  where IllegalFTDeltaArea = Σ(所有非法 FT block 的 delta_area)<br><br>
+  <span style="color:#666">
+  MACRO/EDGE block 作為 feedthrough（出現在 PATH 中間）依 A1 為扣分項，<b>不判定 FAIL</b>。<br>
+  懲罰量 = 每個非法 FT block 的 FT 面積膨脹量之和 × λ<sub>ft</sub>。<br>
+  非法 FT 比「合法 FT 面積超額」嚴重——λ<sub>ft</sub> = 10 約為 β<sub>ft</sub> 的 3 倍。
+  </span>
+</div>
+
+<h3>EdgeLocationPenalty</h3>
+<div style="background:#f8f9fa;padding:14px 18px;border-radius:8px;margin:12px 0;font-size:.95em">
+  EdgeLocationPenalty = Σ(所有違規 EDGE block 的偏移距離(um))<br>
+  <span style="color:#666">1 um offset = γ × 1 um² penalty</span>
+</div>
+
+<h3>RuntimePenalty</h3>
+<div style="background:#f8f9fa;padding:14px 18px;border-radius:8px;margin:12px 0;font-size:.95em">
+  RuntimePenalty = δ × runtime_sec × √OutlineArea<br>
+  <span style="color:#666">用 √OutlineArea 正規化：同一 runtime 對大 case 影響較小。</span>
+</div>
+
+<h3>未完成懲罰 (Incompletion Penalty)</h3>
+<div style="background:#f8f9fa;padding:14px 18px;border-radius:8px;margin:12px 0;font-size:.95em">
+  每個未 PASS 的 case：<br>
+  &nbsp;&nbsp;incompletion_penalty += worst_cost_of_case × M<br><br>
+  FAIL case 的 runtime penalty：<br>
+  &nbsp;&nbsp;fail_runtime_penalty += δ × max_runtime_of_case × √median_outline_area_of_case<br><br>
+  <b>total_cost = base_cost + incompletion_penalty + runtime_penalty (含 fail_runtime_penalty)</b>
+</div>
+
+<h3>WireLength 計算（Guiding Point 定義）</h3>
+<div style="background:#f8f9fa;padding:14px 18px;border-radius:8px;margin:12px 0;font-size:.95em;line-height:1.7">
+  依 A41（Figure 6）：兩個 channel 之間有一段重疊的連接邊界時，路徑必須通過該重疊邊界的<b>中點</b>。<br><br>
+  Guiding Point = <b>重疊邊界線段的中點</b>（midpoint of overlapping segment），<br>
+  而非兩矩形整個 edge 的中心平均值。<br><br>
+  轉折點（同 rect 不同 edge）= rect 對應角落的交點。
+</div>
+
+<h3>Channel Demand 計算</h3>
+<div style="background:#f8f9fa;padding:14px 18px;border-radius:8px;margin:12px 0;font-size:.95em;line-height:1.7">
+  依 A5：每條 net 穿過一個 channel 計<b>1</b>次 demand（而非 entry+exit 各計一次）。<br><br>
+  直穿（opposite edge，如 edge1→edge3）：計 1 次水平 demand。<br>
+  轉向（corner turn，如 edge1→edge2）：計 1 次水平 + 1 次垂直 demand。<br><br>
+  容量：水平 = 25 × channel.height，垂直 = 25 × channel.width。
+</div>
+
+<h3>預設參數</h3>
+<table>
+ <thead><tr>
+  <th>Case</th><th>α</th><th>β<sub>lin</sub></th><th>β<sub>tail</sub></th>
+  <th>β<sub>ft</sub></th><th>λ<sub>ft</sub></th><th>threshold</th><th>γ</th><th>δ</th><th>M</th>
+ </tr></thead>
+ <tbody>
+  <tr><td>case0</td><td>0.3</td><td>20</td><td>1.5</td><td>3</td><td>10</td><td>0.05</td><td>1</td><td>0.5</td><td>1.8</td></tr>
+  <tr><td>case1</td><td>0.15</td><td>20</td><td>1.5</td><td>3</td><td>10</td><td>0.05</td><td>1</td><td>0.5</td><td>1.8</td></tr>
+  <tr><td>case2</td><td>0.1</td><td>20</td><td>1.5</td><td>3</td><td>10</td><td>0.05</td><td>1</td><td>0.5</td><td>1.8</td></tr>
+  <tr><td>case3</td><td>0.1</td><td>20</td><td>1.5</td><td>3</td><td>10</td><td>0.05</td><td>1</td><td>0.5</td><td>1.8</td></tr>
+  <tr><td>case4</td><td>0.1</td><td>20</td><td>1.5</td><td>3</td><td>10</td><td>0.05</td><td>1</td><td>0.5</td><td>1.8</td></tr>
+  <tr><td>case5</td><td>0.05</td><td>20</td><td>1.5</td><td>3</td><td>10</td><td>0.05</td><td>1</td><td>0.5</td><td>1.8</td></tr>
+  <tr><td>case6</td><td>0.2</td><td>20</td><td>1.5</td><td>3</td><td>10</td><td>0.05</td><td>1</td><td>0.5</td><td>1.8</td></tr>
+  <tr><td>case7</td><td>0.15</td><td>20</td><td>1.5</td><td>3</td><td>10</td><td>0.05</td><td>1</td><td>0.5</td><td>1.8</td></tr>
+ </tbody>
+</table>
+
+<h3>Fail Case Runtime 參考值（Beta 實測：131 PASS / 328）</h3>
+<table>
+ <thead><tr><th>Case</th><th>max_runtime (PASS)</th><th>median_OA (PASS)</th><th>FAIL rt penalty</th><th>worst_cost (PASS)</th></tr></thead>
+ <tbody>
+  <tr><td>case0</td><td>640.1s</td><td>4,092,660</td><td>647,441</td><td>8,652,600</td></tr>
+<tr><td>case1</td><td>640.6s</td><td>6,203,632</td><td>797,788</td><td>24,280,885</td></tr>
+<tr><td>case2</td><td>640.9s</td><td>27,650,240</td><td>1,685,020</td><td>64,029,449</td></tr>
+<tr><td>case3</td><td>641.2s</td><td>16,835,017</td><td>1,315,356</td><td>50,581,249</td></tr>
+<tr><td>case4</td><td>644.0s</td><td>25,240,630</td><td>1,617,745</td><td>70,864,384</td></tr>
+<tr><td>case5</td><td>810.1s</td><td>27,421,020</td><td>2,121,050</td><td>449,862,892</td></tr>
+<tr><td>case6</td><td>640.2s</td><td>3,792,850</td><td>623,375</td><td>23,906,198</td></tr>
+<tr><td>case7</td><td>659.9s</td><td>4,825,178</td><td>724,830</td><td>20,428,505</td></tr>
+
+ </tbody>
+</table>
+<p style="color:#666;font-size:.85em">
+  以上數值取自 Beta 評測（beta_merged_20260810）的逐隊 PASS 統計。<br>
+  max_runtime = 該 case 所有 PASS 隊伍的最大 runtime；median_OA = 該 case PASS 隊伍的 outline_area 中位數。<br>
+  FAIL rt penalty = δ(0.5) × max_runtime × √median_OA —— <b>注意</b>：全 fail 的隊伍此值一律相同（用全體 PASS 統計，非該隊自己的 runtime）。<br>
+  α 評測時採用<strong>評審方預設值</strong>（上表所列），可透過 --alpha-override 覆蓋。CSV 檔中 α=0.2 僅供參考。<br>
+  排序優先級：OutlineArea ≫ WireLength ≫ Overflow ∼ FT ≫ EdgeLocation ∼ Runtime
+</p>
+
+
+<a id="errors"></a>
+
+<h2>🚨 Error / Warning 代碼</h2>
+
+<h3>ERRORCodes（導致 FAIL）</h3>
+<table>
+ <thead><tr><th>代碼</th><th>意義</th><th>檢查方式</th></tr></thead>
+ <tbody>
+  <tr>
+    <td style="font-weight:700;color:#dc2626">CSV_FORMAT_ERROR</td>
+    <td>輸入 case.csv 格式無法解析</td>
+    <td>cfg_parser 讀取 CSV 時的結構性錯誤</td>
+  </tr>
+  <tr>
+    <td style="font-weight:700;color:#dc2626">CFG_FORMAT_ERROR</td>
+    <td>輸出 sol.cfg 格式無法解析</td>
+    <td>cfg_parser 讀取 CFG 時的結構性錯誤</td>
+  </tr>
+  <tr>
+    <td style="font-weight:700;color:#dc2626">OUTLINE_EXCEED</td>
+    <td>Solver 宣告的 outline (W,H) 超過測資 MAX outline</td>
+    <td>CFG 宣告的 OutlineSize > CSV 的 MaxWidth/MaxHeight</td>
+  </tr>
+  <tr>
+    <td style="font-weight:700;color:#dc2626">OUTLINE_VIOLATION</td>
+    <td>Block 超出 solver outline 範圍</td>
+    <td>x+w > W 或 y+h > H 或 x/y < 0（超出量 > EPS=3um）</td>
+  </tr>
+  <tr>
+    <td style="font-weight:700;color:#dc2626">BLOCK_OVERLAP</td>
+    <td>兩個 block 有正面積重疊</td>
+    <td>x 和 y 方向皆 overlap > EPS=3um</td>
+  </tr>
+  <tr>
+    <td style="font-weight:700;color:#dc2626">ROUTING_OPEN</td>
+    <td>PATH 中相鄰兩 rect 未真正相鄰（斷路）</td>
+    <td>edge 非 opposite / 無共享邊 / 共享長度為零</td>
+  </tr>
+  <tr>
+    <td style="font-weight:700;color:#dc2626">ILLEGAL_INTERNAL_TURN</td>
+    <td>MACRO/EDGE block 在 PATH 中間發生內部轉折或直穿</td>
+    <td>同 rect 進出 edge1≠edge2，或同 edge 進出</td>
+  </tr>
+
+  <tr>
+    <td style="font-weight:700;color:#dc2626">CONN_MISMATCH</td>
+    <td>PATH 連線數與測資矩陣不符</td>
+    <td>無方向比對：A→B + B→A 合計應 = matrix[A][B] + matrix[B][A]；對角線必須為 0</td>
+  </tr>
+ </tbody>
+</table>
+
+<h3>WARNINGCodes（不導致 FAIL，改以 penalty 計入 cost）</h3>
+<table>
+ <thead><tr><th>代碼</th><th>意義</th><th>計入方式</th></tr></thead>
+ <tbody>
+  <tr>
+    <td style="font-weight:700;color:#d97706">EDGE_LOCATION_VIOLATION</td>
+    <td>EDGE block 未貼齊指定 LOCATION 區域</td>
+    <td>偏移距離(um) × γ 計入 cost（1um = 1um² penalty）</td>
+  </tr>
+  <tr>
+    <td style="font-weight:700;color:#d97706">ILLEGAL_FT</td>
+    <td>MACRO/EDGE block 被用作 feedthrough（出現在 PATH 中間）</td>
+    <td>依 A1 改為 <b>WARNING + penalty</b><br>非法 FT delta area × λ_ft 計入 cost<br>不判定 FAIL，繼續後續檢查</td>
+  </tr>
+  <tr>
+    <td style="font-weight:700;color:#666">CHANNEL_OVERFLOW</td>
+    <td>Channel 走線需求超過容量（1um=25nets）</td>
+    <td>overflow 量透過 piecewise 懲罰公式計入 cost</td>
+  </tr>
+ </tbody>
+</table>
+
+<h3>執行失敗根因</h3>
+<table>
+ <thead><tr><th>代碼</th><th>意義</th><th>常見修復方法</th></tr></thead>
+ <tbody>
+  <tr><td>GLIBC_TOO_NEW</td><td>Binary 需要 glibc 版本比系統新</td><td>重新編譯或靜態連結</td></tr>
+  <tr><td>GLIBCXX_TOO_NEW</td><td>Binary 需要 libstdc++ 版本比系統新</td><td>用較舊 GCC 或靜態連結</td></tr>
+  <tr><td>MISSING_PY_MODULE</td><td>缺 Python 套件</td><td>靜態編譯/打包依賴/改用標準庫</td></tr>
+  <tr><td>MISSING_SHARED_LIB</td><td>缺 .so 共享庫</td><td>確認可用 library 或 -static</td></tr>
+  <tr><td>SOLVER_PARSE_ERROR</td><td>Solver 自身 parser 無法讀測資</td><td>CSV 可能含 BOM/多行表頭/引號欄位</td></tr>
+  <tr><td>SEGFAULT</td><td>記憶體錯誤</td><td>用 -fsanitize=address 重新編譯除錯</td></tr>
+  <tr><td>ARG_HANDLING</td><td>Binary 不接受官方呼叫方式</td><td>輸出需為同檔名.cfg（參見 A27）</td></tr>
+  <tr><td>WROTE_NO_CFG</td><td>程式跑完但無 .cfg 產出</td><td>確認輸出檔名格式</td></tr>
+  <tr><td>TIMEOUT</td><td>程式在時限內未完成</td><td>優化演算法/減少迭代/調適收斂條件</td></tr>
+  <tr><td>NO_EXECUTABLE</td><td>無可執行檔</td><td>提交正確命名的 ELF binary</td></tr>
+  <tr><td>SOURCE_ONLY</td><td>只有原始碼缺可執行檔</td><td>編譯為可執行檔並正確命名</td></tr>
+ </tbody>
+</table>
+
+<p style="color:#666;font-size:.85em">
+  <b>容差 EPS = 3um</b>：所有幾何判斷（相鄰、重疊、outline 超出、edge location）統一使用
+  EPS=3um 容差，避免浮點/整數化噪音誤判。
+</p>
+
+<a id="coord-precision"></a>
+<h2>📏 座標精度與進位規則（A34/A39）</h2>
+
+<div style="background:#fef3c7;padding:20px 24px;border-radius:10px;margin:16px 0;font-size:.95em;line-height:2.0;border-left:5px solid #f59e0b">
+
+  <div style="background:#fff;padding:16px 20px;border-radius:8px;margin-bottom:16px;border:2px solid #dc2626">
+    <span style="font-size:1.3em;color:#dc2626;font-weight:900">⚠ 核心原則（最重要的一句話）</span><br><br>
+    <span style="font-size:1.15em;line-height:1.6">
+    Checker <b>全程</b>使用原始浮點座標——<b>幾何拓樸判斷</b>和<b>成本計算</b>都不做進位。<br>
+    Spec A34「長度無條件進位」和 A39「面積四捨五入」<b>不在 checker 中實作</b>；
+    所有長度、面積一律以原始浮點值計算與比較。</span>
+  </div>
+
+  <b>為什麼？</b><br>
+  Spec A34/A39 要求「長度無條件進位到整數、面積四捨五入到小數點後第二位」，
+  但這條規則在實作上有極大的陷阱——<b>不可以</b>對每個座標分量各自進位後再組合，
+  因為那會破壞原本對齊的相鄰關係，造成<b>假性違規</b>（見下方例子）。<br>
+  為確保一致性，本 checker 選擇<b>全程不進位</b>——幾何檢查和成本計算看到的是同一組數字。
+
+  <table style="margin:12px 0;width:100%">
+   <thead><tr><th style="width:28%">用途</th><th style="width:36%">使用的值</th><th style="width:36%">原因</th></tr></thead>
+   <tbody>
+    <tr>
+      <td><b>幾何拓樸判斷</b><br>（相鄰、重疊、outline 超出、edge location）</td>
+      <td>原始浮點座標<br><span style="color:#dc2626;font-weight:700">不做進位</span></td>
+      <td>進位會破壞對齊關係<br>（見下方 Step 2 例子）</td>
+    </tr>
+    <tr>
+      <td><b>成本計算</b><br>（OutlineArea、WireLength、FT Area 等）</td>
+      <td>原始浮點值直接相乘/相加<br><span style="color:#dc2626;font-weight:700">不做進位</span></td>
+      <td>OutlineArea = W × H（浮點乘法）<br>WireLength = Σ HPWL（浮點加法）<br><b>不先進位再計算</b></td>
+    </tr>
+   </tbody>
+  </table>
+
+  <hr style="border:none;border-top:2px dashed #d97706;margin:20px 0">
+
+  <div style="background:#fff;padding:18px 20px;border-radius:8px;margin:12px 0;border:1px solid #e5e7eb">
+    <b style="color:#4c1d95;font-size:1.1em">📋 完整範例：從 Solver 輸出到 Checker 判定</b><br><br>
+
+    以下取自 case0 某隊伍的<b>實際</b> output.cfg，顯示 checker 如何逐步處理座標。<br><br>
+
+    <div style="background:#f0fdf4;padding:14px 18px;border-radius:6px;margin:10px 0;border-left:4px solid #16a34a">
+      <b>Step 1：讀取 CFG（原始浮點）</b><br><br>
+
+      CFG 中的座標由 <code>cfg_parser</code> 以<b>原始浮點</b>讀入，不做任何進位：<br><br>
+
+      <table style="margin:8px 0;font-size:.9em;border:1px solid #d1d5db">
+       <tr style="background:#e8f5e9"><td style="width:35%;padding:6px 10px"><b>項目</b></td><td style="padding:6px 10px"><b>值（原始浮點）</b></td></tr>
+       <tr><td style="padding:6px 10px">Outline Width</td><td style="padding:6px 10px;font-family:monospace">W = <b>2166.503294</b></td></tr>
+       <tr><td style="padding:6px 10px">Outline Height</td><td style="padding:6px 10px;font-family:monospace">H = <b>1985.736297</b></td></tr>
+       <tr><td style="padding:6px 10px">BLK02 位置</td><td style="padding:6px 10px;font-family:monospace">x = <b>863.147596</b></td></tr>
+       <tr><td style="padding:6px 10px">BLK02 寬度</td><td style="padding:6px 10px;font-family:monospace">w = <b>533.753563</b></td></tr>
+       <tr><td style="padding:6px 10px">BLK02 右邊界</td><td style="padding:6px 10px;font-family:monospace">x + w = <b>1396.901159</b></td></tr>
+      </table>
+
+      <span style="color:#16a34a">✅ Checker 讀到什麼就用什麼，不做 ceil / round。</span>
+    </div>
+
+    <div style="background:#fef2f2;padding:14px 18px;border-radius:6px;margin:10px 0;border-left:4px solid #dc2626">
+      <b>Step 2：幾何拓樸判斷（相鄰 / 重疊 / outline 超出）</b><br><br>
+
+      假設另一個 block BLK05 的左邊界恰好在 <code>x = 1396.901159</code>（與 BLK02 右邊界對齊）。<br><br>
+
+      ❌ <b>如果各自進位再判斷</b>：
+      <div style="background:#fff;padding:8px 12px;border-radius:4px;margin:6px 0;font-family:monospace;font-size:.88em">
+        BLK02: ceil(x) = 864, ceil(w) = 534 → 右邊界 = 864 + 534 = <b>1398</b><br>
+        BLK05: ceil(x') = 1397 → 左邊界 = <b>1397</b><br>
+        |1398 − 1397| = <b>1</b> < EPS=3 → 碰巧過關，但運氣不好時就 fail<br>
+        實際差距 = |1396.901159 − 1396.901159| = <b>0</b> ← 本來就對齊！
+      </div>
+
+      ✅ <b>Checker 的正確做法</b>（用原始浮點）：
+      <div style="background:#fff;padding:8px 12px;border-radius:4px;margin:6px 0;font-family:monospace;font-size:.88em">
+        BLK02 右邊界 = x + w = <b>1396.901159</b>（不進位）<br>
+        BLK05 左邊界 = x' = <b>1396.901159</b>（不進位）<br>
+        |1396.901159 − 1396.901159| = <b>0</b> < EPS=3 → ✅ 相鄰通過
+      </div>
+
+      <span style="color:#dc2626;font-weight:700">結論：各自進位會讓原本對齊的邊界產生 1~2 um 誤差。
+      若這個誤差累積超過 EPS=3um，<b>原本合法的解會被誤判為 ROUTING_OPEN 或 BLOCK_OVERLAP</b>。</span>
+    </div>
+
+    <div style="background:#eff6ff;padding:14px 18px;border-radius:6px;margin:10px 0;border-left:4px solid #2563eb">
+      <b>Step 3：成本計算（OutlineArea）</b><br><br>
+
+      同一組數據，成本如何計算：<br><br>
+
+      <table style="margin:8px 0;font-size:.9em;border:1px solid #d1d5db">
+       <tr style="background:#dbeafe"><td style="width:50%;padding:8px 12px"><b>做法</b></td><td style="padding:8px 12px"><b>OutlineArea</b></td></tr>
+       <tr>
+         <td style="padding:8px 12px;color:#16a34a;font-weight:700">✅ Checker 實際做法<br>（原始浮點直接乘）</td>
+         <td style="padding:8px 12px;font-family:monospace">2166.503294 × 1985.736297<br>= <b>4,302,104.23</b></td>
+       </tr>
+       <tr>
+         <td style="padding:8px 12px;color:#999">❌ 如果先進位再計算<br>（checker 不這樣做）</td>
+         <td style="padding:8px 12px;font-family:monospace;color:#999">ceil(W) × ceil(H) = 2167 × 1986<br>= 4,303,662</td>
+       </tr>
+       <tr style="background:#fef9c3">
+         <td style="padding:8px 12px;font-weight:700">差異</td>
+         <td style="padding:8px 12px;font-weight:700">1,557.77 um²（約 0.036%）</td>
+       </tr>
+      </table>
+
+      <br>Checker 使用<b>原始浮點值</b>計算 OutlineArea（= W × H）、WireLength（= Σ HPWL）
+      及所有 penalty，<b>全程不進位</b>。
+    </div>
+
+    <div style="background:#f0fdf4;padding:14px 18px;border-radius:6px;margin:10px 0;border-left:4px solid #16a34a">
+      <b>Step 4：WireLength 計算（HPWL）</b><br><br>
+
+     長度計算同樣不做進位：<br><br>
+
+      <div style="background:#fff;padding:8px 12px;border-radius:4px;margin:4px 0;font-family:monospace;font-size:.88em">
+        HPWL(p1, p2) = |p1.x − p2.x| + |p1.y − p2.y|<br><br>
+        例：|1396.901159 − 863.147596| = <b>533.753563</b>（原始浮點，不做 ceil）<br>
+        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;不是 ceil(533.753563) = 534
+      </div>
+
+      <span style="color:#16a34a">✅ WireLength = Σ(各段 HPWL)，全程浮點、不進位。</span>
+    </div>
+  </div>
+
+  <hr style="border:none;border-top:2px dashed #d97706;margin:20px 0">
+
+  <div style="background:#f0f9ff;padding:18px 20px;border-radius:8px;margin:12px 0;border:1px solid #bae6fd">
+    <b style="color:#0369a1;font-size:1.1em">✅ 參賽者 Guide：你的 solver 應該怎麼做</b><br><br>
+
+    <table style="margin:10px 0;width:100%;font-size:.92em">
+     <thead><tr><th style="width:5%">#</th><th style="width:25%">步驟</th><th style="width:35%">✅ 正確做法</th><th style="width:35%">❌ 錯誤做法</th></tr></thead>
+     <tbody>
+      <tr>
+        <td style="font-weight:700">1</td>
+        <td><b>Solver 內部計算</b></td>
+        <td>使用整數或高精度浮點算術<br>計算 block 擺放位置</td>
+        <td>—（內部怎麼算都可以）</td>
+      </tr>
+      <tr>
+        <td style="font-weight:700">2</td>
+        <td><b>寫入 output.cfg</b><br>BlockPosition / BlockSize</td>
+        <td>直接寫入計算出的值<br>（整數或浮點均可）</td>
+        <td>對 x, y, w, h <b>各自無條件進位</b><br>（ceil）後再寫入</td>
+      </tr>
+      <tr>
+        <td style="font-weight:700">3</td>
+        <td><b>寫入 OutlineSize</b></td>
+        <td>直接寫入 W, H<br>（整數或浮點均可）</td>
+        <td>先對 W, H 進位再寫入</td>
+      </tr>
+      <tr>
+        <td style="font-weight:700">4</td>
+        <td><b>確保相鄰 block 對齊</b></td>
+        <td>在<b>實際座標</b>上確保對齊<br>（誤差 ≤ 3um）</td>
+        <td>各自進位後「碰巧」對齊<br>——checker 不會替你進位！</td>
+      </tr>
+      <tr>
+        <td style="font-weight:700">5</td>
+        <td><b>EDGE block 貼齊 boundary</b></td>
+        <td>在實際座標上貼齊<br>（無偏移，≤ EPS=3um）</td>
+        <td>進位後「看起來」貼齊<br>但原始浮點有偏移</td>
+      </tr>
+     </tbody>
+    </table>
+
+    <br>
+    <b>簡單法則</b>：<b>寫入 cfg 的座標 = 你 solver 內部算出的座標</b>。
+    不要額外做 ceil/round/floor——Checker 會用你寫的值原封不動地做所有判斷和計算。<br><br>
+
+    <b>Checker 不會做的事情</b>（放心）：
+    <ul style="margin:4px 0 4px 20px;font-size:.9em;color:#4b5563">
+      <li>Checker <b>不會</b>對 block 的 x, y, w, h 分別進位後再判斷相鄰 / 重疊</li>
+      <li>Checker <b>不會</b>先對 outline W, H 進位再算 OutlineArea</li>
+      <li>Checker <b>不會</b>把浮點累積誤差（如 y+h 其實比 H 多 0.000001）判定為 violation<br>
+        （只要差異 ≤ EPS=3um 就視為對齊）</li>
+      <li>Checker <b>不會</b>對 WireLength 或任何 penalty 項做進位</li>
+    </ul>
+  </div>
+
+  <div style="background:#fff;padding:14px 18px;border-radius:8px;margin:12px 0;border:1px solid #e5e7eb">
+    <b style="color:#7c3aed">❓ 常見疑問</b><br><br>
+
+    <b>Q1：Spec 寫「長度無條件進位」，為什麼 checker 不實作？</b><br>
+    A：因為對每個座標分量(x, y, w, h)各自進位，會在求和時(y+h, x+w)產生累積誤差，
+    破壞原本對齊的幾何關係。Spec 的進位規則適用於「單一長度值」（如一條線段長度），
+    不適用於「逐分量進位後再組合」。為保證一致性，checker 選擇全程不進位。<br><br>
+
+    <b>Q2：我輸出整數座標可以嗎？</b><br>
+    A：可以。如果你的 solver 內部使用整數算術，直接輸出整數即可，
+    不需額外做 ceil/round。Checker 會正確處理整數與浮點輸入。<br><br>
+
+    <b>Q3：我輸出浮點座標可以嗎？</b><br>
+    A：可以。但請確保相鄰 block 的邊界在<b>實際浮點值</b>上對齊（誤差 ≤ 3um），
+    而非進位後碰巧對齊。Checker 容差 EPS=3um 可吸收浮點計算的微小噪音。<br><br>
+
+    <b>Q4：面積四捨五入（A39）呢？</b><br>
+    A：Checker 的 OutlineArea = W × H（浮點乘法），不做四捨五入。
+    所有成本項（含 penalty）均為浮點值，最終 cost 也是浮點數。
+    排名用完整浮點值比較，不做進位或四捨五入。
+  </div>
+
+</div>
+
+
+<a id="spec"></a>
+
+<h2>📜 與官方 Spec 的 Constraint 放寬差異</h2>
+<p style="color:#b45309;font-weight:700;margin-bottom:12px">
+  ⚠ 以下列出本 checker 與原始題目 Spec 之間的差異——大部分為放寬或明確化。
+</p>
+
+<table>
+ <thead><tr><th>項目</th><th>Spec 原始要求</th><th>Checker 實作</th><th>影響</th></tr></thead>
+ <tbody>
+  <tr style="background:#fef9c3">
+    <td style="font-weight:700">EDGE_LOCATION_VIOLATION</td>
+    <td>違規 = 不合法 (hard-fail)<br>EDGE block 必須貼齊 boundary 且壓入指定區域</td>
+    <td>改為 <b>WARNING + penalty</b><br>偏移距離(um) × γ 計入 cost<br>不判定 FAIL，繼續後續檢查</td>
+    <td style="color:#16a34a">放寬</td>
+  </tr>
+  <tr>
+    <td style="font-weight:700">Connection Matrix 方向</td>
+    <td>未明確規範 directed 或 undirected 比對<br>實際矩陣並非對稱</td>
+    <td><b>Undirected 比對</b><br>PATH(A→B)+PATH(B→A) = matrix[A][B]+matrix[B][A]<br>方向分配不受限</td>
+    <td style="color:#16a34a">放寬</td>
+  </tr>
+  <tr>
+    <td style="font-weight:700">EDGE block 50um 位移</td>
+    <td>Spec A7/A9/A19 有 50um offset 限制</td>
+    <td><b>取消 50um 限制</b><br>只需貼齊 boundary (no offset) 且壓入區域</td>
+    <td style="color:#16a34a">放寬</td>
+  </tr>
+  <tr>
+    <td style="font-weight:700">CHANNEL_OVERFLOW</td>
+    <td>Spec 依比例扣分（penalty）</td>
+    <td>與 spec 一致：WARNING + piecewise 懲罰計入 cost<br>不判定 FAIL</td>
+    <td style="color:#666">一致</td>
+  </tr>
+  <tr style="background:#fef9c3">
+    <td style="font-weight:700">ILLEGAL_FT</td>
+    <td>Spec A1 註明「以扣分計，非直接 fail」</td>
+    <td>改為 <b>WARNING + penalty</b><br>IllegalFTPenalty = λ_ft × Σ(非法 FT delta_area)<br>λ_ft = 10（約 β_ft 的 3 倍），不判定 FAIL</td>
+    <td style="color:#16a34a">放寬</td>
+  </tr>
+  <tr>
+    <td style="font-weight:700">幾何容差</td>
+    <td>Spec 未明確規範浮點容差</td>
+    <td>統一使用 <b>EPS=3um</b> 作為容差<br>（相鄰對齊、重疊、outline、edge-location）</td>
+    <td style="color:#666">明確化</td>
+  </tr>
+  <tr>
+    <td style="font-weight:700">同 edge 進出（U-turn）</td>
+    <td>Spec 未明確禁止</td>
+    <td>CH/SOFT 允許同 edge 折返<br>MACRO/EDGE 一律禁止任何內部穿越</td>
+    <td style="color:#666">明確化</td>
+  </tr>
+  <tr>
+    <td style="font-weight:700">FT conversion 第一檔</td>
+    <td>測資子表頭寫 "≤1000"</td>
+    <td>以題目說明為準：第一檔為 <b>≤3000</b></td>
+    <td style="color:#d97706">修正</td>
+  </tr>
+  <tr>
+    <td style="font-weight:700">座標精度</td>
+    <td>Spec A34/A39：長度無條件進位、面積四捨五入</td>
+    <td>全程使用<b>原始浮點座標</b>，不做進位<br>（幾何檢查與成本計算均為原始浮點，見下方專節）</td>
+    <td style="color:#d97706">分離</td>
+  </tr>
+  <tr>
+    <td style="font-weight:700">Guiding Point 定義</td>
+    <td>Alpha 回饋使用兩矩形 edge 中心平均值</td>
+    <td>改為 A41 規格：<b>重疊邊界線段中點</b><br>（midpoint of overlapping segment）</td>
+    <td style="color:#d97706">修正</td>
+  </tr>
+  <tr>
+    <td style="font-weight:700">Channel Demand 計算</td>
+    <td>Alpha 回饋使用 entry+exit 分別計一次（×2）</td>
+    <td>改為 A5 規格：每條 net 穿過 channel <b>只計 1 次</b><br>直穿計 1 方向，轉向計 2 方向</td>
+    <td style="color:#d97706">修正</td>
+  </tr>
+  <tr>
+    <td style="font-weight:700">PORT EDGE 多值解析</td>
+    <td>Alpha 回饋只取第一個值（"1,2" → 1）</td>
+    <td>改為<b>完整 list</b>（"1,2" → [1,2]）<br>0 或留白 → []（自由選擇）</td>
+    <td style="color:#d97706">修正</td>
+  </tr>
+ </tbody>
+</table>
+
+
+<a id="qa-diff"></a>
+
+<h2>🔍 Q&A 爭議項與 Checker 實作差異</h2>
+<p style="color:#7c3aed;font-weight:700;margin-bottom:12px">
+  以下整理參賽者提出的 Q&A 爭議（A1–A43），並標明<b>Checker 當前實作</b>與<b>官方 Q&A 回答</b>之間的差異。
+  <span style="color:#dc2626">紅色 = 尚未符合 Q&A 回答</span>；
+  <span style="color:#16a34a">綠色 = 已修正 / 一致</span>；
+  <span style="color:#d97706">橘色 = 需主辦方確認</span>。
+</p>
+
+<table>
+ <thead><tr>
+  <th style="width:6%">Q&A #</th>
+  <th style="width:22%">爭議主題</th>
+  <th style="width:24%">官方 Q&A 回答</th>
+  <th style="width:24%">Checker 當前實作</th>
+  <th style="width:12%">差異狀態</th>
+  <th style="width:12%">影響</th>
+ </tr></thead>
+ <tbody>
+
+  <!-- A34/A39 座標精度 -->
+  <tr style="background:#fef9c3">
+    <td style="font-weight:700">A34<br>A39</td>
+    <td><b>座標精度與進位</b><br>長度無條件進位到整數；面積四捨五入到小數點後第二位</td>
+    <td>長度 = ceil，面積 = round(2dp)<br>例：width 419.5 → 420</td>
+    <td>全程使用原始浮點座標<br><b>不做 ceil 也不做 round</b><br>OutlineArea = W × H（浮點乘法）<br>WireLength = Σ HPWL（浮點加法）</td>
+    <td style="color:#dc2626;font-weight:700">⚠ 不一致</td>
+    <td>成本差異 < 0.1%<br>但若各自進位會破壞對齊</td>
+  </tr>
+
+  <!-- A43 整數規則 -->
+  <tr style="background:#fef9c3">
+    <td style="font-weight:700">A43</td>
+    <td><b>整數化規則</b><br>所有 BLOCK 座標/尺寸使用整數<br>CHANNEL / Outline 也用整數<br>SOFT block W×H < AREA 時取小值<br>小數輸出由 checker 自動進位</td>
+    <td>Checker 應自動將小數進位為整數<br>合法性和成本計算應在整數化後進行</td>
+    <td><b>不做整數化</b><br>接受並保留原始浮點座標<br>成本計算也用浮點值</td>
+    <td style="color:#dc2626;font-weight:700">⚠ 不一致</td>
+    <td>面積差異 ~0.03%<br>排名幾乎不受影響</td>
+  </tr>
+
+  <!-- A41 Guiding Point -->
+  <tr style="background:#f0fdf4">
+    <td style="font-weight:700">A41</td>
+    <td><b>Guiding Point 定義</b><br>兩 channel 重疊邊界的中點</td>
+    <td>重疊邊界線段的<b>中點</b><br>（midpoint of overlapping segment）<br>非兩矩形 edge 中心平均值</td>
+    <td>✅ 已改為<b>重疊中點</b><br>routing.py:331<br><code>compute_overlap_midpoint()</code><br>Fallback: edge midpoint average<br>（僅在 overlap 為 None 時）</td>
+    <td style="color:#16a34a;font-weight:700">✅ 已修正</td>
+    <td>WL 差異顯著<br>（參賽者反映 520 vs 655）</td>
+  </tr>
+
+  <!-- A5 Channel Demand -->
+  <tr style="background:#f0fdf4">
+    <td style="font-weight:700">A5</td>
+    <td><b>Channel Demand 計算</b><br>每條 net 穿過 channel 計幾次？</td>
+    <td>每條 net 穿過一個 channel<b>只計 1 次</b><br>直穿：1 次水平 demand<br>轉向：1 水平 + 1 垂直 demand</td>
+    <td>✅ 已改為<b>每條 net 穿過只計 1 次</b><br>channel.py:50-77<br>entry+exit 配對後<br>依 edge 方向加 1 次 demand</td>
+    <td style="color:#16a34a;font-weight:700">✅ 已修正</td>
+    <td>overflow 差異 ~2×<br>（Alpha: 5700 → 修正: 3600）</td>
+  </tr>
+
+  <!-- A35.3 PORT EDGE 多值 -->
+  <tr style="background:#f0fdf4">
+    <td style="font-weight:700">A35.3</td>
+    <td><b>PORT EDGE 多值解析</b><br>"1,2" 的語義？</td>
+    <td>多值 → 參賽者可在所列 edge 中擇一或同時使用<br>0 或留白 → 自由選擇</td>
+    <td>✅ 已改為<b>完整 list</b><br>csv_parser.py:121-127<br>"1,2" → [1,2]<br>"0" → []</td>
+    <td style="color:#16a34a;font-weight:700">✅ 已修正</td>
+    <td>之前只取第一個值<br>導致限制過嚴</td>
+  </tr>
+
+  <!-- α 值 -->
+  <tr style="background:#f0fdf4">
+    <td style="font-weight:700">A2<br>A29<br>A35.5</td>
+    <td><b>α 值來源</b><br>alpha 是從 CSV 讀取還是另外指定？</td>
+    <td>α 是 user-defined variable<br>CSV 中 α=0.2 僅供參考<br>官方另訂評測用 α</td>
+    <td>✅ <b>使用評審方預設值</b><br>case0=0.3, case1=0.15<br>case2~4=0.1, case5=0.05, case6=0.2, case7=0.15<br>透過 --alpha-override 指定</td>
+    <td style="color:#16a34a;font-weight:700">✅ 一致</td>
+    <td>影響排名<br>α 越大 WL 權重越高</td>
+  </tr>
+
+  <!-- EDGE_LOCATION_VIOLATION -->
+  <tr style="background:#f0fdf4">
+    <td style="font-weight:700">A1<br>A7<br>A9<br>A12<br>A19</td>
+    <td><b>EDGE block 位置違規</b><br>是 hard-fail 還是 penalty？</td>
+    <td>需完全貼齊 boundary (A12)<br>50um 位移限制已取消 (A7/A9/A19)<br>未明確說明違規是 fail 或 penalty</td>
+    <td>改為<b>WARNING + penalty</b><br>偏移距離 × γ 計入 cost<br>不判定 FAIL</td>
+    <td style="color:#d97706;font-weight:700">🔶 放寬</td>
+    <td>從 hard-fail 改為扣分<br>對參賽者有利</td>
+  </tr>
+
+  <!-- ILLEGAL_FT -->
+  <tr style="background:#f0fdf4">
+    <td style="font-weight:700">A1</td>
+    <td><b>MACRO/EDGE 作為 feedthrough</b><br>是 hard-fail 還是 penalty？</td>
+    <td>A1 明確說：<b>以扣分計，非直接 fail</b></td>
+    <td>✅ 一致：<b>WARNING + penalty</b><br>λ_ft × IllegalFTDeltaArea<br>λ_ft = 10（約 β_ft 的 3×）</td>
+    <td style="color:#16a34a;font-weight:700">✅ 一致</td>
+    <td>與 Q&A 一致</td>
+  </tr>
+
+  <!-- Channel Overflow -->
+  <tr style="background:#f0fdf4">
+    <td style="font-weight:700">A1<br>A5</td>
+    <td><b>Channel Overflow</b><br>是 hard-fail 還是 penalty？</td>
+    <td>依 overflow 程度按比例扣分<br>不視為 fail (A1.1)</td>
+    <td>✅ 一致：<b>WARNING + piecewise 懲罰</b><br>β_lin=20, β_tail=1.5<br>threshold=0.05</td>
+    <td style="color:#16a34a;font-weight:700">✅ 一致</td>
+    <td>與 Q&A 一致</td>
+  </tr>
+
+  <!-- Connection Matrix 方向 -->
+  <tr style="background:#f0fdf4">
+    <td style="font-weight:700">—</td>
+    <td><b>Connection Matrix 方向</b><br>Directed 或 undirected？</td>
+    <td>未明確規範<br>實際矩陣並非對稱</td>
+    <td><b>Undirected 比對</b><br>PATH(A→B)+PATH(B→A) = matrix[A][B]+matrix[B][A]<br>對角線必須為 0</td>
+    <td style="color:#16a34a;font-weight:700">✅ 放寬</td>
+    <td>對參賽者有利</td>
+  </tr>
+
+ </tbody>
+</table>
+
+<h3>差異重點摘要</h3>
+
+<div style="background:#fef2f2;padding:16px 20px;border-radius:8px;margin:12px 0;border-left:4px solid #dc2626">
+  <b style="color:#dc2626;font-size:1.05em">🔴 尚未符合 Q&A 回答的項目（2 項）</b><br><br>
+
+  <table style="margin:8px 0;width:100%">
+   <thead><tr><th style="width:15%">Q&A #</th><th style="width:20%">項目</th><th style="width:30%">Q&A 要求</th><th style="width:35%">Checker 為何不同</th></tr></thead>
+   <tbody>
+    <tr>
+      <td style="font-weight:700">A34/A39<br>A43</td>
+      <td>座標精度 / 整數化</td>
+      <td>長度無條件進位(ceil)<br>面積四捨五入(round 2dp)<br>block/outline/channel 使用整數<br>小數輸出由 checker 自動進位</td>
+      <td>全程使用原始浮點座標<br><b>不做進位</b>的原因：<br>
+        ① 對 x,y,w,h 各自 ceil 後再組合，y+h 會累積 +1 誤差，破壞對齊<br>
+        ② 先進位再算面積 → cost 與幾何判斷不一致<br>
+        ③ 差異極小（~0.036%），排名幾乎不變<br>
+        詳見上方「📏 座標精度」專節</td>
+    </tr>
+   </tbody>
+  </table>
+
+  <p style="color:#666;font-size:.85em;margin-top:8px">
+    <b>主辦方決策建議</b>：若 Beta/Final 要求嚴格實作 A43（整數化 + 自動進位），需修改 cfg_parser.py
+    將所有座標先轉整數再傳入 checker。但請注意：這會讓<b>所有使用浮點座標的參賽者</b>（如 top-2 隊伍）
+    的幾何關係可能被破壞，需額外用 EPS 容差補救。當前做法（全程不進位 + EPS=3um 容差）
+    實務上已足夠區分排名。
+  </p>
+</div>
+
+<div style="background:#f0fdf4;padding:16px 20px;border-radius:8px;margin:12px 0;border-left:4px solid #16a34a">
+  <b style="color:#16a34a;font-size:1.05em">🟢 已修正 / 已一致的項目（7 項）</b><br><br>
+
+  <table style="margin:8px 0;width:100%;font-size:.92em">
+   <thead><tr><th>Q&A #</th><th>項目</th><th>修正內容</th></tr></thead>
+   <tbody>
+    <tr><td>A41</td><td>Guiding Point</td><td>已改為重疊邊界線段中點（overlap midpoint）</td></tr>
+    <tr><td>A5</td><td>Channel Demand</td><td>已改為每條 net 穿過只計 1 次（非 entry+exit 各 1 次）</td></tr>
+    <tr><td>A35.3</td><td>PORT EDGE 多值</td><td>已改為完整 list 解析（csv_parser.py:121-127）</td></tr>
+    <tr><td>A2/A29</td><td>α 值來源</td><td>已使用評審方預設值，非 CSV 中的 0.2</td></tr>
+    <tr><td>A1</td><td>ILLEGAL_FT</td><td>依 A1 為 WARNING + penalty（非 hard-fail）</td></tr>
+    <tr><td>A1/A5</td><td>Channel Overflow</td><td>依 Q&A 為 WARNING + piecewise penalty</td></tr>
+    <tr><td>—</td><td>Connection Matrix</td><td>Undirected 比對（對參賽者有利）</td></tr>
+   </tbody>
+  </table>
+</div>
+
+<div style="background:#eff6ff;padding:16px 20px;border-radius:8px;margin:12px 0;border-left:4px solid #2563eb">
+  <b style="color:#2563eb;font-size:1.05em">🔵 Beta/Final 參賽者常見疑問（取自 0727 QA）</b><br><br>
+
+  <table style="margin:8px 0;width:100%;font-size:.9em">
+   <thead><tr><th style="width:5%">#</th><th style="width:25%">問題</th><th style="width:35%">Checker 回答</th><th style="width:35%">參考</th></tr></thead>
+   <tbody>
+    <tr>
+      <td>1</td>
+      <td>α 值範圍？runtime penalty 從哪來？β,γ,δ 是什麼？</td>
+      <td>α 用評審預設值（非 CSV 0.2）；β_lin=20, β_tail=1.5, γ=1, δ=0.5 是 V3 新增的 penalty 參數</td>
+      <td>見上方 Cost Function 公式</td>
+    </tr>
+    <tr>
+      <td>2</td>
+      <td>PORT EDGE 0 的語義？</td>
+      <td>0 或留白 = 自由選擇（任何 edge）；<br>"1,2" = 可擇一或同時使用</td>
+      <td>A35.3, csv_parser.py:121-127</td>
+    </tr>
+    <tr>
+      <td>3</td>
+      <td>self-loop（BLK09 自己連 63 nets）？</td>
+      <td>不是 self-loop。矩陣對角線全為 0。<br>63 nets 是 BLK09→BLK04 的 outgoing connections</td>
+      <td>csv_parser.py:54-55 強制對角線 = 0</td>
+    </tr>
+    <tr>
+      <td>4</td>
+      <td>Channel overflow 是 segmental 還是 channel-level？</td>
+      <td>Channel-level：水/垂直獨立容量。<br>同一 channel 內所有 net 的 demand 加總 > 容量 = overflow</td>
+      <td>A5, channel.py:80-94</td>
+    </tr>
+    <tr>
+      <td>5</td>
+      <td>Overflow penalty 公式？</td>
+      <td>overflow_rate = total_overflow / total_capacity<br>piecewise: ≤0.05 為線性，>0.05 加 sqrt 尾<br>FT penalty = β_ft × FTAreaExcess（獨立計算）</td>
+      <td>cost.py:119-133</td>
+    </tr>
+    <tr>
+      <td>6</td>
+      <td>Guiding Point 用哪種定義？</td>
+      <td>已改為 A41 的<b>重疊中點</b>（非 Alpha 回饋的 edge center average）</td>
+      <td>routing.py:331, geometry.py:179-223</td>
+    </tr>
+    <tr>
+      <td>7</td>
+      <td>Channel demand 計法？</td>
+      <td>已改為 A5 的<b>每通過計 1 次</b>（非 Alpha 回饋的 entry+exit 各計 1 次）</td>
+      <td>channel.py:50-77</td>
+    </tr>
+    <tr>
+      <td>8</td>
+      <td>A43 整數化會實作嗎？</td>
+      <td>⚠ 目前<b>不做整數化</b>——全程浮點。<br>原因見上方「座標精度」專節。<br>待主辦方確認 Beta/Final 方針</td>
+      <td>checker_spec.md §10b</td>
+    </tr>
+    <tr>
+      <td>9</td>
+      <td>成本公式確認？</td>
+      <td>參賽者推導的公式正確：<br>r≤0.05: A×20×r ✅<br>r>0.05: A×(1+1.5√(r-0.05)) ✅<br>runtime: 0.5×rt×√A ✅</td>
+      <td>cost.py:119-146</td>
+    </tr>
+    <tr>
+      <td>10</td>
+      <td>Beta/Final 會沿用 Alpha 常數嗎？</td>
+      <td>常數沿用：β_lin=20, β_tail=1.5, β_ft=3,<br>threshold=0.05, γ=1, δ=0.5, λ_ft=10<br><b>A41 / A5 已修正</b>（與 Alpha 不同）<br>A43 整數化待確認</td>
+      <td>A41, A5 已修正；<br>A34/A39/A43 未實作</td>
+    </tr>
+   </tbody>
+  </table>
+</div>
+
+
+</div></body></html>
