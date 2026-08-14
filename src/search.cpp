@@ -1199,9 +1199,23 @@ bool shouldRunPhase2Leg(double remaining_sec, double leg_phase1_wall_time_sec) {
     return remaining_sec >= kPhase2LegMargin * leg_phase1_wall_time_sec;
 }
 
+// L3c.1 (M3 verdict, docs/research/2026-08-15-case5-l1-m2-verdict-and-m1-wall-breakdown.md §4):
+// the design's original "fits once" trigger (factor 1.0) left case5@600s in a measured bad middle
+// regime -- T0~50s on a fast machine makes 10*T0 <= 600 so deep mode stayed off, yet the registry
+// only "fits" in the P0a-gated sense: 9-10 shallow legs consume the whole budget, phase 2 never
+// clears its margin, and the launch gate can cut the late ftagg legs (the measured M3 arm lost the
+// winning leg 9: 94.8M vs 88.3M old). Meanwhile the deep arm at a SMALLER 450s budget scored
+// 82.1M (-7.0% vs old600). Factor 2.0 = "fire unless the registry fits TWICE": a healthy budget
+// run wants repeat registry passes (B2's phase-2 sweep) anyway, so a budget that cannot even fit
+// two passes is better spent on deep legs. Cheap cases are untouched by construction: their
+// per-leg walls are seconds (case4, the heaviest non-case5 case, measured T0 ~ 12s -> 2*10*12 =
+// 240 < 600 even 2x machine-slowed), so only case5-shaped instances can fire.
+constexpr double kDeepTriggerFitFactor = 2.0;
+
 // L3c deep-mode arithmetic (case5-design.md §4-L3c steps 3-4): see the doc comments in search.hpp.
 bool deepModeTrigger(double time_budget_sec, std::size_t registry_size, double t0) {
-    return time_budget_sec > 0.0 && static_cast<double>(registry_size) * t0 > time_budget_sec;
+    return time_budget_sec > 0.0 &&
+           kDeepTriggerFitFactor * static_cast<double>(registry_size) * t0 > time_budget_sec;
 }
 
 int deepLegCount(double time_budget_sec, double t0, double m0) {

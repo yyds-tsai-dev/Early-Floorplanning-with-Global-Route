@@ -422,7 +422,10 @@ std::vector<SearchVariant> deepVariants();
 // L3c deep-mode arithmetic (case5-design.md §4-L3c steps 3-4), pure helpers hoisted out of
 // runPricingPortfolio so they are directly unit-testable with case5-shaped numbers (same precedent
 // as shouldRunPhase2Leg above). All deterministic functions of their arguments.
-// Trigger: budget on AND leg 0's measured wall T0 proves the whole registry cannot fit.
+// Trigger: budget on AND leg 0's measured wall T0 proves the registry cannot fit TWICE within the
+// budget (kDeepTriggerFitFactor = 2.0, search.cpp -- L3c.1's M3-measured loosening of the design's
+// original fits-once rule; see the constant's own doc comment for the measured middle-regime
+// pathology it removes).
 bool deepModeTrigger(double time_budget_sec, std::size_t registry_size, double t0);
 // N_deep = clamp(floor((budget - T0) / (kPhase2LegMargin * M0)), 1, 3); M0 <= 0 (machinery
 // unmeasurably small) takes the optimistic cap 3 -- the per-leg slice recheck still guards.

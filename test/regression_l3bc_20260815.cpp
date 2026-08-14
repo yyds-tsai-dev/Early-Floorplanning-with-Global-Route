@@ -27,11 +27,14 @@ using namespace efgr;
 // ---- Pure deep-mode arithmetic (case5-design.md §4-L3c steps 3-4) ------------------------------
 
 void testDeepModeTriggerArithmetic() {
-    // case5-shaped numbers (design §4-L3c step 3): T0 ~ 80s at 10 registry legs vs a 600s budget
-    // -> 800 > 600 -> deep mode. A cheap case (T0 ~ 3s) never triggers at 600s.
-    assert(deepModeTrigger(600.0, 10, 80.0));
-    assert(!deepModeTrigger(600.0, 10, 50.0));   // 500 < 600 -> registry fits, run the registry
-    assert(!deepModeTrigger(600.0, 10, 60.0));   // exactly 600 is NOT > 600 -> registry just fits
+    // L3c.1 fits-TWICE rule (kDeepTriggerFitFactor=2.0, search.cpp -- M3-measured): fire when
+    // 2 * registry_size * T0 > budget. case5-shaped: T0 ~ 50s at 10 legs vs 600s -> 1000 > 600 ->
+    // deep mode (this exact cell was the measured bad middle regime under the old fits-once rule).
+    assert(deepModeTrigger(600.0, 10, 80.0));    // 1600 > 600
+    assert(deepModeTrigger(600.0, 10, 50.0));    // 1000 > 600 -- the M3 middle-regime fix
+    assert(!deepModeTrigger(600.0, 10, 25.0));   // 500 < 600 -> registry fits twice, run it
+    assert(!deepModeTrigger(600.0, 10, 30.0));   // exactly 600 is NOT > 600 -> boundary runs registry
+    assert(!deepModeTrigger(600.0, 10, 15.0));   // case4-shaped (T0 ~ 12-15s): never fires at 600s
     assert(!deepModeTrigger(0.0, 10, 1e9));      // budget off can never trigger (first operand)
     assert(!deepModeTrigger(-1.0, 10, 1e9));
     assert(deepModeTrigger(900.0, 10, 91.0));    // the actual case5 bare-vs-900s shape
