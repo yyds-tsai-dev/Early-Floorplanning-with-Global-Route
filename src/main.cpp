@@ -199,6 +199,18 @@ int main(int argc, char** argv) {
         // banner. Default false (Problem.overflow_gated_pads's own default, model.hpp) keeps
         // outlineSweep's pad loop unconditional (today's behavior) when absent.
         problem.overflow_gated_pads = hasFlag(argc, argv, "--overflow-gated-pads");
+        // L2b (--ft-aggressive CLI flag, case5-design.md §4-L2b part 1, case5-batch1-brief.md):
+        // hidden/undocumented measurement flag, same precedent as above -- intentionally NOT in the
+        // usage banner. ft_pricing_aggressive is otherwise reachable only through registry legs 8-9
+        // (search.cpp's defaultVariants) -- exactly the two legs P0a's phase-1 budget gate
+        // (search.cpp ~1141-1157) cuts first on an expensive instance like case5. Setting it here on
+        // the base `problem` lets runPricingPortfolio's runLeg OR it into EVERY leg (search.cpp
+        // ~1105), so the §6 A/B can isolate the lever independent of which legs the budget gate
+        // allows to run. Default false (Problem.ft_pricing_aggressive's own default, model.hpp)
+        // keeps that OR's right operand false when absent, so runLeg's per-leg overwrite is
+        // unaffected and every leg's ft_pricing_aggressive is exactly variant.ft_pricing_aggressive,
+        // byte-identical to pre-L2b.
+        problem.ft_pricing_aggressive = hasFlag(argc, argv, "--ft-aggressive");
 
         // B4.1 (route-pricing portfolio, b4-report.md): runs the requested engine under both the
         // official (B4) and retained pre-B4 router pricing, folding by value -- restores the

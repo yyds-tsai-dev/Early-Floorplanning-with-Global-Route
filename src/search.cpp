@@ -1158,7 +1158,15 @@ SearchResult runPricingPortfolio(const Problem& problem, const std::string& engi
         Problem p = problem;
         p.route_pricing_official = variant.pricing_official;
         p.abutment_credit = variant.abutment_credit;
-        p.ft_pricing_aggressive = variant.ft_pricing_aggressive;
+        // L2b (case5-design.md §4-L2b part 1, case5-batch1-brief.md): the incoming `problem`'s own
+        // ft_pricing_aggressive (set by main.cpp's hidden --ft-aggressive flag; false otherwise,
+        // model.hpp's default) ORs into every leg's overwrite, forcing the aggressive FT marginal on
+        // ALL legs for the §6 A/B -- not just registry legs 8-9 (defaultVariants, below), which are
+        // exactly the two P0a's phase-1 budget gate cuts first on an expensive instance like case5.
+        // Flag-off: problem.ft_pricing_aggressive is false, so this OR's right operand is always
+        // false and every leg's field is exactly variant.ft_pricing_aggressive, byte-identical to
+        // pre-L2b.
+        p.ft_pricing_aggressive = variant.ft_pricing_aggressive || problem.ft_pricing_aggressive;
         SearchOptions opts = leg_options;
         opts.elite_admission_v2 = variant.elite_admission_v2;
         opts.move_portfolio_v2 = variant.move_portfolio_v2;
