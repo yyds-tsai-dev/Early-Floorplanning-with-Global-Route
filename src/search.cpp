@@ -340,6 +340,17 @@ OutlineSweepResult outlineSweep(const Problem& problem, const Placement& base, c
         }
         return false;
     };
+    // L2a/L3a shared capture (case5-design.md §4-L2a/§4-L3a, case5-batch1-brief.md): the tight
+    // rung's (margin==0.0) own RoutingResult, stashed by tryTarget below the moment it is computed --
+    // it is otherwise local to the exactCached call inside that lambda and unavailable to the L2a
+    // rung / L3a pad gate that need to read it after the margin ladder runs. have_tight_routing is
+    // false unless the tight rung passed its anchored check AND was exact-scored; both L2a and L3a
+    // must guard on it so a tight-rung anchor failure falls back to their pre-lever behavior (no
+    // extra rung for L2a; pads run unconditionally for L3a) rather than reading a stale/default
+    // RoutingResult.
+    RoutingResult tight_routing;
+    bool have_tight_routing = false;
+
     // Shared per-rung body (unchanged logic, now shared by the m-ladder and the pad rungs below):
     // skip an already-tried (W,H) target -- dedupe checked BEFORE paying for an anchor/exact-eval,
     // same discipline the original ladder used -- otherwise anchor exactly at the target via
@@ -388,6 +399,11 @@ OutlineSweepResult outlineSweep(const Problem& problem, const Placement& base, c
         // routing's channels could reference geometry outside `variant`'s stamped outline.
         Placement effective;
         Score score = exactCached(variant, &routing, &effective);
+        // L2a/L3a capture: see the doc comment on tight_routing/have_tight_routing above.
+        if (is_tight_rung) {
+            tight_routing = routing;
+            have_tight_routing = true;
+        }
         if (!have_best || outlineSweepBetter(routing, score.value, best.routing, best.score.value)) {
             best = OutlineSweepResult{score, effective, routing};
             have_best = true;
@@ -406,6 +422,25 @@ OutlineSweepResult outlineSweep(const Problem& problem, const Placement& base, c
         double target_h =
             std::min(problem.outline_h, std::ceil(tight_h + margin * (problem.outline_h - tight_h) - kEps));
         tryTarget(target_w, target_h, margin == 0.0);
+    }
+
+    // L2a (case5-design.md §3.1/§4-L2a, case5-batch1-brief.md): one extra rung sized so
+    // outline_area ~= the tight rung's own ROUTED ft_area_sum (RoutingResult.ft_area_sum,
+    // routing.cpp's computeOverflowAndMismatch) -- the outline family §3.1 identifies as the
+    // champion's feedthrough-dominant-regime target, which neither the margin ladder above nor the
+    // pad ladder below can reach (both are bounded deltas off tight_w/tight_h, not a scale-up to a
+    // potentially much larger aggregate FT area). Scales both tight dimensions by the same factor
+    // s = sqrt(ft_area_sum / (tight_w*tight_h)) so the rung's aspect ratio matches the tight rung's,
+    // clamped to MAX per axis exactly like every margin rung above. Only fires when the tight rung
+    // itself passed its anchored check and was exact-scored (have_tight_routing) -- if it didn't,
+    // this adds no rung, falling back to pre-L2a behavior. Adjudicated by the same
+    // outlineSweepBetter gate as every other rung (Pareto-safe by construction). Hidden behind
+    // problem.ft_area_rung (default false, model.hpp) -- flag-off byte-identical: no extra tryTarget
+    // call is ever made.
+    if (problem.ft_area_rung && have_tight_routing && tight_routing.ft_area_sum > tight_w * tight_h) {
+        double s = std::sqrt(tight_routing.ft_area_sum / (tight_w * tight_h));
+        tryTarget(std::min(problem.outline_w, std::ceil(tight_w * s)),
+                  std::min(problem.outline_h, std::ceil(tight_h * s)), false);
     }
 
     // B3 micro-pad rungs (research doc 2026-07-23 §3a-b): integer-µm pads on top of the TIGHT

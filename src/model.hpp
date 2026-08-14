@@ -152,6 +152,18 @@ struct Problem {
     // FAIL), the same flag-gated-variant precedent as route_pricing_official/abutment_credit/
     // ft_pricing_aggressive/edge_soft_anchor/undirected_bundles above.
     bool edge_free = false;
+    // L2a (ft_area_sum outline rung, case5-design.md §3.1/§4-L2a, case5-batch1-brief.md): when set,
+    // outlineSweep (search.cpp) adds one extra rung sized so outline_area ~= the tight rung's own
+    // ROUTED ft_area_sum (RoutingResult.ft_area_sum, routing.cpp's computeOverflowAndMismatch) --
+    // the outline family the champion's feedthrough-dominant regime targets (§3.1) that neither the
+    // margin ladder nor the pad ladder can reach. Adjudicated by the same outlineSweepBetter gate as
+    // every other rung (Pareto-safe by construction). false (default) reproduces every pre-L2a
+    // outlineSweep call byte-identically: no extra rung is ever tried. NEVER parsed from the input
+    // CSV (io.cpp does not touch this field) -- exists purely so main.cpp's hidden --ft-area-rung
+    // measurement flag can opt a run into it, the same flag-gated-variant precedent as
+    // route_pricing_official/abutment_credit/ft_pricing_aggressive/edge_soft_anchor/
+    // undirected_bundles/edge_free above.
+    bool ft_area_rung = false;
 };
 
 struct Placement {

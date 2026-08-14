@@ -188,6 +188,12 @@ int main(int argc, char** argv) {
         // rejected.
         problem.edge_free = hasFlag(argc, argv, "--edge-free");
         if (problem.edge_free) problem.edge_soft_anchor = true;
+        // L2a (ft_area_sum outline rung, case5-design.md §3.1/§4-L2a, case5-batch1-brief.md):
+        // hidden/undocumented measurement flag, same precedent as --edge-free/--undirected-bundles
+        // above -- intentionally NOT in the usage banner. Default false (Problem.ft_area_rung's own
+        // default, model.hpp), so an absent flag keeps outlineSweep (search.cpp) byte-identical to
+        // pre-L2a: no extra rung is ever tried.
+        problem.ft_area_rung = hasFlag(argc, argv, "--ft-area-rung");
 
         // B4.1 (route-pricing portfolio, b4-report.md): runs the requested engine under both the
         // official (B4) and retained pre-B4 router pricing, folding by value -- restores the
