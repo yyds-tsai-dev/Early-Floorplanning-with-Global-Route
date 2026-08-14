@@ -340,7 +340,13 @@ bool paydownBetter(const RoutingResult& a, double a_value, const RoutingResult& 
 SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& engine, const SearchOptions& options);
 SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& engine, const SearchOptions& options,
                                 const PlacementState& initial_state);
-SearchResult runHybridPlacementSearch(const Problem& problem, const SearchOptions& options);
+// L4b (shape-aware shelf seed, case5-design.md §4-L4b): optional `seed_placement` -- when non-null,
+// the sp sub-run starts from SequencePairEngine::seedFromPlacement(*seed_placement) with the seed's
+// soft aspects stamped via stampSoftAspectFromPlacement (placement_engine.hpp) instead of the
+// random initial state. nullptr (the default, every pre-L4b caller) is byte-identical to the
+// historical two-arg behavior. Only deep-mode shelf legs pass a seed today.
+SearchResult runHybridPlacementSearch(const Problem& problem, const SearchOptions& options,
+                                      const Placement* seed_placement = nullptr);
 // L3b (cost-aware repair budget, case5-design.md §4-L3b, .superpowers/sdd/case5-l3bc-brief.md):
 // `repair_attempts` bounds the inflated-topology jiggle loop (was the local constexpr
 // kFinalizeRepairAttempts = 32). The default IS that historical constant, so every pre-L3b caller

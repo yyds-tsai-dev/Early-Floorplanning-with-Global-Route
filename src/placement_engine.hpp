@@ -58,6 +58,30 @@ public:
 // see search.cpp's runLeg for the one production call site. Existing callers that omit the second
 // argument keep constructing a flag-off (byte-identical-mutate) engine, unchanged.
 std::unique_ptr<PlacementEngine> makePlacementEngine(const std::string& name, bool move_portfolio_v2 = false);
+
+// L4b (shape-aware shelf seed, case5-design.md §4-L4b, docs/research/2026-08-15-case5-l1-m2-
+// verdict-and-m1-wall-breakdown.md §1 "basin-discovery" evidence): deterministic AR-flexible row
+// packing -- non-edge blocks partitioned into `nrows` rows by descending area (greedy least-loaded,
+// index tiebreak), row k's height h_k = (row area sum)/W, each SOFT member sized to that height
+// within its own feasible band (aspect = w/h in [ar_min, ar_max] => h in [sqrt(A/ar_max),
+// sqrt(A/ar_min)]; an infeasible h_k is clamped to the nearest band edge -- the block may poke past
+// the row line, which is fine: the result is a SEED for seedFromPlacement (which only reads the
+// rect ORDERING) plus stampSoftAspectFromPlacement (which reads the aspects), never a final
+// placement, so neither legality nor the integer-dims rule (dimensionFor) applies to it. Hard
+// macros keep their fixed CSV dims; edge blocks are left zero-sized at the origin (movableBlocks
+// excludes them; decode re-anchors them from LOCATION). Rows stack bottom-to-top, members pack
+// left-to-right from x=0. Pure and deterministic -- no RNG.
+Placement shelfSeed(const Problem& problem, int nrows, double W);
+
+// L4b aspect stamp (case5-design.md §4-L4b "the single highest-value line in L4"): copies each
+// soft block's PLACED aspect (rect.w/rect.h, clamped to the block's [ar_min, ar_max]) into
+// state.soft_aspect -- seedFromPlacement's baseState resets every soft aspect to ~1.0, silently
+// discarding the seed placement's shapes; without this stamp a shelf seed decodes into squares and
+// the row structure is destroyed. Applied ONLY at explicitly-seeded call sites (deep-mode shelf
+// legs) -- hybrid's own internal sp->bstar re-seed keeps its historical reset-to-1.0 behavior
+// (changing it would break budget-off byte-identity; a flag-gated variant of that is a separate
+// future lever). Rects with nonpositive dims (edge placeholders) are skipped.
+void stampSoftAspectFromPlacement(const Problem& problem, const Placement& placement, PlacementState& state);
 std::vector<std::string> placementEngineNames();
 
 // B5c (move portfolio, .superpowers/sdd/b5-design.md §4): shared primitives for the wire-median /

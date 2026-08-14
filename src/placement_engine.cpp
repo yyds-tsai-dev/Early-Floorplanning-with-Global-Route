@@ -1211,6 +1211,80 @@ std::vector<std::string> placementEngineNames() {
     return {"sp", "bstar", "hybrid"};
 }
 
+// L4b (shape-aware shelf seed + aspect stamp, case5-design.md §4-L4b): see the doc comments in
+// placement_engine.hpp. Outer namespace like the B5c primitives below -- callable from search.cpp
+// and test binaries while reusing the anonymous-namespace helpers above (movableBlocks, isSoft).
+
+Placement shelfSeed(const Problem& problem, int nrows, double W) {
+    Placement placement;
+    const std::size_t n = problem.blocks.size();
+    placement.rects.assign(n, Rect{0.0, 0.0, 0.0, 0.0});
+    placement.aspect.assign(n, 1.0);
+    if (nrows < 1 || W <= 0.0) return placement;
+
+    // Descending area, index tiebreak -- fully deterministic ordering.
+    std::vector<int> order = movableBlocks(problem);
+    std::sort(order.begin(), order.end(), [&](int a, int b) {
+        if (std::abs(problem.blocks[a].area - problem.blocks[b].area) > kEps) {
+            return problem.blocks[a].area > problem.blocks[b].area;
+        }
+        return a < b;
+    });
+
+    // Greedy least-loaded row assignment (first minimal row wins ties -- deterministic).
+    std::vector<std::vector<int>> rows(static_cast<std::size_t>(nrows));
+    std::vector<double> row_area(static_cast<std::size_t>(nrows), 0.0);
+    for (int idx : order) {
+        std::size_t k = 0;
+        for (std::size_t r = 1; r < row_area.size(); ++r) {
+            if (row_area[r] < row_area[k]) k = r;
+        }
+        rows[k].push_back(idx);
+        row_area[k] += problem.blocks[static_cast<std::size_t>(idx)].area;
+    }
+
+    double y = 0.0;
+    for (std::size_t k = 0; k < rows.size(); ++k) {
+        if (rows[k].empty()) continue;
+        const double hk = row_area[k] / W;
+        double x = 0.0;
+        for (int idx : rows[k]) {
+            const Block& block = problem.blocks[static_cast<std::size_t>(idx)];
+            double w_i;
+            double h_i;
+            if (isSoft(block.type)) {
+                // aspect = w/h in [ar_min, ar_max] with w*h = area => feasible h band below;
+                // an infeasible row height clamps to the nearest band edge (doc comment, hpp).
+                const double h_min = std::sqrt(block.area / std::max(block.ar_max, kEps));
+                const double h_max = std::sqrt(block.area / std::max(block.ar_min, kEps));
+                h_i = std::min(h_max, std::max(h_min, hk));
+                w_i = block.area / std::max(h_i, kEps);
+            } else {
+                w_i = block.width;
+                h_i = block.height;
+            }
+            placement.rects[static_cast<std::size_t>(idx)] = Rect{x, y, w_i, h_i};
+            placement.aspect[static_cast<std::size_t>(idx)] = h_i > kEps ? w_i / h_i : 1.0;
+            x += w_i;
+        }
+        y += hk;
+    }
+    return placement;
+}
+
+void stampSoftAspectFromPlacement(const Problem& problem, const Placement& placement, PlacementState& state) {
+    if (state.soft_aspect.size() < problem.blocks.size()) {
+        state.soft_aspect.resize(problem.blocks.size(), 1.0);
+    }
+    for (std::size_t i = 0; i < problem.blocks.size() && i < placement.rects.size(); ++i) {
+        if (!isSoft(problem.blocks[i].type)) continue;
+        const Rect& r = placement.rects[i];
+        if (r.w <= kEps || r.h <= kEps) continue;
+        state.soft_aspect[i] = std::max(problem.blocks[i].ar_min,
+                                        std::min(problem.blocks[i].ar_max, r.w / r.h));
+    }
+}
+
 // ---- B5c move portfolio (.superpowers/sdd/b5-design.md §4), public primitives --------------------
 // Declared in placement_engine.hpp; defined here (outer namespace, NOT the anonymous namespace
 // above) so they satisfy the header's external-linkage declarations and are callable from test

@@ -1032,7 +1032,8 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
     return result;
 }
 
-SearchResult runHybridPlacementSearch(const Problem& problem, const SearchOptions& options) {
+SearchResult runHybridPlacementSearch(const Problem& problem, const SearchOptions& options,
+                                      const Placement* seed_placement) {
     // B5c: both legs' engines are constructed with the SAME move_portfolio_v2 boolean `options`
     // carries, so a hybrid leg's sp/bstar sub-runs stay consistent with the flag runLeg set (or
     // whatever a direct caller passed) -- see SearchOptions.move_portfolio_v2's doc comment.
@@ -1050,7 +1051,22 @@ SearchResult runHybridPlacementSearch(const Problem& problem, const SearchOption
     sp_options.time_budget_sec = options.time_budget_sec * 0.5;
     bstar_options.time_budget_sec = options.time_budget_sec * 0.25;
 
-    SearchResult sp_result = runPlacementSearch(problem, *sp, sp_options);
+    // L4b (case5-design.md §4-L4b): a caller-supplied seed placement replaces the sp sub-run's
+    // random initial state -- seedFromPlacement derives the sequence-pair ORDERING from the seed's
+    // rects, and the aspect stamp preserves its soft shapes (seedFromPlacement's baseState would
+    // otherwise reset them to ~1.0, decoding the shelf into squares). The rng handed to
+    // seedFromPlacement is a fresh sp_options.seed stream, mirroring how the unseeded 3-arg
+    // runPlacementSearch derives its own initial state; SequencePairEngine::seedFromPlacement never
+    // actually draws from it. nullptr reproduces the pre-L4b call byte-identically.
+    SearchResult sp_result;
+    if (seed_placement != nullptr) {
+        std::mt19937 seed_rng(sp_options.seed);
+        PlacementState sp_seed_state = sp->seedFromPlacement(problem, *seed_placement, seed_rng);
+        stampSoftAspectFromPlacement(problem, *seed_placement, sp_seed_state);
+        sp_result = runPlacementSearch(problem, *sp, sp_options, sp_seed_state);
+    } else {
+        sp_result = runPlacementSearch(problem, *sp, sp_options);
+    }
 
     // Leg 2 (bstar_a): sp's VALUE-BEST placement seeds bstar -- today's path, mechanics unchanged.
     // Re-decode derives soft dims from the ORIGINAL problem areas, so any FT inflation accepted by the sp leg's
@@ -1243,7 +1259,7 @@ SearchResult runPricingPortfolio(const Problem& problem, const std::string& engi
     // -- the engine's own per-instance flag is what mutate() actually reads (see SearchOptions.
     // move_portfolio_v2's doc comment for why the two must be set together).
     auto runLeg = [&](const SearchVariant& variant, const SearchOptions& leg_options,
-                      bool force_gated_pads = false) {
+                      bool force_gated_pads = false, const Placement* seed_placement = nullptr) {
         Problem p = problem;
         p.route_pricing_official = variant.pricing_official;
         p.abutment_credit = variant.abutment_credit;
@@ -1265,8 +1281,16 @@ SearchResult runPricingPortfolio(const Problem& problem, const std::string& engi
         SearchOptions opts = leg_options;
         opts.elite_admission_v2 = variant.elite_admission_v2;
         opts.move_portfolio_v2 = variant.move_portfolio_v2;
-        if (engine == "hybrid") return runHybridPlacementSearch(p, opts);
+        if (engine == "hybrid") return runHybridPlacementSearch(p, opts, seed_placement);
         std::unique_ptr<PlacementEngine> eng = makePlacementEngine(engine, opts.move_portfolio_v2);
+        // L4b: non-hybrid seeded path mirrors runHybridPlacementSearch's sp sub-run (see its own
+        // comment); nullptr (every pre-L4b caller) is byte-identical to the historical call.
+        if (seed_placement != nullptr) {
+            std::mt19937 seed_rng(opts.seed);
+            PlacementState seed_state = eng->seedFromPlacement(p, *seed_placement, seed_rng);
+            stampSoftAspectFromPlacement(p, *seed_placement, seed_state);
+            return runPlacementSearch(p, *eng, opts, seed_state);
+        }
         return runPlacementSearch(p, *eng, opts);
     };
 
@@ -1358,6 +1382,38 @@ SearchResult runPricingPortfolio(const Problem& problem, const std::string& engi
         const double M0 = std::max(0.0, T0 - leg0_sa_wall_sec);
         const int n_deep = deepLegCount(options.time_budget_sec, T0, M0);
         const std::vector<SearchVariant> deep_variants = deepVariants();
+        // L4b (case5-design.md §4-L4b): deterministic shelf-seed sweep, cheap-scored, best 2 kept
+        // as the initial states of the first 2 deep legs (the 3rd deep leg stays unseeded -- a
+        // diversity hedge, mirroring the design's "keep the best 1-2"). The W grid scales
+        // sqrt(total block area) by {0.85, 1.08, 1.30} -- on case5 (Σarea => base ~4.9k µm) this
+        // reproduces the design's own {4200, 5300, 6400} sweep while staying case-generic --
+        // clamped to MAX W. A shelf whose stacked rows overflow MAX self-deprioritizes via
+        // cheapScore's own out-of-outline penalty, so no explicit feasibility filter is needed.
+        // Cost: 12 shelfSeed+cheapScore calls, microseconds -- and only inside deep mode
+        // (budget-on), so budget-off paths never execute any of this.
+        std::vector<Placement> shelf_seeds;
+        {
+            double total_area = 0.0;
+            for (const auto& block : problem.blocks) total_area += block.area;
+            const double base_w = std::sqrt(std::max(total_area, 1.0));
+            const double w_factors[] = {0.85, 1.08, 1.30};
+            std::vector<std::pair<double, Placement>> scored;
+            for (int nrows = 3; nrows <= 6; ++nrows) {
+                for (double f : w_factors) {
+                    const double W = std::min(problem.outline_w, f * base_w);
+                    Placement pl = shelfSeed(problem, nrows, W);
+                    const double value = cheapScore(problem, pl).value;
+                    scored.emplace_back(value, std::move(pl));
+                }
+            }
+            std::stable_sort(scored.begin(), scored.end(),
+                             [](const std::pair<double, Placement>& a, const std::pair<double, Placement>& b) {
+                                 return a.first < b.first;
+                             });
+            for (std::size_t s = 0; s < scored.size() && s < 2; ++s) {
+                shelf_seeds.push_back(std::move(scored[s].second));
+            }
+        }
         for (int d = 0; d < n_deep; ++d) {
             const double elapsed =
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - phase1_start).count();
@@ -1367,7 +1423,9 @@ SearchResult runPricingPortfolio(const Problem& problem, const std::string& engi
             leg_options.iters = 2000000;
             leg_options.time_budget_sec = slice;
             const SearchVariant& variant = deep_variants[static_cast<std::size_t>(d) % deep_variants.size()];
-            SearchResult leg_result = runLeg(variant, leg_options, /*force_gated_pads=*/true);
+            const Placement* shelf =
+                static_cast<std::size_t>(d) < shelf_seeds.size() ? &shelf_seeds[static_cast<std::size_t>(d)] : nullptr;
+            SearchResult leg_result = runLeg(variant, leg_options, /*force_gated_pads=*/true, shelf);
             fold.admit(problem, leg_result, variant, options.seed, on_improved);
             ++deep_legs_run;
         }

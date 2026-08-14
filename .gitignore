@@ -38,3 +38,4 @@ test/edgefree_regression_bin
 submission/**/EarlyFloorplanning_with_GlobalRoute
 test/cheap_proxy_v2_regression_bin
 test/l3bc_regression_bin
+test/l4b_regression_bin
