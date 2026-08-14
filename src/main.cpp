@@ -194,6 +194,11 @@ int main(int argc, char** argv) {
         // default, model.hpp), so an absent flag keeps outlineSweep (search.cpp) byte-identical to
         // pre-L2a: no extra rung is ever tried.
         problem.ft_area_rung = hasFlag(argc, argv, "--ft-area-rung");
+        // L3a (overflow-gated pad ladder, case5-design.md §4-L3a, case5-batch1-brief.md): hidden/
+        // undocumented measurement flag, same precedent as above -- intentionally NOT in the usage
+        // banner. Default false (Problem.overflow_gated_pads's own default, model.hpp) keeps
+        // outlineSweep's pad loop unconditional (today's behavior) when absent.
+        problem.overflow_gated_pads = hasFlag(argc, argv, "--overflow-gated-pads");
 
         // B4.1 (route-pricing portfolio, b4-report.md): runs the requested engine under both the
         // official (B4) and retained pre-B4 router pricing, folding by value -- restores the

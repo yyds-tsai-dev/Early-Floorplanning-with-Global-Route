@@ -451,7 +451,18 @@ OutlineSweepResult outlineSweep(const Problem& problem, const Placement& base, c
     // targets/elite before dedupe (7 pads x 3 variants); tried_targets above and exactCached's own
     // placementKey cache both dedupe repeats (within this call and across the whole run/elites,
     // respectively). include_pads is a test-only escape hatch (default true, see search.hpp).
-    if (include_pads) {
+    //
+    // L3a (case5-design.md §4-L3a, case5-batch1-brief.md): behind problem.overflow_gated_pads
+    // (default false, model.hpp), skip this loop when the tight rung's own routed result ALREADY
+    // cleared overflow-free (open_routes==0 && channel_overflow_nets==0) -- the pads are a pure
+    // capacity-denominator play (officialOverflowPenalty's R, eval.cpp) against a penalty that is
+    // already 0 there, so they can only inflate outline_area. Guards on have_tight_routing too: if
+    // the tight rung failed anchoring, this falls back to running the pads unconditionally (today's
+    // behavior) rather than trusting a stale/default RoutingResult. Flag-off (or an ungated tight
+    // rung) reproduces the unconditional `if (include_pads)` exactly: the flag's default-false right
+    // operand of the `||` below makes the whole gate `include_pads` alone.
+    if (include_pads && (!problem.overflow_gated_pads || !have_tight_routing ||
+                          !(tight_routing.open_routes == 0 && tight_routing.channel_overflow_nets == 0))) {
         for (double pad : kPads) {
             double padded_w = std::min(problem.outline_w, tight_w + pad);
             double padded_h = std::min(problem.outline_h, tight_h + pad);

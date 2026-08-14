@@ -164,6 +164,17 @@ struct Problem {
     // route_pricing_official/abutment_credit/ft_pricing_aggressive/edge_soft_anchor/
     // undirected_bundles/edge_free above.
     bool ft_area_rung = false;
+    // L3a (overflow-gated pad ladder, case5-design.md §4-L3a, case5-batch1-brief.md): when set,
+    // outlineSweep's 21-rung integer-um pad ladder (kPads above `outlineSweep`, search.cpp) only
+    // runs when the tight rung's own routed result did NOT already clear overflow-free
+    // (open_routes==0 && channel_overflow_nets==0) -- when it did, the pads are a pure capacity-
+    // denominator play (officialOverflowPenalty's R, eval.cpp) against a penalty that is already 0,
+    // so they can only inflate outline_area. false (default) keeps the pad loop unconditional
+    // (today's behavior, gated only by `include_pads`) -- byte-identical to every pre-L3a
+    // outlineSweep call. NEVER parsed from the input CSV -- exists purely so main.cpp's hidden
+    // --overflow-gated-pads measurement flag can opt a run into it, same flag-gated-variant
+    // precedent as ft_area_rung above.
+    bool overflow_gated_pads = false;
 };
 
 struct Placement {
