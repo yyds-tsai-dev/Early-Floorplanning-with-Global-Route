@@ -1039,11 +1039,19 @@ std::vector<SearchVariant> defaultVariants() {
     };
 }
 
+// B2 (seed-sweep budget phase, .superpowers/sdd/b2-brief.md item 1) + P0a (phase-1 budget-bounded leg
+// launching, docs/research/2026-08-14-final-levers-verdicts-and-0811-intel.md §3.2/§5 item 1): shared
+// 1.5x safety margin. Hoisted to file scope (was local to shouldRunPhase2Leg) so runPricingPortfolio's
+// phase-1 loop can reuse the SAME constant for its own per-leg launch gate below, rather than a second
+// copy of the literal -- both gates exist for the same reason: a fresh leg's actual runtime is not
+// identical to its (or a sibling leg's) already-measured wall time, so 1.5x is safety headroom against
+// that variance, not a tight bound.
+constexpr double kPhase2LegMargin = 1.5;  // b2-brief.md item 1
+
 // B2 (seed-sweep budget phase, .superpowers/sdd/b2-brief.md item 1): see the doc comment in
 // search.hpp. Equality runs the leg (only strictly-less remaining skips), matching the brief's own
 // "<" wording.
 bool shouldRunPhase2Leg(double remaining_sec, double leg_phase1_wall_time_sec) {
-    constexpr double kPhase2LegMargin = 1.5;  // b2-brief.md item 1
     return remaining_sec >= kPhase2LegMargin * leg_phase1_wall_time_sec;
 }
 
@@ -1119,13 +1127,41 @@ SearchResult runPricingPortfolio(const Problem& problem, const std::string& engi
     phase1_options.time_budget_sec = 0.0;
     const auto phase1_start = std::chrono::steady_clock::now();
     std::vector<double> leg_wall_times(variants.size(), 0.0);
+    // P0a (phase-1 budget-bounded leg launching, docs/research/2026-08-14-final-levers-verdicts-and-
+    // 0811-intel.md §3.2/§5 item 1): case5 (30 SOFT blocks, 602 bundles) measured phase 1 ALONE at
+    // 828.8s wall against the official 900s per-case limit -- phase 1 previously launched the entire
+    // registry unconditionally regardless of options.time_budget_sec, so nothing warned that the
+    // registry would blow the budget until it already had. `phase1_max_leg_wall` is a running max of
+    // leg_wall_times[0..i-1] (updated in place below, no re-scan needed) -- the best available estimate
+    // of leg i's own cost before it runs, since leg i hasn't been measured yet. `phase1_legs_run`
+    // counts legs actually launched; the loop guard below is `i > 0`, so leg 0 can never be skipped
+    // (the anytime-output guarantee).
+    double phase1_max_leg_wall = 0.0;
+    int phase1_legs_run = 0;
     for (std::size_t i = 0; i < variants.size(); ++i) {
+        // Budget-off (options.time_budget_sec <= 0) short-circuits on the FIRST operand, so nothing
+        // past it -- the chrono call, the margin arithmetic -- is even evaluated: the explicit-iters/
+        // regression path (every regression suite) stays STRUCTURALLY untouched, not merely numerically
+        // -- every leg still launches unconditionally exactly as pre-P0a.
+        if (options.time_budget_sec > 0.0 && i > 0) {
+            const double elapsed =
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - phase1_start).count();
+            if (elapsed + kPhase2LegMargin * phase1_max_leg_wall > options.time_budget_sec) break;
+        }
         const auto leg_start = std::chrono::steady_clock::now();
         SearchResult leg_result = runLeg(variants[i], phase1_options);
         leg_wall_times[i] = std::chrono::duration<double>(std::chrono::steady_clock::now() - leg_start).count();
+        phase1_max_leg_wall = std::max(phase1_max_leg_wall, leg_wall_times[i]);
         fold.admit(problem, leg_result, variants[i], options.seed, on_improved);
+        phase1_legs_run = static_cast<int>(i) + 1;
     }
     const double t0 = std::chrono::duration<double>(std::chrono::steady_clock::now() - phase1_start).count();
+    // True iff every registry leg launched in phase 1 (always true when budget is off, since the guard
+    // above never fires). When false, phase 1 stopped early -- phase 2 below is skipped entirely in
+    // that case: the never-run legs' leg_wall_times entries are still 0, and shouldRunPhase2Leg(
+    // remaining, 0) is trivially true, so without this gate phase 2 would immediately relaunch the very
+    // leg whose cost just forced the phase-1 break -- the exact overshoot this fix removes.
+    const bool phase1_complete = phase1_legs_run == static_cast<int>(variants.size());
 
     // Phase 2 (B2 seed sweep, REPLACES B5a.2's continued-SA -- search.hpp's doc comment carries the
     // full T5/Cicirello rationale): independent full-registry restarts at seed
@@ -1139,7 +1175,10 @@ SearchResult runPricingPortfolio(const Problem& problem, const std::string& engi
     // round 1 admits zero legs and the sweep ends immediately, the same net effect.
     constexpr int kPhase2SeedStep = 1000;  // b2-brief.md item 1: far from hybrid's internal +1
     bool budget_phase2 = false;
-    if (options.time_budget_sec > 0.0) {
+    // P0a: additionally gated on phase1_complete -- see its own doc comment above for why an
+    // early-stopped phase 1 must skip phase 2 entirely rather than let shouldRunPhase2Leg see the
+    // never-run legs' zeroed leg_wall_times entries.
+    if (options.time_budget_sec > 0.0 && phase1_complete) {
         const auto phase2_start = std::chrono::steady_clock::now();
         for (int round = 1;; ++round) {
             const int seed_for_round = options.seed + kPhase2SeedStep * round;
@@ -1171,6 +1210,7 @@ SearchResult runPricingPortfolio(const Problem& problem, const std::string& engi
     result.exact_evaluations = fold.total_exact_evaluations;
     result.picked_seed = fold.picked_seed;
     result.legs_run = fold.legs_run;
+    result.phase1_legs_run = phase1_legs_run;
     return result;
 }
 

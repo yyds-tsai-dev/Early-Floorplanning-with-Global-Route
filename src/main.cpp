@@ -210,6 +210,7 @@ int main(int argc, char** argv) {
                   << " budget_phase2=" << (result.budget_phase2 ? "yes" : "no")
                   << " seed=" << result.picked_seed
                   << " legs_run=" << result.legs_run
+                  << " phase1_legs=" << result.phase1_legs_run << "/" << defaultVariants().size()
                   << " tau=" << tau
                   << " tau_w=" << tau_w
                   << " pool_tau=" << pool_tau

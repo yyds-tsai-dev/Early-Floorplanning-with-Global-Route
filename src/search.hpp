@@ -178,6 +178,20 @@ struct SearchResult {
     // to 1 for any SearchResult not produced by runPricingPortfolio (a raw single-engine call is
     // exactly one "leg" of search by this field's own definition).
     int legs_run = 1;
+    // P0a (phase-1 budget-bounded leg launching, docs/research/2026-08-14-final-levers-verdicts-and-
+    // 0811-intel.md §3.2/§5 item 1): number of defaultVariants() registry legs actually LAUNCHED
+    // during runPricingPortfolio's phase 1 alone (out of defaultVariants().size()) -- always the full
+    // registry size when the budget is off, or when it's on but phase 1 finishes within it; less than
+    // that when phase 1's own per-leg wall-clock gate (kPhase2LegMargin, search.cpp) stops launching
+    // further legs before the registry completes (case5's 828.8s-vs-900s overshoot, §3.2). Leg 0 always
+    // runs. When this is less than defaultVariants().size(), phase 2 never runs (gated on
+    // phase1_complete, search.cpp) regardless of remaining budget. Telemetry only -- surfaced in
+    // main.cpp's stderr summary as `phase1_legs=<n>/<total>`, immediately after `legs_run=`. Defaults
+    // to 0 for any SearchResult not produced by runPricingPortfolio -- same "not produced by
+    // runPricingPortfolio" precedent legs_run/picked_seed/etc. above already established, except this
+    // field's default is 0 (not 1) since "phase 1 of a registry" isn't a meaningful concept for a raw
+    // single-engine call.
+    int phase1_legs_run = 0;
 };
 
 // Exact-scoring callback shape used by the elite pass's exact_cache (search.cpp's `exactCached`

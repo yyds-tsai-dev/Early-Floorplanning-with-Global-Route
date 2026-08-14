@@ -270,6 +270,59 @@ void testAnytimeWriteFinalFileMatchesFinalBestOnRealCase() {
               << ", bytes=" << final_bytes.size() << ")\n";
 }
 
+// ---- P0a: phase-1 budget-bounded leg launching (docs/research/2026-08-14-final-levers-verdicts-
+// and-0811-intel.md §3.2/§5 item 1) -- case5's 828.8s-vs-900s phase-1 overshoot fix. All three tests
+// below reuse case0 (same "small/fast" real-case fixture as testBudgetOffIsPhase1Only et al. above).
+// A plain budget-off run measures case0's own full 10-leg phase-1 wall-clock at ~2.5s on an idle
+// machine (this task's own timing check), which is what T-c's budget below is calibrated against.
+
+void testT_aPhase1LegsRunFullRegistryWhenBudgetOff() {
+    // T-a: budget=0 (off) -> phase1_legs_run == defaultVariants().size() (full registry) -- the new
+    // per-leg gate must never even fire when the budget is off (see the STRUCTURAL untouched
+    // requirement in search.cpp's own comment on the guard).
+    Problem problem = parseProblem("test/2026 ICCAD_case.case0.csv");
+    SearchOptions options;  // defaults: iters=1000, seed=1, budget off
+    SearchResult result = runPricingPortfolio(problem, "hybrid", options);
+    assert(result.phase1_legs_run == static_cast<int>(defaultVariants().size()));
+    std::cout << "testT_aPhase1LegsRunFullRegistryWhenBudgetOff ok (phase1_legs_run="
+              << result.phase1_legs_run << ")\n";
+}
+
+void testT_bPhase1LegsRunStopsEarlyUnderTinyBudget() {
+    // T-b: tiny real-ish budget (0.05s, well under a single leg's own cost) -> phase1_legs_run >= 1
+    // (leg 0 is unconditional), a structurally valid SearchResult, and the call terminates promptly
+    // (phase 2 is skipped outright since phase1_complete is false). Wall-clock test -- no exact-value
+    // pins, generous assertions only, per this task's own instructions.
+    Problem problem = parseProblem("test/2026 ICCAD_case.case0.csv");
+    SearchOptions options;
+    options.time_budget_sec = 0.05;
+    SearchResult result = runPricingPortfolio(problem, "hybrid", options);
+    assert(result.phase1_legs_run >= 1);
+    assert(result.phase1_legs_run <= static_cast<int>(defaultVariants().size()));
+    assert(result.legs_run >= 1);
+    std::cout << "testT_bPhase1LegsRunStopsEarlyUnderTinyBudget ok (phase1_legs_run="
+              << result.phase1_legs_run << ", legs_run=" << result.legs_run
+              << ", value=" << result.best_score.value << ")\n";
+}
+
+void testT_cPhase1LegsRunFullRegistryUnderLargeBudget() {
+    // T-c: large budget on the same tiny fixture -> phase1_legs_run == full registry size (the new
+    // gate must never trip when there's ample time). The task brief's own example value is 3600s, but
+    // runPricingPortfolio's phase-2 seed sweep (unrelated to this task, pre-existing B2 behavior) is
+    // designed to keep consuming wall-clock until the remaining budget can't clear even its cheapest
+    // leg's margin -- REGARDLESS of how fast the legs themselves run -- so a literal 3600s budget
+    // would make this one test run for approximately 3600 real seconds. 12s is >4x case0's own
+    // measured ~2.5s full-registry phase-1 cost (this file's header comment), comfortable headroom to
+    // prove the "large enough budget never trips the gate" property without that pathological tail.
+    Problem problem = parseProblem("test/2026 ICCAD_case.case0.csv");
+    SearchOptions options;
+    options.time_budget_sec = 12.0;
+    SearchResult result = runPricingPortfolio(problem, "hybrid", options);
+    assert(result.phase1_legs_run == static_cast<int>(defaultVariants().size()));
+    std::cout << "testT_cPhase1LegsRunFullRegistryUnderLargeBudget ok (phase1_legs_run="
+              << result.phase1_legs_run << ", legs_run=" << result.legs_run << ")\n";
+}
+
 }  // namespace
 
 int main() {
@@ -283,6 +336,9 @@ int main() {
     testBudgetOffIsPhase1Only();
     testBudgetOnNeverRegressesBudgetOffAndFiresSeedSweep();
     testAnytimeWriteFinalFileMatchesFinalBestOnRealCase();
+    testT_aPhase1LegsRunFullRegistryWhenBudgetOff();
+    testT_bPhase1LegsRunStopsEarlyUnderTinyBudget();
+    testT_cPhase1LegsRunFullRegistryUnderLargeBudget();
     std::cout << "b2 regressions passed\n";
     return 0;
 }
