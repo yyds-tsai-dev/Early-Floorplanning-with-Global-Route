@@ -494,7 +494,8 @@ OutlineSweepResult outlineSweep(const Problem& problem, const Placement& base, c
     return best;
 }
 
-void finalizeFeedthrough(const Problem& problem, const PlacementEngine& engine, SearchResult& result) {
+void finalizeFeedthrough(const Problem& problem, const PlacementEngine& engine, SearchResult& result,
+                         int repair_attempts) {
     // B1 amendment (2026-07-24, research doc 2026-07-23 §2): always populate the legacy-paydown
     // fields, even on early return, so callers (runHybridPlacementSearch) never see an unset triple.
     result.legacy_paydown_score = result.best_score;
@@ -631,9 +632,11 @@ void finalizeFeedthrough(const Problem& problem, const PlacementEngine& engine, 
         // arrangement may still exist -- other engines find one). Jiggle the inflated
         // topology a bounded number of times; only geometrically legal candidates pay
         // for exact routing, and all commits go through the same paydown gate.
-        constexpr int kFinalizeRepairAttempts = 32;
+        // L3b (case5-design.md §4-L3b): the bound is now the `repair_attempts` parameter -- its
+        // declaration default (search.hpp) is the historical constexpr 32, and only budget-on
+        // callers pass anything else, so this loop is byte-identical whenever the budget is off.
         PlacementState repair = state;
-        for (int attempt = 0; attempt < kFinalizeRepairAttempts; ++attempt) {
+        for (int attempt = 0; attempt < repair_attempts; ++attempt) {
             engine.mutate(inflated, repair, rng);
             if (!engine.isValidState(inflated, repair)) continue;
             Placement cand = engine.decode(inflated, repair);
@@ -652,6 +655,19 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
     PlacementState initial = engine.initialState(problem, rng);
     return runPlacementSearch(problem, engine, options, initial);
 }
+
+// L3b (cost-aware elite/repair budgets, case5-design.md §4-L3b, .superpowers/sdd/case5-l3bc-
+// brief.md): sizing constants for the budget-ON machinery governor in runPlacementSearch below.
+// Derivation (M1-completion, case5 measured): the post-SA machinery (elite sweeps + finalize + B7)
+// is budgeted at kDeepMachineryShare of the leg's own time_budget_sec; one elite's full treatment
+// costs ~kDeepRungsPerElite exact evals (outlineSweep's margin ladder is 7 rungs with the pad loop
+// gated off -- deep legs force overflow_gated_pads -- times 2 sweeps per elite: raw + compacted;
+// cache hits make this an upper bound, which errs toward FEWER elites, the safe direction);
+// kDeepRepairShare bounds finalizeFeedthrough's repair jiggles the same way. Budget-off never reads
+// any of these (the governor's first operand short-circuits).
+constexpr double kDeepMachineryShare = 0.5;   // machinery <= half the leg slice
+constexpr double kDeepRungsPerElite = 14.0;   // 7 pads-gated rungs x 2 sweeps (raw + compacted)
+constexpr double kDeepRepairShare = 0.1;      // finalize repair jiggles <= 10% of the leg slice
 
 SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& engine, const SearchOptions& options,
                                 const PlacementState& initial_state) {
@@ -685,12 +701,38 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
         if (placement_out) *placement_out = effective;
         return score;
     };
+    // L3b (case5-design.md §4-L3b): wall cost of the one exact eval below -- the run's earliest
+    // available estimate of what each machinery exact eval will cost. The clock reads are
+    // unconditional (a steady_clock read is invisible in every output byte); every DECISION taken
+    // from the measurement is budget-gated below, per the brief's "every L3b/L3c branch begins with
+    // options.time_budget_sec > 0.0" rule.
+    double seed_exact_wall_sec = 0.0;
     {
         // Seed best from the effective placement, so best_placement/best_routing start consistent
         // even if this initial candidate's tight outline triggered the corrective grow.
+        const auto seed_eval_start = std::chrono::steady_clock::now();
         Placement effective;
         result.best_score = exactCached(result.best_placement, &result.best_routing, &effective);
         result.best_placement = effective;
+        seed_exact_wall_sec =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - seed_eval_start).count();
+    }
+
+    // L3b (cost-aware elite/repair budgets, case5-design.md §4-L3b, .superpowers/sdd/case5-l3bc-
+    // brief.md): budget-ON only -- budget-off keeps the historical constants verbatim (16 full-
+    // treatment elites, 32 finalize repair attempts), so every explicit-iters/regression path is
+    // byte-identical to pre-L3b. Under a budget, the elite count and repair bound shrink so the
+    // post-SA machinery fits kDeepMachineryShare/kDeepRepairShare of this run's own slice at the
+    // measured per-eval cost; clamps per the design (elites [3,16], repairs [4,32]).
+    std::size_t full_treatment_cap = 16;
+    int finalize_repair_attempts = 32;
+    if (options.time_budget_sec > 0.0 && seed_exact_wall_sec > 0.0) {
+        const double machinery_budget_sec = kDeepMachineryShare * options.time_budget_sec;
+        const double per_elite_sec = seed_exact_wall_sec * kDeepRungsPerElite;
+        full_treatment_cap = static_cast<std::size_t>(
+            std::min(16, std::max(3, static_cast<int>(machinery_budget_sec / per_elite_sec))));
+        finalize_repair_attempts = std::min(
+            32, std::max(4, static_cast<int>(kDeepRepairShare * options.time_budget_sec / seed_exact_wall_sec)));
     }
 
     std::vector<CheapCandidate> top_candidates;
@@ -832,6 +874,12 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
     // Report the iterations actually executed when time bounded the run; budget off keeps the
     // options.iters value stamped above, preserving the existing --iters summary line verbatim.
     if (options.time_budget_sec > 0.0) result.iterations = iters_run;
+    // L3c (case5-design.md §4-L3c step 1): SA-loop wall time -- budget_start is declared
+    // immediately before the loop, so this brackets exactly the loop (excludes the seed eval above
+    // and all machinery below). Stamped unconditionally: it is telemetry (never read by any
+    // decision in this function) and a clock read is invisible in every output byte.
+    result.sa_wall_time_sec =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - budget_start).count();
 
     // B6 (rank-fidelity instrumentation, .superpowers/sdd/b6-brief.md): snapshot the elite pool's
     // cheap-vs-exact rank fidelity BEFORE the elite loop below's own sweep/compaction/respace
@@ -865,7 +913,13 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
     // full contract. Both branches share the IDENTICAL loop body (T7 sweep raw + compacted +
     // maybeAdoptRespace) -- only the candidate source differs.
     if (!options.elite_admission_v2) {
-        for (const auto& candidate : top_candidates) {
+        // L3b (case5-design.md §4-L3b): budget-on caps how many pool members get the full
+        // treatment; top_candidates is cheap-value ascending (rememberBounded's sort), so the first
+        // N are the best N. Budget-off: full_treatment_cap == 16 == kTopCheapCandidates's v1 cap,
+        // so every pool member is treated exactly as before (byte-identical iteration).
+        const std::size_t v1_full_treatment = std::min(top_candidates.size(), full_treatment_cap);
+        for (std::size_t ci = 0; ci < v1_full_treatment; ++ci) {
+            const auto& candidate = top_candidates[ci];
             // T7 (design §1.4 elite path): replaces the single tight-stamp exactCached call with a
             // deterministic outline-margin sweep -- m=0.0 reproduces the exact prior single-eval
             // behavior, so this can only match or beat it (strictly Pareto-safe). Preference mirrors
@@ -898,9 +952,10 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
             maybeAdoptRespace(problem, exactCached, result);
         }
     } else {
-        constexpr std::size_t kFullTreatmentSize = 16;  // K_full (elite full-treatment slot count, unchanged)
+        // L3b (case5-design.md §4-L3b): the historical kFullTreatmentSize constexpr (16) is now the
+        // budget-governed full_treatment_cap above -- budget-off passes exactly 16, byte-identical.
         std::vector<EliteCandidate> full_set = buildEliteFullSet(top_candidates, exact_archive, result.best_placement,
-                                                                 insurance, kFullTreatmentSize, exactCached);
+                                                                 insurance, full_treatment_cap, exactCached);
 
         for (const auto& candidate : full_set) {
             OutlineSweepResult swept = outlineSweep(problem, candidate.placement, exactCached);
@@ -929,7 +984,8 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
     // loop, on the then-best -- "once per elite candidate is too expensive," mirroring why the
     // post-finalize pass below is also a single call, not per-candidate.
     maybeAdoptCapacityGapRungs(problem, exactCached, result);
-    finalizeFeedthrough(problem, engine, result);
+    // L3b: budget-off passes exactly the historical 32 (the parameter's declaration default).
+    finalizeFeedthrough(problem, engine, result, finalize_repair_attempts);
 
     // B3.1 (b3-report.md "Concerns" #1, honest finding carried forward as a follow-on task):
     // maybeAdoptRespace (inside the elite loop above) and finalizeFeedthrough above can both move
@@ -1054,6 +1110,11 @@ SearchResult runHybridPlacementSearch(const Problem& problem, const SearchOption
                        (legacy_diverged ? bstar_b_result.iterations : 0);
     result.exact_evaluations = sp_result.exact_evaluations + bstar_a_result.exact_evaluations +
                               (legacy_diverged ? bstar_b_result.exact_evaluations : 0);
+    // L3c (case5-design.md §4-L3c step 1): like iterations/exact_evaluations above, the hybrid
+    // leg's SA wall is the SUM across executed sub-runs (the picked leg's own stamp was overwritten
+    // by the whole-struct copy at the fold above, same as iterations).
+    result.sa_wall_time_sec = sp_result.sa_wall_time_sec + bstar_a_result.sa_wall_time_sec +
+                              (legacy_diverged ? bstar_b_result.sa_wall_time_sec : 0.0);
     return result;
 }
 
@@ -1095,6 +1156,17 @@ std::vector<SearchVariant> defaultVariants() {
     };
 }
 
+// L3c (deep mode, case5-design.md §4-L3c step 4, .superpowers/sdd/case5-l3bc-brief.md): see the doc
+// comment in search.hpp. Field order: {pricing_official, elite_admission_v2, abutment_credit,
+// move_portfolio_v2, ft_pricing_aggressive}.
+std::vector<SearchVariant> deepVariants() {
+    return {
+        SearchVariant{true, false, false, false, true},
+        SearchVariant{true, true, false, false, true},
+        SearchVariant{true, true, false, true, false},
+    };
+}
+
 // B2 (seed-sweep budget phase, .superpowers/sdd/b2-brief.md item 1) + P0a (phase-1 budget-bounded leg
 // launching, docs/research/2026-08-14-final-levers-verdicts-and-0811-intel.md §3.2/§5 item 1): shared
 // 1.5x safety margin. Hoisted to file scope (was local to shouldRunPhase2Leg) so runPricingPortfolio's
@@ -1111,11 +1183,27 @@ bool shouldRunPhase2Leg(double remaining_sec, double leg_phase1_wall_time_sec) {
     return remaining_sec >= kPhase2LegMargin * leg_phase1_wall_time_sec;
 }
 
+// L3c deep-mode arithmetic (case5-design.md §4-L3c steps 3-4): see the doc comments in search.hpp.
+bool deepModeTrigger(double time_budget_sec, std::size_t registry_size, double t0) {
+    return time_budget_sec > 0.0 && static_cast<double>(registry_size) * t0 > time_budget_sec;
+}
+
+int deepLegCount(double time_budget_sec, double t0, double m0) {
+    if (m0 <= 0.0) return 3;
+    const double raw = std::floor((time_budget_sec - t0) / (kPhase2LegMargin * m0));
+    return static_cast<int>(std::min(3.0, std::max(1.0, raw)));
+}
+
+double deepLegSlice(double time_budget_sec, double elapsed_sec, int legs_left, double m0) {
+    return std::max(0.0, (time_budget_sec - elapsed_sec) / std::max(1, legs_left) - kPhase2LegMargin * m0);
+}
+
 // B2 (seed-sweep budget phase + anytime output): see the doc comment in search.hpp.
 bool PortfolioFold::admit(const Problem& problem, const SearchResult& leg_result, const SearchVariant& variant,
                           int leg_seed, const AnytimeWriteFn& on_improved) {
     total_iterations += leg_result.iterations;
     total_exact_evaluations += leg_result.exact_evaluations;
+    total_sa_wall_sec += leg_result.sa_wall_time_sec;
     ++legs_run;
     bool improved = !have_result || paydownBetter(leg_result.best_routing, leg_result.best_score.value,
                                                    result.best_routing, result.best_score.value);
@@ -1154,7 +1242,8 @@ SearchResult runPricingPortfolio(const Problem& problem, const std::string& engi
     // copy (telemetry/consistency) AND makePlacementEngine's own second argument (placement_engine.hpp)
     // -- the engine's own per-instance flag is what mutate() actually reads (see SearchOptions.
     // move_portfolio_v2's doc comment for why the two must be set together).
-    auto runLeg = [&](const SearchVariant& variant, const SearchOptions& leg_options) {
+    auto runLeg = [&](const SearchVariant& variant, const SearchOptions& leg_options,
+                      bool force_gated_pads = false) {
         Problem p = problem;
         p.route_pricing_official = variant.pricing_official;
         p.abutment_credit = variant.abutment_credit;
@@ -1167,6 +1256,12 @@ SearchResult runPricingPortfolio(const Problem& problem, const std::string& engi
         // false and every leg's field is exactly variant.ft_pricing_aggressive, byte-identical to
         // pre-L2b.
         p.ft_pricing_aggressive = variant.ft_pricing_aggressive || problem.ft_pricing_aggressive;
+        // L3c (case5-design.md §4-L3c, .superpowers/sdd/case5-l3bc-brief.md): deep legs force the
+        // L3a pad gate on their leg-LOCAL Problem copy -- the gate is part of the deep-mode
+        // governor's arithmetic (kDeepRungsPerElite assumes it), while the global flag-off default
+        // stays untouched for every non-deep leg (force_gated_pads defaults false at every other
+        // call site, so `p.overflow_gated_pads` is exactly `problem.overflow_gated_pads` there).
+        if (force_gated_pads) p.overflow_gated_pads = true;
         SearchOptions opts = leg_options;
         opts.elite_admission_v2 = variant.elite_admission_v2;
         opts.move_portfolio_v2 = variant.move_portfolio_v2;
@@ -1202,12 +1297,24 @@ SearchResult runPricingPortfolio(const Problem& problem, const std::string& engi
     // (the anytime-output guarantee).
     double phase1_max_leg_wall = 0.0;
     int phase1_legs_run = 0;
+    // L3c (deep mode, case5-design.md §4-L3c step 3, .superpowers/sdd/case5-l3bc-brief.md): set
+    // right after leg 0 when its measured wall proves the FULL registry cannot fit the budget
+    // (variants.size() * T0 > budget) -- launching further phase-1 legs would then spend the whole
+    // budget on shallow iters-1000 legs (case5's 828.8s overshoot pathology); the freed budget goes
+    // to the deep legs below instead. leg0_sa_wall_sec carries leg 0's S0 for the M0 = T0 - S0
+    // machinery estimate. Budget-off can never set this (first operand short-circuits).
+    bool deep_mode = false;
+    double leg0_sa_wall_sec = 0.0;
     for (std::size_t i = 0; i < variants.size(); ++i) {
         // Budget-off (options.time_budget_sec <= 0) short-circuits on the FIRST operand, so nothing
         // past it -- the chrono call, the margin arithmetic -- is even evaluated: the explicit-iters/
         // regression path (every regression suite) stays STRUCTURALLY untouched, not merely numerically
         // -- every leg still launches unconditionally exactly as pre-P0a.
         if (options.time_budget_sec > 0.0 && i > 0) {
+            // L3c: deep mode ends phase 1 after leg 0 -- checked before P0a's elapsed gate since it
+            // is strictly more decisive (the whole registry provably cannot fit, not merely the
+            // next leg).
+            if (deep_mode) break;
             const double elapsed =
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - phase1_start).count();
             if (elapsed + kPhase2LegMargin * phase1_max_leg_wall > options.time_budget_sec) break;
@@ -1218,6 +1325,12 @@ SearchResult runPricingPortfolio(const Problem& problem, const std::string& engi
         phase1_max_leg_wall = std::max(phase1_max_leg_wall, leg_wall_times[i]);
         fold.admit(problem, leg_result, variants[i], options.seed, on_improved);
         phase1_legs_run = static_cast<int>(i) + 1;
+        if (i == 0) {
+            leg0_sa_wall_sec = leg_result.sa_wall_time_sec;
+            // L3c step 3 trigger, evaluated once, on leg 0's own measured wall (T0). Budget-off
+            // returns false on the helper's own first operand.
+            deep_mode = deepModeTrigger(options.time_budget_sec, variants.size(), leg_wall_times[0]);
+        }
     }
     const double t0 = std::chrono::duration<double>(std::chrono::steady_clock::now() - phase1_start).count();
     // True iff every registry leg launched in phase 1 (always true when budget is off, since the guard
@@ -1226,6 +1339,39 @@ SearchResult runPricingPortfolio(const Problem& problem, const std::string& engi
     // remaining, 0) is trivially true, so without this gate phase 2 would immediately relaunch the very
     // leg whose cost just forced the phase-1 break -- the exact overshoot this fix removes.
     const bool phase1_complete = phase1_legs_run == static_cast<int>(variants.size());
+
+    // L3c deep legs (case5-design.md §4-L3c steps 4-5, .superpowers/sdd/case5-l3bc-brief.md): the
+    // registry provably cannot fit the budget, so instead of more shallow iters-1000 legs, run
+    // N_deep = clamp(floor((budget - T0) / (kPhase2LegMargin * M0)), 1, 3) legs from deepVariants(),
+    // each at iters=2e6 with a real per-leg time_budget_sec -- runPlacementSearch's (iter & 63) wall
+    // check ends each SA loop, and the budget-on L3b governor sizes each leg's machinery. M0 =
+    // T0 - S0 is leg 0's measured NON-SA (machinery) wall: the irreducible per-leg overhead a slice
+    // must reserve on top of its SA time (kPhase2LegMargin's 1.5x absorbs leg-to-leg variance, same
+    // constant/reason as phase 2's own gate). Per-leg slice: (remaining budget) / (deep legs still
+    // to run) - kPhase2LegMargin * M0 -- arithmetically the brief's (budget - elapsed)/N_deep - margin
+    // for the first leg, and self-correcting for later legs when a leg under/overruns its slice.
+    // Anytime output: every deep leg folds through the same PortfolioFold::admit, so on_improved
+    // fires after each improving deep leg exactly as it did for leg 0 (the brief's requirement).
+    int deep_legs_run = 0;
+    if (options.time_budget_sec > 0.0 && deep_mode) {
+        const double T0 = leg_wall_times[0];
+        const double M0 = std::max(0.0, T0 - leg0_sa_wall_sec);
+        const int n_deep = deepLegCount(options.time_budget_sec, T0, M0);
+        const std::vector<SearchVariant> deep_variants = deepVariants();
+        for (int d = 0; d < n_deep; ++d) {
+            const double elapsed =
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - phase1_start).count();
+            const double slice = deepLegSlice(options.time_budget_sec, elapsed, n_deep - d, M0);
+            if (slice <= 0.0) break;
+            SearchOptions leg_options = options;
+            leg_options.iters = 2000000;
+            leg_options.time_budget_sec = slice;
+            const SearchVariant& variant = deep_variants[static_cast<std::size_t>(d) % deep_variants.size()];
+            SearchResult leg_result = runLeg(variant, leg_options, /*force_gated_pads=*/true);
+            fold.admit(problem, leg_result, variant, options.seed, on_improved);
+            ++deep_legs_run;
+        }
+    }
 
     // Phase 2 (B2 seed sweep, REPLACES B5a.2's continued-SA -- search.hpp's doc comment carries the
     // full T5/Cicirello rationale): independent full-registry restarts at seed
@@ -1242,7 +1388,10 @@ SearchResult runPricingPortfolio(const Problem& problem, const std::string& engi
     // P0a: additionally gated on phase1_complete -- see its own doc comment above for why an
     // early-stopped phase 1 must skip phase 2 entirely rather than let shouldRunPhase2Leg see the
     // never-run legs' zeroed leg_wall_times entries.
-    if (options.time_budget_sec > 0.0 && phase1_complete) {
+    // L3c step 5: !deep_mode extends that gate -- deep mode already spent the budget on deep legs.
+    // Redundant whenever variants.size() > 1 (deep mode broke phase 1 early, so phase1_complete is
+    // already false), but load-bearing for a 1-variant registry, where both could otherwise be true.
+    if (options.time_budget_sec > 0.0 && phase1_complete && !deep_mode) {
         const auto phase2_start = std::chrono::steady_clock::now();
         for (int round = 1;; ++round) {
             const int seed_for_round = options.seed + kPhase2SeedStep * round;
@@ -1275,6 +1424,11 @@ SearchResult runPricingPortfolio(const Problem& problem, const std::string& engi
     result.picked_seed = fold.picked_seed;
     result.legs_run = fold.legs_run;
     result.phase1_legs_run = phase1_legs_run;
+    result.deep_mode = deep_mode;
+    result.deep_legs_run = deep_legs_run;
+    // L3c: report the SUMMED SA wall across all folded legs (PortfolioFold accumulates it like
+    // total_iterations), overwriting the picked leg's own stamp the whole-struct copy carried.
+    result.sa_wall_time_sec = fold.total_sa_wall_sec;
     return result;
 }
 

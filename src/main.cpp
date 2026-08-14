@@ -266,6 +266,15 @@ int main(int argc, char** argv) {
                   << " seed=" << result.picked_seed
                   << " legs_run=" << result.legs_run
                   << " phase1_legs=" << result.phase1_legs_run << "/" << defaultVariants().size()
+                  // L3c (case5-design.md §4-L3c, .superpowers/sdd/case5-l3bc-brief.md): deep-mode
+                  // telemetry -- additive stderr fields only (no .cfg byte is affected); always
+                  // deep=0 deep_legs=0 on budget-off runs (the trigger short-circuits).
+                  << " deep=" << (result.deep_mode ? 1 : 0)
+                  << " deep_legs=" << result.deep_legs_run
+                  // sa_wall: the picked/folded result's summed SA-loop wall (search.hpp) -- gives
+                  // the M1 SA-vs-machinery split directly from one run's summary instead of
+                  // subtracting two differently-loaded runs (case5-l3bc-brief.md M1-completion).
+                  << " sa_wall=" << result.sa_wall_time_sec
                   << " undirected=" << undirected_arm
                   << " tau=" << tau
                   << " tau_w=" << tau_w

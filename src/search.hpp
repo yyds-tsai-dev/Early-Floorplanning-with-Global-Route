@@ -192,6 +192,25 @@ struct SearchResult {
     // field's default is 0 (not 1) since "phase 1 of a registry" isn't a meaningful concept for a raw
     // single-engine call.
     int phase1_legs_run = 0;
+    // L3c (deep mode, case5-design.md §4-L3c step 1, .superpowers/sdd/case5-l3bc-brief.md): wall
+    // seconds the SA loop itself consumed (mutate/decode/cheapScore/periodic-exact), EXCLUDING the
+    // seed exact eval before it and all post-SA machinery (elite sweeps, finalize, B7 rungs) after
+    // it. Stamped unconditionally by runPlacementSearch (budget on or off -- a clock read is
+    // invisible in every output byte) and SUMMED across sub-runs by runHybridPlacementSearch (like
+    // iterations), so a portfolio leg's value covers all its sub-runs' SA loops. Telemetry + deep-
+    // mode input: runPricingPortfolio reads leg 0's value as S0 to derive the machinery share
+    // M0 = T0 - S0 that sizes deep legs. Defaults 0 for any result not produced by those runners.
+    double sa_wall_time_sec = 0.0;
+    // L3c (deep mode, case5-design.md §4-L3c step 3, .superpowers/sdd/case5-l3bc-brief.md): true iff
+    // runPricingPortfolio's deep-mode trigger fired -- budget on AND leg 0's measured wall proves the
+    // full registry cannot fit the budget (variants.size() * T0 > time_budget_sec) -- so phase 1
+    // stopped after leg 0 and the freed budget went to deep_legs_run deepVariants() legs instead
+    // (each iters=2e6, per-leg time_budget_sec sized from M0, overflow_gated_pads forced). Both
+    // telemetry only -- surfaced in main.cpp's stderr summary as `deep=<0/1> deep_legs=<n>` after
+    // `phase1_legs=`; never read by scoring/caching logic. Budget-off runs can never set these (the
+    // trigger's first operand short-circuits), which is exactly what the L3bc regression suite pins.
+    bool deep_mode = false;
+    int deep_legs_run = 0;
 };
 
 // Exact-scoring callback shape used by the elite pass's exact_cache (search.cpp's `exactCached`
@@ -322,7 +341,13 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
 SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& engine, const SearchOptions& options,
                                 const PlacementState& initial_state);
 SearchResult runHybridPlacementSearch(const Problem& problem, const SearchOptions& options);
-void finalizeFeedthrough(const Problem& problem, const PlacementEngine& engine, SearchResult& result);
+// L3b (cost-aware repair budget, case5-design.md §4-L3b, .superpowers/sdd/case5-l3bc-brief.md):
+// `repair_attempts` bounds the inflated-topology jiggle loop (was the local constexpr
+// kFinalizeRepairAttempts = 32). The default IS that historical constant, so every pre-L3b caller
+// (tests included) and every budget-off call is byte-identical to before the parameter existed;
+// only runPlacementSearch's budget-on path passes a governed value (clamped [4,32]).
+void finalizeFeedthrough(const Problem& problem, const PlacementEngine& engine, SearchResult& result,
+                         int repair_attempts = 32);
 // B5a.2 (variant-registry portfolio, coordinator adjudication after B5a.1's sweep report --
 // .superpowers/sdd/b5a-report.md "B5a.2 addendum"): one point in the portfolio's search space --
 // which router pricing (B4.1) and which elite-admission mechanism (B5a.1) a leg runs under. Room to
@@ -377,6 +402,30 @@ struct SearchVariant {
 // (qa-draft Q4').
 std::vector<SearchVariant> defaultVariants();
 
+// L3c (deep mode, case5-design.md §4-L3c step 4, .superpowers/sdd/case5-l3bc-brief.md): the SEPARATE
+// 3-leg list deep mode draws from when the full registry provably cannot fit the budget --
+// (official,v1,credit-off,moves-off,ftagg-ON), (official,v2,credit-off,moves-off,ftagg-ON),
+// (official,v2,credit-off,moves-on,ftagg-off). The ftagg-ON entries are the mitigation for P0a's
+// phase-1 gate cutting registry legs 8/9 (the only default ftagg legs) first on an expensive
+// instance (design §3.3 item 2); credit stays off on all three (under --cheap-proxy-v2 the L1b
+// boundary-gap WL proxy makes the credit inert/double-counting, and deep legs are exactly the legs
+// a case5-shaped run would pair with that flag). NOT a reorder of defaultVariants() -- that registry
+// is untouched (case5-l3bc-brief.md "out of scope").
+std::vector<SearchVariant> deepVariants();
+
+// L3c deep-mode arithmetic (case5-design.md §4-L3c steps 3-4), pure helpers hoisted out of
+// runPricingPortfolio so they are directly unit-testable with case5-shaped numbers (same precedent
+// as shouldRunPhase2Leg above). All deterministic functions of their arguments.
+// Trigger: budget on AND leg 0's measured wall T0 proves the whole registry cannot fit.
+bool deepModeTrigger(double time_budget_sec, std::size_t registry_size, double t0);
+// N_deep = clamp(floor((budget - T0) / (kPhase2LegMargin * M0)), 1, 3); M0 <= 0 (machinery
+// unmeasurably small) takes the optimistic cap 3 -- the per-leg slice recheck still guards.
+int deepLegCount(double time_budget_sec, double t0, double m0);
+// Per-leg slice: (remaining budget) / (deep legs still to run) - kPhase2LegMargin * M0, floored at
+// 0 -- arithmetically the design's (budget - elapsed)/N_deep - margin for the first leg, and
+// self-correcting for later legs when an earlier one under/overran its slice.
+double deepLegSlice(double time_budget_sec, double elapsed_sec, int legs_left, double m0);
+
 // B2 (seed-sweep budget phase + anytime output, .superpowers/sdd/b2-brief.md items 1-2): callback
 // invoked by PortfolioFold::admit below whenever a newly folded-in leg becomes the running
 // fold-best -- runPricingPortfolio's caller (main.cpp) passes one that writes the current best cfg
@@ -407,6 +456,11 @@ struct PortfolioFold {
     int legs_run = 0;
     int total_iterations = 0;
     int total_exact_evaluations = 0;
+    // L3c (case5-l3bc-brief.md M1-completion): summed sa_wall_time_sec across ALL admitted legs
+    // (accumulated like total_iterations above), stamped into the portfolio result at the end so
+    // main.cpp's `sa_wall=` field reports the whole run's SA-vs-machinery split, not just the
+    // picked leg's.
+    double total_sa_wall_sec = 0.0;
     bool have_result = false;
 
     bool admit(const Problem& problem, const SearchResult& leg_result, const SearchVariant& variant, int leg_seed,
