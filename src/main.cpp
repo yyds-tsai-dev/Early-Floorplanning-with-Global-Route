@@ -211,6 +211,12 @@ int main(int argc, char** argv) {
         // unaffected and every leg's ft_pricing_aggressive is exactly variant.ft_pricing_aggressive,
         // byte-identical to pre-L2b.
         problem.ft_pricing_aggressive = hasFlag(argc, argv, "--ft-aggressive");
+        // L1 (cheap-tier objective realignment, case5-design.md §2.4/§4-L1,
+        // .superpowers/sdd/case5-l1-brief.md): hidden/undocumented measurement flag, same precedent
+        // as above -- intentionally NOT in the usage banner. Default false (Problem.cheap_proxy_v2's
+        // own default, model.hpp) keeps cheapScore/routeAndScoreAt (eval.cpp) byte-identical to
+        // pre-L1 when absent.
+        problem.cheap_proxy_v2 = hasFlag(argc, argv, "--cheap-proxy-v2");
 
         // B4.1 (route-pricing portfolio, b4-report.md): runs the requested engine under both the
         // official (B4) and retained pre-B4 router pricing, folding by value -- restores the

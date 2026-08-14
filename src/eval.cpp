@@ -117,6 +117,122 @@ double routeAwareProxyPenalty(const Problem& problem, const Placement& placement
     return penalty;
 }
 
+// L1a/L1c (cheap-tier objective realignment, case5-design.md §2.4/§4-L1a/§4-L1c,
+// .superpowers/sdd/case5-l1-brief.md): replaces v1's routeAwareProxyPenalty above -- the FT-bbox
+// loop AND the congestion term -- WHOLESALE under problem.cheap_proxy_v2. L1c sweeps cut lines
+// across both axes (design §4-L1c pseudo-code): vertical cuts are midpoints between consecutive
+// distinct block x-edges that lie strictly inside (0,w) (symmetric y-cuts inside (0,h)). Per cut,
+// `demand` is the net count of every bundle whose source/target CENTERS straddle the cut, and `cap`
+// is the raw 25*free-perpendicular-span channel capacity (routing.cpp:544-564's capacity unit),
+// clamped >=0 so an illegal mid-SA overlap (free span negative) cannot earn negative capacity.
+// Feedthrough has no capacity limit in routeProblem (routing.cpp:94-98) -- only priced by the
+// aggregate FT area (L1a) -- so demand a cut cannot carry through channels is charged as true
+// (hard) overflow ONLY when no soft block covers the cut; otherwise it becomes estimated
+// feedthrough load (est_ft_nets), distributed across the covering soft blocks weighted by their
+// perpendicular side (height for a vertical/x-cut, width for a horizontal/y-cut) -- the same
+// measure used to compute the covering deduction, per the design's own weighting. L1a then prices
+// est_ft_nets exactly as the exact tier's own aggregate FT term (routing.cpp:594-604's
+// rr.ft_area_sum recompute, eval.cpp's kBetaFt*max(0, ft_area_sum-OutlineArea) at the
+// routeAndScoreAt site below): kBetaFt*max(0.0, est_ft_area_sum - w*h). The v2 penalty returned is
+// exactly L1c's officialOverflowPenalty(hard_overflow/max(1,cap_total), w*h) + L1a's FT term --
+// nothing else (brief pinned facts 3/4). Pure and deterministic -- per-call locals only, no
+// statics -- so cheapScore's addend (below) and routeAndScoreAt's subtraction (eval.cpp) cancel
+// exactly regardless of which (w,h) this is called at.
+double routeAwareProxyPenaltyV2(const Problem& problem, const Placement& placement, double w, double h) {
+    const std::size_t n = problem.blocks.size();
+    std::vector<double> est_ft_nets(n, 0.0);
+    double hard_overflow = 0.0;
+    double cap_total = 0.0;
+
+    // One axis sweep shared by the vertical (x-cut) and horizontal (y-cut) passes. `vertical`
+    // selects the cut axis; `span` is that axis's own outline extent (w for x-cuts, h for y-cuts),
+    // used only to clip candidate cut coordinates to the open interval (0, span) per the design's
+    // "xs = ... intersect (0, w)" pseudo-code. The PERPENDICULAR extent (h for x-cuts, w for
+    // y-cuts) is what a covering block consumes from free channel span and what an FT-diverted
+    // block is weighted by.
+    auto sweep = [&](bool vertical, double span) {
+        std::vector<double> edges;
+        edges.reserve(2 * n);
+        for (std::size_t i = 0; i < n; ++i) {
+            const auto& r = placement.rects[i];
+            double lo = vertical ? r.x : r.y;
+            double hi = vertical ? r.right() : r.top();
+            if (lo > kEps && lo < span - kEps) edges.push_back(lo);
+            if (hi > kEps && hi < span - kEps) edges.push_back(hi);
+        }
+        std::sort(edges.begin(), edges.end());
+        edges.erase(std::unique(edges.begin(), edges.end(),
+                                 [](double a, double b) { return std::abs(a - b) < kEps; }),
+                    edges.end());
+
+        for (std::size_t k = 0; k + 1 < edges.size(); ++k) {
+            double cut = 0.5 * (edges[k] + edges[k + 1]);
+
+            double covered = 0.0;
+            std::vector<std::size_t> softs;
+            double soft_weight_total = 0.0;
+            for (std::size_t i = 0; i < n; ++i) {
+                const auto& r = placement.rects[i];
+                double lo = vertical ? r.x : r.y;
+                double hi = vertical ? r.right() : r.top();
+                if (lo < cut && cut < hi) {
+                    double perp = vertical ? r.h : r.w;
+                    covered += perp;
+                    if (isSoft(problem.blocks[i].type)) {
+                        softs.push_back(i);
+                        soft_weight_total += perp;
+                    }
+                }
+            }
+
+            double free_span = (vertical ? h : w) - covered;
+            double cap = std::max(0.0, 25.0 * free_span);
+            cap_total += cap;
+
+            double demand = 0.0;
+            for (const auto& bundle : problem.bundles) {
+                const auto& a = placement.rects[bundle.source];
+                const auto& b = placement.rects[bundle.target];
+                double ca = vertical ? a.cx() : a.cy();
+                double cb = vertical ? b.cx() : b.cy();
+                if ((ca < cut) != (cb < cut)) demand += bundle.nets;
+            }
+
+            double excess = std::max(0.0, demand - cap);
+            if (!softs.empty() && soft_weight_total > kEps) {
+                for (std::size_t i : softs) {
+                    double perp = vertical ? placement.rects[i].h : placement.rects[i].w;
+                    est_ft_nets[i] += excess * (perp / soft_weight_total);
+                }
+            } else {
+                // No soft block covers this cut (or the covering softs are all degenerate-width) --
+                // there is nowhere for the excess to feedthrough, so it is true channel overflow.
+                hard_overflow += excess;
+            }
+        }
+    };
+
+    sweep(/*vertical=*/true, w);
+    sweep(/*vertical=*/false, h);
+
+    // L1a: mirror routing.cpp:594-604's exact-tier aggregate FT recompute, using est_ft_nets in
+    // place of the routed rr.soft_feedthrough_nets.
+    double est_ft_area_sum = 0.0;
+    for (std::size_t i = 0; i < n; ++i) {
+        const Block& block = problem.blocks[i];
+        if (isSoft(block.type)) {
+            double base = block.ft_base_area > 0.0 ? block.ft_base_area : block.area;
+            double nets_i = est_ft_nets[i];
+            est_ft_area_sum += ftRequiredArea(base, ftExtend(nets_i, ftTierRate(block, nets_i)));
+        } else {
+            est_ft_area_sum += block.area;
+        }
+    }
+
+    double R = hard_overflow / std::max(1.0, cap_total);
+    return officialOverflowPenalty(R, w * h) + kBetaFt * std::max(0.0, est_ft_area_sum - w * h);
+}
+
 // Crude v1 whitespace/channel-demand proxy (design p1-design.md §1.3): for each bundle, reserve
 // area proportional to net count and the *aligned* axis distance between source/target centers
 // (min(dx,dy) -- zero when the pair is already adjacent on one axis, so no margin is charged).
@@ -188,16 +304,39 @@ Score cheapScore(const Problem& problem, const Placement& placement) {
     for (const auto& b : problem.bundles) {
         const auto& a = placement.rects[b.source];
         const auto& c = placement.rects[b.target];
-        double term = manhattan(a.cx(), a.cy(), c.cx(), c.cy()) * b.nets;
-        // B5b (abutment-credit cheap-score upgrade, .superpowers/sdd/b5-design.md §3.2): scale the
-        // WL proxy toward zero as (a,c) approach abutment. Gated behind problem.abutment_credit so
-        // credit-off reproduces cheapScore's pre-B5b arithmetic BYTE-IDENTICALLY -- the multiplier
-        // is skipped entirely via `if`, never merely multiplied by 1.0.
-        if (problem.abutment_credit) term *= (1.0 - abutmentCredit(a, c));
-        wire_proxy += term;
+        if (problem.cheap_proxy_v2) {
+            // L1b (boundary-gap WL proxy, case5-design.md §4-L1b, .superpowers/sdd/case5-l1-
+            // brief.md): facing-border separation -- zero when the pair already abuts, matching
+            // route_geometry.hpp:93-94's "a path of <2 nodes has 0 wirelength" -- replacing v1's
+            // centre-to-centre Manhattan distance below, which is blind to abutment. abutment_credit
+            // is INERT under v2 (not consulted): the credit exists to approximate exactly this gap
+            // and would double-count if also applied here.
+            double dx = std::max(0.0, std::max(a.x, c.x) - std::min(a.right(), c.right()));
+            double dy = std::max(0.0, std::max(a.y, c.y) - std::min(a.top(), c.top()));
+            wire_proxy += (dx + dy) * b.nets;
+        } else {
+            double term = manhattan(a.cx(), a.cy(), c.cx(), c.cy()) * b.nets;
+            // B5b (abutment-credit cheap-score upgrade, .superpowers/sdd/b5-design.md §3.2): scale
+            // the WL proxy toward zero as (a,c) approach abutment. Gated behind
+            // problem.abutment_credit so credit-off reproduces cheapScore's pre-B5b arithmetic
+            // BYTE-IDENTICALLY -- the multiplier is skipped entirely via `if`, never merely
+            // multiplied by 1.0.
+            if (problem.abutment_credit) term *= (1.0 - abutmentCredit(a, c));
+            wire_proxy += term;
+        }
     }
     score.wirelength = wire_proxy;
-    score.penalty = penalty + routeAwareProxyPenalty(problem, placement);
+    // L1 (case5-design.md §4-L1, .superpowers/sdd/case5-l1-brief.md): v2 replaces v1's
+    // routeAwareProxyPenalty (FT-bbox loop + congestion term) wholesale with
+    // routeAwareProxyPenaltyV2's cut-line-sweep FT/overflow estimate, at the SAME (w,h) this
+    // function already resolved above -- required so routeAndScoreAt's subtraction (same branch,
+    // same (w,h)) cancels this addend exactly (design invariant, brief pinned fact 1). An `if`,
+    // never a multiply-by-one, so flag-off stays byte-identical to pre-L1.
+    if (problem.cheap_proxy_v2) {
+        score.penalty = penalty + routeAwareProxyPenaltyV2(problem, placement, w, h);
+    } else {
+        score.penalty = penalty + routeAwareProxyPenalty(problem, placement);
+    }
     score.value = score.outline_area + problem.alpha * wire_proxy + score.penalty;
     return score;
 }
@@ -224,7 +363,16 @@ Score routeAndScoreAt(const Problem& problem, const Placement& placement, double
     // golden re-scorer (src/cfg_score.cpp, which independently reproduces the same
     // officialOverflowPenalty tail on the written .cfg). routeAwareProxyPenalty is deterministic, so
     // the recompute here is bit-identical to cheapScore's addend and cancels it exactly.
-    score.penalty -= routeAwareProxyPenalty(scoped, placement);
+    // L1 (case5-design.md §4-L1d, .superpowers/sdd/case5-l1-brief.md): branches identically to
+    // cheapScore's addend above (same flag, same (w,h) -- routeAndScoreAt's own parameters, proven
+    // bit-identical to what cheapScore(scoped, placement) resolves internally on every call path,
+    // per the L2 comment on cheapScore's (w,h) resolution above) so the pair cancels exactly and
+    // the exact tier is provably unchanged by this lever either way.
+    if (problem.cheap_proxy_v2) {
+        score.penalty -= routeAwareProxyPenaltyV2(scoped, placement, w, h);
+    } else {
+        score.penalty -= routeAwareProxyPenalty(scoped, placement);
+    }
     // C1 milestone: explicit plain W*H (the declared outline this call is scoping/scoring at),
     // overriding whatever cheapScore computed -- channels are interior to w*h, and FT expansion is
     // already captured by shrinkWrapOutline, so no margin term belongs in the official OutlineArea.

@@ -175,6 +175,23 @@ struct Problem {
     // --overflow-gated-pads measurement flag can opt a run into it, same flag-gated-variant
     // precedent as ft_area_rung above.
     bool overflow_gated_pads = false;
+    // L1 (cheap-tier objective realignment, case5-design.md §2.4/§4-L1,
+    // .superpowers/sdd/case5-l1-brief.md): solver-internal knob replacing cheapScore's v1 route-
+    // aware proxy (routeAwareProxyPenalty: a per-pair FT-bbox loop ~107x the entire real objective
+    // on case5, plus a congestion term that measures identically zero there, plus a centre-to-centre
+    // WL proxy blind to abutment) with scorer-unit surrogates of what the exact tier actually charges
+    // -- L1a's aggregate FT term (mirroring routing.cpp:594-604/eval.cpp:247), L1b's boundary-gap WL
+    // proxy (zero at abutment, matching route_geometry.hpp:93-94), and L1c's cut-line sweep that
+    // turns unroutable channel demand into estimated feedthrough load instead of a flat penalty
+    // (feedthrough has no capacity limit in routeProblem, routing.cpp:94-98). See eval.cpp's
+    // routeAwareProxyPenaltyV2 for the implementation and the exact cancellation argument with
+    // routeAndScoreAt. false (default) reproduces every pre-L1 cheapScore/routeAndScoreAt code path
+    // byte-identically: the v2 branches (an `if`, never a multiply-by-one) never execute. NEVER
+    // parsed from the input CSV (io.cpp does not touch this field) -- exists purely so main.cpp's
+    // hidden --cheap-proxy-v2 measurement flag can opt a run into it, same flag-gated-variant
+    // precedent as route_pricing_official/abutment_credit/ft_pricing_aggressive/edge_soft_anchor/
+    // undirected_bundles/edge_free/ft_area_rung/overflow_gated_pads above.
+    bool cheap_proxy_v2 = false;
 };
 
 struct Placement {
