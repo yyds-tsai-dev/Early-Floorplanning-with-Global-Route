@@ -218,6 +218,28 @@ std::vector<Bundle> mergeUndirectedBundles(const std::vector<Bundle>& bundles) {
     return out;
 }
 
+// P0b (L6 value-symmetric auto-merge rule, docs/research/2026-08-14-final-levers-verdicts-and-0811-
+// intel.md §3.3/§5 item 2, .superpowers/sdd/p0b-brief.md): same per-directed-pair-sum idiom as U2's
+// check above -- sum nets per ordered (source,target) key, then compare each key's sum against its
+// mirror's. parseProblem emits at most one bundle per nonzero matrix entry, so each directed sum is a
+// single value in practice, but summing is the robust contract for any input. Self-pairs (source ==
+// target) are trivially symmetric and skipped so they can never make an otherwise-symmetric matrix
+// fail. A pair whose mirror is entirely absent from `bundles` reads as sum 0, so a one-sided pair is
+// NOT symmetric (nonzero vs. 0). Empty input has no pairs to fail on, so it is vacuously true.
+bool bundlesValueSymmetric(const std::vector<Bundle>& bundles) {
+    std::map<std::pair<int, int>, long long> directed;
+    for (const auto& b : bundles) {
+        if (b.source == b.target) continue;  // self-pairs are trivially symmetric -- skip
+        directed[{b.source, b.target}] += b.nets;
+    }
+    for (const auto& [key, nets] : directed) {
+        auto mirror = directed.find({key.second, key.first});
+        long long mirror_nets = (mirror == directed.end()) ? 0 : mirror->second;
+        if (mirror_nets != nets) return false;
+    }
+    return true;
+}
+
 void writeCfg(const std::string& path, const Problem& problem, const Placement& placement,
               const RoutingResult& routing) {
     // B2 (anytime output, .superpowers/sdd/b2-brief.md item 2): write to a temp file next to `path`,

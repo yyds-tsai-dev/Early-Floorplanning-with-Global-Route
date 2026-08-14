@@ -127,11 +127,15 @@ struct Problem {
     // reference.html:459-460/641-643) instead of routing each matrix entry as its own directed bundle.
     // false (default) reproduces every pre-L6 code path byte-identically: parseProblem's per-entry
     // directed bundles pass straight through unmerged. NEVER parsed from the input CSV (io.cpp's
-    // parseProblem itself is untouched by L6) -- exists purely so main.cpp's hidden
-    // --undirected-bundles measurement flag can opt a run into the merge, applied as a POST-PARSE
-    // transform (not a parseProblem signature change, to avoid touching parseProblem's other direct
-    // callers), the same flag-gated-variant precedent as route_pricing_official/abutment_credit/
-    // ft_pricing_aggressive/edge_soft_anchor above.
+    // parseProblem itself is untouched by L6) -- exists purely so main.cpp sets it, applied as a
+    // POST-PARSE transform (not a parseProblem signature change, to avoid touching parseProblem's
+    // other direct callers). Originally an opt-in-only measurement flag (--undirected-bundles); as of
+    // P0b (docs/research/2026-08-14-final-levers-verdicts-and-0811-intel.md §3.3/§5 item 2,
+    // .superpowers/sdd/p0b-brief.md) main.cpp ALSO sets this true automatically -- absent both
+    // --undirected-bundles and the new --no-undirected-bundles force-off flag -- whenever
+    // io.hpp's bundlesValueSymmetric(problem.bundles) is true (the L6 auto-rule), same
+    // flag-gated-variant precedent as route_pricing_official/abutment_credit/ft_pricing_aggressive/
+    // edge_soft_anchor above.
     bool undirected_bundles = false;
     // L2 (edge-block true un-pinning / "edge-free" mode, docs/research/2026-07-30-final-levers-
     // design.md sections L2.1-L2.8): solver-internal knob that treats every EDGE block as a free

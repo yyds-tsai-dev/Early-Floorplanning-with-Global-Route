@@ -142,12 +142,38 @@ int main(int argc, char** argv) {
         problem.edge_soft_anchor = hasFlag(argc, argv, "--edge-soft-anchor");
         // L6 (undirected bundle merge, docs/research/2026-07-30-final-levers-design.md): hidden/
         // undocumented measurement flag, same precedent as --edge-soft-anchor above -- intentionally
-        // NOT in the usage banner. Default false (Problem.undirected_bundles's own default,
-        // model.hpp), so an absent flag keeps parseProblem's directed per-matrix-entry bundles and
-        // every downstream consumer byte-identical to pre-L6. When set, merges each unordered
-        // {source,target} pair into one Bundle (nets summed, direction normalized to min->max) AFTER
-        // parsing -- parseProblem itself (io.cpp) is never touched.
-        problem.undirected_bundles = hasFlag(argc, argv, "--undirected-bundles");
+        // NOT in the usage banner. When set, merges each unordered {source,target} pair into one
+        // Bundle (nets summed, direction normalized to min->max) AFTER parsing -- parseProblem itself
+        // (io.cpp) is never touched.
+        //
+        // P0b (L6 value-symmetric auto-merge rule, docs/research/2026-08-14-final-levers-verdicts-
+        // and-0811-intel.md §3.3/§5 item 2, .superpowers/sdd/p0b-brief.md): blanket default-on was
+        // REJECTED (measured Sigma +1.2% on the old 5 cases); the adopted form is an AUTOMATIC rule
+        // that fires only when io.hpp's bundlesValueSymmetric(problem.bundles) is true -- measured to
+        // fire exactly on the winners (case1/case5) and exclude every loser (case0/2/3/4/6/7). Because
+        // the contest harness invokes the binary BARE (no flags at all), this rule must be automatic
+        // for the auto-merge to ever engage in the real submission. Precedence, highest first:
+        //   1. --no-undirected-bundles (new hidden measurement flag, same not-in-usage-banner
+        //      precedent as the flags above): FORCE OFF -- never merge, regardless of symmetry. This
+        //      is the A/B force-off arm used to prove the auto-rule reproduces pre-P0b behavior
+        //      exactly on a case the auto-rule would otherwise fire on.
+        //   2. --undirected-bundles (existing flag): FORCE ON -- always merge.
+        //   3. Neither given: AUTO -- merge iff bundlesValueSymmetric(problem.bundles).
+        // `undirected_arm` records which of the four arms fired (off/flag/auto/forced-off) purely for
+        // the stderr summary line below; it does not affect behavior.
+        const bool undirected_forced_off = hasFlag(argc, argv, "--no-undirected-bundles");
+        const bool undirected_flag_on = hasFlag(argc, argv, "--undirected-bundles");
+        std::string undirected_arm;
+        if (undirected_forced_off) {
+            problem.undirected_bundles = false;
+            undirected_arm = "forced-off";
+        } else if (undirected_flag_on) {
+            problem.undirected_bundles = true;
+            undirected_arm = "flag";
+        } else {
+            problem.undirected_bundles = bundlesValueSymmetric(problem.bundles);
+            undirected_arm = problem.undirected_bundles ? "auto" : "off";
+        }
         if (problem.undirected_bundles) problem.bundles = mergeUndirectedBundles(problem.bundles);
         // L2 (edge-block true un-pinning / "edge-free" mode, docs/research/2026-07-30-final-levers-
         // design.md sections L2.1-L2.8): hidden/undocumented measurement flag, same precedent as
@@ -211,6 +237,7 @@ int main(int argc, char** argv) {
                   << " seed=" << result.picked_seed
                   << " legs_run=" << result.legs_run
                   << " phase1_legs=" << result.phase1_legs_run << "/" << defaultVariants().size()
+                  << " undirected=" << undirected_arm
                   << " tau=" << tau
                   << " tau_w=" << tau_w
                   << " pool_tau=" << pool_tau

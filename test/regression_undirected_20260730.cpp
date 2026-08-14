@@ -149,6 +149,65 @@ void testU8ConnValidatorCatchesMissingNet() {
     std::cout << "testU8ConnValidatorCatchesMissingNet ok\n";
 }
 
+// ---- U9: bundlesValueSymmetric pure-function contract (P0b, docs/research/2026-08-14-final-levers-
+// verdicts-and-0811-intel.md §3.3/§5 item 2, .superpowers/sdd/p0b-brief.md) -------------------------
+
+void testU9BundlesValueSymmetricContract() {
+    // exactly symmetric: A<->B (300 each way), A<->C (5 each way) -> true
+    std::vector<Bundle> symmetric = {
+        Bundle{0, 1, 300},  // A->B
+        Bundle{1, 0, 300},  // B->A
+        Bundle{0, 2, 5},    // A->C
+        Bundle{2, 0, 5},    // C->A
+    };
+    assert(bundlesValueSymmetric(symmetric));
+
+    // mirror missing entirely (B->A absent) -> false
+    std::vector<Bundle> mirror_missing = {
+        Bundle{0, 1, 300},  // A->B
+        Bundle{0, 2, 5},    // A->C
+        Bundle{2, 0, 5},    // C->A
+    };
+    assert(!bundlesValueSymmetric(mirror_missing));
+
+    // mirror present but value differs -> false
+    std::vector<Bundle> mirror_differs = {
+        Bundle{0, 1, 300},  // A->B
+        Bundle{1, 0, 299},  // B->A (off by one)
+    };
+    assert(!bundlesValueSymmetric(mirror_differs));
+
+    // empty -> vacuously true
+    assert(bundlesValueSymmetric({}));
+
+    // a self-pair entry alone -> true (self-pairs are skipped, no unordered pair to fail on)
+    std::vector<Bundle> self_pair_only = {
+        Bundle{0, 0, 42},
+    };
+    assert(bundlesValueSymmetric(self_pair_only));
+
+    std::cout << "testU9BundlesValueSymmetricContract ok\n";
+}
+
+// ---- U10: real-case adoption criterion (P0b §3.3/§5 item 2) -- pins the L6 auto-rule to the
+// measured winner set {case1, case5} and confirms it excludes the measured losers it touches
+// ({case0, case6, case7}; case5/6/7 live in the 20260811 dir, case0/1 in the 20260727 dir). --------
+
+void testU10RealCaseAdoptionCriterion() {
+    const std::string k0811Dir =
+        "/home/yyds/Early-Floorplanning-with-Global-Route/test/E_testcase_20260811/"
+        "testcase_upload_20260712/2026 ICCAD_case.case";
+
+    assert(bundlesValueSymmetric(parseProblem(newCasePath(1)).bundles));   // winner
+    assert(bundlesValueSymmetric(parseProblem(k0811Dir + "5.csv").bundles));  // winner
+
+    assert(!bundlesValueSymmetric(parseProblem(newCasePath(0)).bundles));       // loser
+    assert(!bundlesValueSymmetric(parseProblem(k0811Dir + "6.csv").bundles));   // loser
+    assert(!bundlesValueSymmetric(parseProblem(k0811Dir + "7.csv").bundles));   // loser
+
+    std::cout << "testU10RealCaseAdoptionCriterion ok\n";
+}
+
 }  // namespace
 
 int main() {
@@ -156,6 +215,8 @@ int main() {
     testU2SumPreservedOnNewCsvs();
     testU3SymmetricCase1MatrixHalves();
     testU8ConnValidatorCatchesMissingNet();
+    testU9BundlesValueSymmetricContract();
+    testU10RealCaseAdoptionCriterion();
     std::cout << "undirected bundle merge regressions passed\n";
     return 0;
 }
