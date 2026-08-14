@@ -205,6 +205,16 @@ void maybeAdoptCapacityGapRungs(const Problem& problem, const ExactCachedFn& exa
 
 void rememberBounded(std::vector<CheapCandidate>& pool, const Placement& placement, double value,
                      std::size_t cap) {
+    // L4a (case5-design.md §4-L4a, case5-batch1-brief.md): the pool below is kept sorted ASCENDING
+    // by value and truncated to `cap` after every insert, so once it is full, pool.back() is the
+    // WORST kept value. A candidate strictly worse than that can only be appended, sorted to the
+    // end, and dropped by the resize -- i.e. it can never actually enter the pool -- so skip the
+    // placementKey scan + string build + push_back + sort + resize below entirely for it. Strict `>`
+    // (not `>=`) so a tie against pool.back().value falls through to the full path unchanged: under
+    // the non-stable std::sort below, a tie's outcome is unspecified, and this early-out must not
+    // alter it. Provably a no-op transformation (see doc above): saves ~15-25% of SA iteration cost
+    // by removing a per-iteration ostringstream/copy/sort on a full pool.
+    if (pool.size() >= cap && value > pool.back().value) return;
     std::string key = placementKey(placement);
     for (const auto& candidate : pool) {
         if (candidate.key == key) return;
