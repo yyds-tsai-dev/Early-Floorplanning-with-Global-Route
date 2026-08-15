@@ -1273,7 +1273,8 @@ SearchResult runPricingPortfolio(const Problem& problem, const std::string& engi
     // -- the engine's own per-instance flag is what mutate() actually reads (see SearchOptions.
     // move_portfolio_v2's doc comment for why the two must be set together).
     auto runLeg = [&](const SearchVariant& variant, const SearchOptions& leg_options,
-                      bool force_gated_pads = false, const Placement* seed_placement = nullptr) {
+                      bool force_gated_pads = false, const Placement* seed_placement = nullptr,
+                      bool force_proxy_v2 = false) {
         Problem p = problem;
         p.route_pricing_official = variant.pricing_official;
         p.abutment_credit = variant.abutment_credit;
@@ -1292,6 +1293,17 @@ SearchResult runPricingPortfolio(const Problem& problem, const std::string& engi
         // stays untouched for every non-deep leg (force_gated_pads defaults false at every other
         // call site, so `p.overflow_gated_pads` is exactly `problem.overflow_gated_pads` there).
         if (force_gated_pads) p.overflow_gated_pads = true;
+        // L4c (M2 §1's sanctioned probe, docs/research/2026-08-15-case5-l1-m2-verdict-and-m1-wall-
+        // breakdown.md; measured 2026-08-15, docs/research/2026-08-15-l4c-deep-tuning-and-8case-
+        // battery.md): shelf-SEEDED deep legs run the v2 cheap proxy. M2 rejected v2 as a global
+        // default because its faithful gradients collapsed every seed into one basin family while
+        // v1's noisy FT-bbox term supplied exploration variance -- but ON TOP OF a shelf seed the
+        // basin is already chosen, and fidelity pays: same-load case5@600s A/B measured -21%/-24%
+        // at the shipping seed (60.4M/64.5M, the repo's two best case5 results). The UNSEEDED deep
+        // leg deliberately keeps v1 as the exploration hedge (the all-v2+all-seeded combo arm
+        // measured ~10M worse at seed 1), and non-deep legs are untouched (force_proxy_v2 defaults
+        // false at every other call site), so budget-off stays byte-identical.
+        if (force_proxy_v2) p.cheap_proxy_v2 = true;
         SearchOptions opts = leg_options;
         opts.elite_admission_v2 = variant.elite_admission_v2;
         opts.move_portfolio_v2 = variant.move_portfolio_v2;
@@ -1439,7 +1451,8 @@ SearchResult runPricingPortfolio(const Problem& problem, const std::string& engi
             const SearchVariant& variant = deep_variants[static_cast<std::size_t>(d) % deep_variants.size()];
             const Placement* shelf =
                 static_cast<std::size_t>(d) < shelf_seeds.size() ? &shelf_seeds[static_cast<std::size_t>(d)] : nullptr;
-            SearchResult leg_result = runLeg(variant, leg_options, /*force_gated_pads=*/true, shelf);
+            SearchResult leg_result = runLeg(variant, leg_options, /*force_gated_pads=*/true, shelf,
+                                             /*force_proxy_v2=*/shelf != nullptr);
             fold.admit(problem, leg_result, variant, options.seed, on_improved);
             ++deep_legs_run;
         }
