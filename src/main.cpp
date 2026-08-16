@@ -131,6 +131,13 @@ int main(int argc, char** argv) {
         // runPlacementSearch's exact_interval stays constant exactly as before B6 (hard byte-
         // identity acceptance gate). See SearchOptions.adaptive_interval's doc comment (search.hpp).
         options.adaptive_interval = hasFlag(argc, argv, "--adaptive-interval");
+        // D2 (portfolio internal-WL-weight ladder legs, docs/research/2026-08-13-external-levers-v3-
+        // survey.md §5-D2, shortlist #3): hidden/undocumented measurement flag, same precedent as
+        // --ft-aggressive/--cheap-proxy-v2 above -- intentionally NOT in the usage banner.
+        // SearchOptions.wl_ladder's own default false (search.hpp) keeps runPricingPortfolio's
+        // ladder-block gate (options.wl_ladder) false when absent, so the block is never entered and
+        // every existing caller/regression stays byte-identical to pre-D2.
+        options.wl_ladder = hasFlag(argc, argv, "--wl-ladder");
         double alpha = argDouble(argc, argv, "--alpha", problem.alpha);
         problem.alpha = alpha;
         std::string engine_name = argString(argc, argv, "--engine", "hybrid");
@@ -271,6 +278,12 @@ int main(int argc, char** argv) {
                   // deep=0 deep_legs=0 on budget-off runs (the trigger short-circuits).
                   << " deep=" << (result.deep_mode ? 1 : 0)
                   << " deep_legs=" << result.deep_legs_run
+                  // D2 (portfolio internal-WL-weight ladder legs, docs/research/2026-08-13-external-
+                  // levers-v3-survey.md §5-D2): ladder telemetry -- additive stderr field only (no
+                  // .cfg byte is affected); ladder_legs=0 whenever --wl-ladder is absent
+                  // (SearchOptions.wl_ladder defaults false) or the ladder block's own gate never
+                  // fires.
+                  << " ladder_legs=" << result.ladder_legs_run
                   // sa_wall: the picked/folded result's summed SA-loop wall (search.hpp) -- gives
                   // the M1 SA-vs-machinery split directly from one run's summary instead of
                   // subtracting two differently-loaded runs (case5-l3bc-brief.md M1-completion).

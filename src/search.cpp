@@ -1272,12 +1272,20 @@ SearchResult runPricingPortfolio(const Problem& problem, const std::string& engi
     // copy (telemetry/consistency) AND makePlacementEngine's own second argument (placement_engine.hpp)
     // -- the engine's own per-instance flag is what mutate() actually reads (see SearchOptions.
     // move_portfolio_v2's doc comment for why the two must be set together).
+    // D2 (portfolio internal-WL-weight ladder legs, docs/research/2026-08-13-external-levers-v3-
+    // survey.md §5-D2, shortlist #3): `alpha_mult` defaults to 1.0, so every pre-D2 call site
+    // (none of which pass it) keeps `p.alpha` exactly `problem.alpha`, byte-identical to before this
+    // parameter existed. Only the ladder block below (after deep mode, before phase 2) passes a
+    // rung factor > 1.0, to price internal wirelength more heavily during that leg's OWN SA search --
+    // the leg's returned score is under the inflated alpha and is re-scored under the TRUE problem
+    // before folding (see the ladder block's own comment).
     auto runLeg = [&](const SearchVariant& variant, const SearchOptions& leg_options,
                       bool force_gated_pads = false, const Placement* seed_placement = nullptr,
-                      bool force_proxy_v2 = false) {
+                      bool force_proxy_v2 = false, double alpha_mult = 1.0) {
         Problem p = problem;
         p.route_pricing_official = variant.pricing_official;
         p.abutment_credit = variant.abutment_credit;
+        p.alpha *= alpha_mult;
         // L2b (case5-design.md §4-L2b part 1, case5-batch1-brief.md): the incoming `problem`'s own
         // ft_pricing_aggressive (set by main.cpp's hidden --ft-aggressive flag; false otherwise,
         // model.hpp's default) ORs into every leg's overwrite, forcing the aggressive FT marginal on
@@ -1458,6 +1466,73 @@ SearchResult runPricingPortfolio(const Problem& problem, const std::string& engi
         }
     }
 
+    // D2 (portfolio internal-WL-weight ladder legs, docs/research/2026-08-13-external-levers-v3-
+    // survey.md §5-D2, shortlist #3): hidden --wl-ladder flag (main.cpp -> SearchOptions.wl_ladder,
+    // search.hpp). Runs up to 2 "ladder legs" re-searching the best-so-far variant (fold.winner) with
+    // its leg-local Problem's alpha internally multiplied by a rung factor {2.0, 4.0} -- pricing
+    // internal wirelength more heavily inside that leg's OWN SA search, structurally distinct from
+    // both the deep-mode legs above (different variant registry, iters, pad gate) and phase 2's
+    // seed-sweep below (same alpha, different seed). Gated exactly like phase 2: budget on,
+    // phase1_complete (an early-stopped phase 1 must not spend budget here either), !deep_mode (deep
+    // mode already spent the budget on deep legs).
+    //
+    // WINNER-INDEX NOTE: the spec calls for gating each leg on shouldRunPhase2Leg(remaining,
+    // leg_wall_times[winner_index]), where winner_index is fold.winner's OWN phase-1 index -- but
+    // SearchVariant has no equality operator and phase-1 legs are only distinguished by their vector
+    // index during the phase-1 loop above, not retained anywhere after folding. Recovering that index
+    // here is therefore not cheap, so this block gates on leg_wall_times[0] instead (leg 0's own
+    // measured wall) -- the same conservative floor deep mode's own trigger arithmetic already uses,
+    // and leg 0 always runs (the anytime-output guarantee), so it is always a valid measurement.
+    //
+    // Each leg's SA search runs under the INFLATED alpha (runLeg's new alpha_mult parameter, applied
+    // to the leg-local Problem copy only -- the outer `problem` is never mutated), so leg_result's
+    // best_score/best_routing describe the WRONG (rung-scaled) objective. Before folding, re-score
+    // leg_result.best_placement under the TRUE `problem` via the same exactScore (eval.hpp) the
+    // elite pass's exactCached wraps (mirrors finalizeFeedthrough's own direct exactScore calls
+    // above, search.cpp), and overwrite best_score/best_routing with the true-alpha result --
+    // best_placement itself is left as the leg returned it, per this lever's spec. fold.admit's
+    // existing value-gated paydownBetter then adjudicates the re-scored leg exactly like any other
+    // leg (including an invalid/open-route re-score, which the gate simply loses against the
+    // incumbent -- no special-casing needed).
+    //
+    // FLAG OFF: options.wl_ladder defaults false (SearchOptions, search.hpp), so this block's first
+    // operand is never both true -- the block is never entered, `ladder_legs_run`/`ladder_wall_sec`
+    // stay 0, and every existing caller/regression is byte-identical to pre-D2.
+    int ladder_legs_run = 0;
+    // `ladder_wall_sec` (0 when the block above never runs) is fed into phase 2's own `remaining`
+    // calculation below, exactly like `t0` -- phase 2's pre-existing gate is `phase1_complete &&
+    // !deep_mode` (the SAME condition the ladder block itself checks, MINUS wl_ladder), so a
+    // wl_ladder run can fall through into phase 2 immediately afterward; without this, phase 2's
+    // budget bookkeeping would not know the ladder block already spent wall-clock time and could
+    // overrun the total budget.
+    double ladder_wall_sec = 0.0;
+    if (options.time_budget_sec > 0.0 && options.wl_ladder && phase1_complete && !deep_mode) {
+        constexpr double kLadderAlphaMults[] = {2.0, 4.0};
+        // Far from phase 2's +1000-per-round seed step and hybrid's own internal +1 offset
+        // (runHybridPlacementSearch), so a ladder seed can never collide with either.
+        constexpr int kLadderSeedStep = 500;
+        const auto ladder_start = std::chrono::steady_clock::now();
+        for (int ladder_index = 0; ladder_index < 2; ++ladder_index) {
+            const double elapsed_ladder =
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - ladder_start).count();
+            const double remaining = options.time_budget_sec - t0 - elapsed_ladder;
+            if (!shouldRunPhase2Leg(remaining, leg_wall_times[0])) continue;
+            SearchOptions leg_options = options;
+            leg_options.seed = options.seed + kLadderSeedStep * ladder_index;
+            SearchResult leg_result =
+                runLeg(fold.winner, leg_options, /*force_gated_pads=*/false, /*seed_placement=*/nullptr,
+                      /*force_proxy_v2=*/false, kLadderAlphaMults[ladder_index]);
+            RoutingResult true_routing;
+            Score true_score = exactScore(problem, leg_result.best_placement, &true_routing);
+            leg_result.best_score = true_score;
+            leg_result.best_routing = true_routing;
+            fold.admit(problem, leg_result, fold.winner, leg_options.seed, on_improved);
+            ++ladder_legs_run;
+        }
+        ladder_wall_sec =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - ladder_start).count();
+    }
+
     // Phase 2 (B2 seed sweep, REPLACES B5a.2's continued-SA -- search.hpp's doc comment carries the
     // full T5/Cicirello rationale): independent full-registry restarts at seed
     // options.seed+1000*round, round=1,2,3,... -- each leg individually gated by shouldRunPhase2Leg
@@ -1484,7 +1559,9 @@ SearchResult runPricingPortfolio(const Problem& problem, const std::string& engi
             for (std::size_t i = 0; i < variants.size(); ++i) {
                 const double elapsed_phase2 =
                     std::chrono::duration<double>(std::chrono::steady_clock::now() - phase2_start).count();
-                const double remaining = options.time_budget_sec - t0 - elapsed_phase2;
+                // D2: also subtract the ladder block's own wall-clock spend (0 when --wl-ladder is
+                // absent) -- see ladder_wall_sec's own doc comment above.
+                const double remaining = options.time_budget_sec - t0 - ladder_wall_sec - elapsed_phase2;
                 if (!shouldRunPhase2Leg(remaining, leg_wall_times[i])) continue;
                 SearchOptions leg_options = options;
                 leg_options.time_budget_sec = 0.0;  // independent restart: run to completion
@@ -1511,6 +1588,7 @@ SearchResult runPricingPortfolio(const Problem& problem, const std::string& engi
     result.phase1_legs_run = phase1_legs_run;
     result.deep_mode = deep_mode;
     result.deep_legs_run = deep_legs_run;
+    result.ladder_legs_run = ladder_legs_run;
     // L3c: report the SUMMED SA wall across all folded legs (PortfolioFold accumulates it like
     // total_iterations), overwriting the picked leg's own stamp the whole-struct copy carried.
     result.sa_wall_time_sec = fold.total_sa_wall_sec;

@@ -64,6 +64,18 @@ struct SearchOptions {
     // makePlacementEngine at construction time -- runLeg is the one production call site that keeps
     // the two in sync; a direct caller of runPlacementSearch bypassing runLeg must do the same.
     bool move_portfolio_v2 = false;
+    // D2 (portfolio internal-WL-weight ladder legs, docs/research/2026-08-13-external-levers-v3-
+    // survey.md §5-D2, shortlist #3): when true (main.cpp's hidden --wl-ladder flag), runPricingPortfolio
+    // runs up to 2 additional "ladder" legs after its deep-mode block -- each re-running the
+    // best-so-far variant with its own leg-local Problem copy's alpha internally multiplied by a rung
+    // factor (2.0, then 4.0), then re-scoring the leg's result under the TRUE (unmultiplied) alpha
+    // before folding. A search-behavior knob (which legs a budgeted run tries), hence SearchOptions
+    // rather than Problem -- same reasoning as adaptive_interval/elite_admission_v2/move_portfolio_v2
+    // above. DEFAULT FALSE: false must keep runPricingPortfolio's ladder-block gate
+    // (options.time_budget_sec > 0.0 && options.wl_ladder && ...) false, so the block is never
+    // entered and every existing caller/regression stays byte-identical to pre-D2 (hard acceptance
+    // gate, same discipline as this struct's other flags).
+    bool wl_ladder = false;
 };
 
 struct SearchResult {
@@ -211,6 +223,15 @@ struct SearchResult {
     // trigger's first operand short-circuits), which is exactly what the L3bc regression suite pins.
     bool deep_mode = false;
     int deep_legs_run = 0;
+    // D2 (portfolio internal-WL-weight ladder legs, docs/research/2026-08-13-external-levers-v3-
+    // survey.md §5-D2): number of ladder legs actually run and folded -- 0 whenever --wl-ladder is
+    // absent (SearchOptions.wl_ladder defaults false) or the ladder block's own gate
+    // (phase1_complete && !deep_mode, plus each leg's own shouldRunPhase2Leg check) never fires.
+    // Telemetry only -- surfaced in main.cpp's stderr summary as `ladder_legs=<n>`, immediately after
+    // `deep_legs=`; never read by scoring/caching logic. Defaults 0 for any SearchResult not produced
+    // by runPricingPortfolio's own explicit fold-tracking, same precedent deep_legs_run/phase1_legs_run
+    // above already established.
+    int ladder_legs_run = 0;
 };
 
 // Exact-scoring callback shape used by the elite pass's exact_cache (search.cpp's `exactCached`
