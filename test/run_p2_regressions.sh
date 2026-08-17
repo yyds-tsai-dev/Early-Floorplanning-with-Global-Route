@@ -7,7 +7,7 @@ make >/dev/null
 g++ -std=c++17 -O2 -Wall -Wextra -pedantic \
     test/regression_p2_20260707.cpp \
     src/routing.cpp src/eval.cpp src/io.cpp src/validate.cpp \
-    src/placement_engine.cpp src/search.cpp src/floorplan.cpp src/respace.cpp \
+    src/placement_engine.cpp src/search.cpp src/wl_redistribute.cpp src/floorplan.cpp src/respace.cpp \
     -o test/p2_regression_bin
 
 ./test/p2_regression_bin

@@ -12,7 +12,7 @@ make >/dev/null
 g++ -std=c++17 -O2 -Wall -Wextra -pedantic -I. \
     test/regression_cheap_proxy_v2.cpp \
     src/cfg_score.cpp src/eval.cpp src/io.cpp src/placement_engine.cpp src/respace.cpp \
-    src/routing.cpp src/search.cpp src/validate.cpp \
+    src/routing.cpp src/search.cpp src/wl_redistribute.cpp src/validate.cpp \
     -o test/cheap_proxy_v2_regression_bin
 
 ./test/cheap_proxy_v2_regression_bin

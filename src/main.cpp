@@ -224,6 +224,13 @@ int main(int argc, char** argv) {
         // own default, model.hpp) keeps cheapScore/routeAndScoreAt (eval.cpp) byte-identical to
         // pre-L1 when absent.
         problem.cheap_proxy_v2 = hasFlag(argc, argv, "--cheap-proxy-v2");
+        // C1a (fixed-topology WL-driven whitespace redistribution, .superpowers/sdd/c1-design-
+        // 20260817.md §6): hidden/undocumented measurement flag, same precedent as above --
+        // intentionally NOT in the usage banner. Default false (Problem.wl_redistribute's own
+        // default, model.hpp) keeps both search.cpp call sites' `if (problem.wl_redistribute)` gate
+        // false when absent, so maybeAdoptWlRedistribute never runs and every existing
+        // caller/regression stays byte-identical to pre-C1a.
+        problem.wl_redistribute = hasFlag(argc, argv, "--wl-redistribute");
 
         // B4.1 (route-pricing portfolio, b4-report.md): runs the requested engine under both the
         // official (B4) and retained pre-B4 router pricing, folding by value -- restores the
@@ -306,7 +313,16 @@ int main(int argc, char** argv) {
                   << " channel_overflow_nets=" << result.best_routing.channel_overflow_nets
                   << " feedthrough_mismatch=" << result.best_routing.feedthrough_mismatch
                   << " open_routes=" << result.best_routing.open_routes
-                  << " validation=" << (validation.ok ? "ok" : "fail") << "\n";
+                  << " validation=" << (validation.ok ? "ok" : "fail");
+        // C1a (fixed-topology WL-driven whitespace redistribution, .superpowers/sdd/c1-design-
+        // 20260817.md §6): additive stderr fields, printed ONLY when --wl-redistribute is set -- a
+        // flag-off run's summary line is byte-identical to pre-C1a (no .cfg byte is ever affected
+        // either way; this is stderr-only telemetry).
+        if (problem.wl_redistribute) {
+            std::cerr << " wl_rungs_tried=" << result.wl_rungs_tried
+                      << " wl_adoptions=" << result.wl_adoptions;
+        }
+        std::cerr << "\n";
         for (const auto& msg : validation.messages) std::cerr << "validate: " << msg << "\n";
         return validation.ok && result.best_routing.open_routes == 0 ? 0 : 1;
     } catch (const std::exception& e) {

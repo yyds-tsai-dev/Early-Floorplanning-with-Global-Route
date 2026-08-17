@@ -13,6 +13,7 @@
 #include "rank_stats.hpp"
 #include "respace.hpp"
 #include "validate.hpp"
+#include "wl_redistribute.hpp"
 
 namespace efgr {
 namespace {
@@ -199,6 +200,49 @@ void maybeAdoptCapacityGapRungs(const Problem& problem, const ExactCachedFn& exa
             result.best_routing = candidate_routing;
         }
     }
+}
+
+// C1a (fixed-topology WL-driven whitespace redistribution, .superpowers/sdd/c1-design-20260817.md
+// §2): ranks/tries `wlRedistributeIterates`' up-to-3 sweep rungs (sweeps 1, 2, final) PLUS one
+// shrink-wrap variant of the final rung (outline_w/h reset to 0 so exactScore's own unset-path
+// re-minimizes the declared outline against the redistributed geometry, same "reset stamp, let
+// exactScore recompute" discipline compactTowardOrigin/applyDemandsAndLegalize already use),
+// deduped by placementKey BEFORE exactCached (so a rung byte-identical to one already tried this
+// call is a free skip, not a second exact eval) -- at most 4 real exact evals per invocation (design
+// §2 budget). Adopts each candidate under the SAME outlineSweepBetter preference every other rung in
+// this file uses; Pareto-safe by construction, same precedent as maybeAdoptCapacityGapRungs above.
+// ONLY ever called from behind `if (problem.wl_redistribute)` at both call sites below -- never
+// gated internally -- so a flag-off run never even enters this function (design §6: "an `if`, never
+// a no-op call").
+void maybeAdoptWlRedistribute(const Problem& problem, const ExactCachedFn& exactCached, SearchResult& result) {
+    std::vector<Placement> iterates = wlRedistributeIterates(problem, result.best_placement);
+    if (iterates.empty()) return;  // pre-gate: nothing moved / not applicable -- zero evals
+
+    std::vector<std::string> tried_keys;
+    auto tryCandidate = [&](const Placement& candidate) {
+        std::string key = placementKey(candidate);
+        for (const auto& seen : tried_keys) {
+            if (seen == key) return;
+        }
+        tried_keys.push_back(key);
+        ++result.wl_rungs_tried;
+        RoutingResult candidate_routing;
+        Placement candidate_effective;
+        Score candidate_score = exactCached(candidate, &candidate_routing, &candidate_effective);
+        if (outlineSweepBetter(candidate_routing, candidate_score.value, result.best_routing, result.best_score.value)) {
+            result.best_score = candidate_score;
+            result.best_placement = candidate_effective;
+            result.best_routing = candidate_routing;
+            ++result.wl_adoptions;
+        }
+    };
+
+    for (const auto& iterate : iterates) tryCandidate(iterate);
+
+    Placement shrink_wrapped = iterates.back();
+    shrink_wrapped.outline_w = 0.0;
+    shrink_wrapped.outline_h = 0.0;
+    tryCandidate(shrink_wrapped);
 }
 
 }  // namespace
@@ -980,6 +1024,12 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
 
     (void)best_state;
     (void)current_place;
+    // C1a (fixed-topology WL-driven whitespace redistribution, .superpowers/sdd/c1-design-
+    // 20260817.md §2): BEFORE the B7 capacity rungs below -- C1 tightens toward the wire-weighted
+    // median, B7 widens interior gaps for capacity; running C1 first means B7's profit key reads
+    // post-C1 routing and gets the last word on any overflow C1's tightening creates. `if`, never a
+    // no-op call (design §6): a flag-off run never enters maybeAdoptWlRedistribute at all.
+    if (problem.wl_redistribute) maybeAdoptWlRedistribute(problem, exactCached, result);
     // B7 (capacity-profit interior-gap rungs, .superpowers/sdd/b7-brief.md): ONCE after the elite
     // loop, on the then-best -- "once per elite candidate is too expensive," mirroring why the
     // post-finalize pass below is also a single call, not per-candidate.
@@ -1024,6 +1074,11 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
         result.best_routing = post_finalize_swept_compacted.routing;
     }
 
+    // C1a: second (post-finalize) pass, same "before B7" ordering as the elite-loop call site above
+    // -- finalizeFeedthrough + the B3.1 sweeps above may have moved best_placement again, so
+    // re-redistribute against the FINAL committed geometry before B7 re-ranks its own gap rungs
+    // against it.
+    if (problem.wl_redistribute) maybeAdoptWlRedistribute(problem, exactCached, result);
     // B7: second (post-finalize) pass -- finalizeFeedthrough + the sweeps above may have moved
     // best_placement again since the elite-loop pass, so re-rank/re-try gap rungs against the
     // FINAL committed geometry (brief: "in the post-finalize pass after the B3.1 sweep").
@@ -1131,6 +1186,14 @@ SearchResult runHybridPlacementSearch(const Problem& problem, const SearchOption
     // by the whole-struct copy at the fold above, same as iterations).
     result.sa_wall_time_sec = sp_result.sa_wall_time_sec + bstar_a_result.sa_wall_time_sec +
                               (legacy_diverged ? bstar_b_result.sa_wall_time_sec : 0.0);
+    // C1a (.superpowers/sdd/c1-design-20260817.md §6): same "sum across executed sub-runs" rule as
+    // iterations/exact_evaluations/sa_wall_time_sec above -- a sub-run's own wl_rungs_tried/
+    // wl_adoptions would otherwise be silently dropped by the whole-struct-copy fold whenever a
+    // DIFFERENT sub-run's result wins the pick.
+    result.wl_rungs_tried = sp_result.wl_rungs_tried + bstar_a_result.wl_rungs_tried +
+                           (legacy_diverged ? bstar_b_result.wl_rungs_tried : 0);
+    result.wl_adoptions = sp_result.wl_adoptions + bstar_a_result.wl_adoptions +
+                         (legacy_diverged ? bstar_b_result.wl_adoptions : 0);
     return result;
 }
 
@@ -1234,6 +1297,10 @@ bool PortfolioFold::admit(const Problem& problem, const SearchResult& leg_result
     total_iterations += leg_result.iterations;
     total_exact_evaluations += leg_result.exact_evaluations;
     total_sa_wall_sec += leg_result.sa_wall_time_sec;
+    // C1a (.superpowers/sdd/c1-design-20260817.md §6): accumulate telemetry the same way
+    // total_sa_wall_sec above does -- every leg's own contribution, not just the picked leg's.
+    total_wl_rungs_tried += leg_result.wl_rungs_tried;
+    total_wl_adoptions += leg_result.wl_adoptions;
     ++legs_run;
     bool improved = !have_result || paydownBetter(leg_result.best_routing, leg_result.best_score.value,
                                                    result.best_routing, result.best_score.value);
@@ -1592,6 +1659,10 @@ SearchResult runPricingPortfolio(const Problem& problem, const std::string& engi
     // L3c: report the SUMMED SA wall across all folded legs (PortfolioFold accumulates it like
     // total_iterations), overwriting the picked leg's own stamp the whole-struct copy carried.
     result.sa_wall_time_sec = fold.total_sa_wall_sec;
+    // C1a (.superpowers/sdd/c1-design-20260817.md §6): same "summed across all folded legs,
+    // overwriting the picked leg's own stamp" discipline as sa_wall_time_sec above.
+    result.wl_rungs_tried = fold.total_wl_rungs_tried;
+    result.wl_adoptions = fold.total_wl_adoptions;
     return result;
 }
 

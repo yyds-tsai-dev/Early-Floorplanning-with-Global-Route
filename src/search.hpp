@@ -232,6 +232,22 @@ struct SearchResult {
     // by runPricingPortfolio's own explicit fold-tracking, same precedent deep_legs_run/phase1_legs_run
     // above already established.
     int ladder_legs_run = 0;
+    // C1a (fixed-topology WL-driven whitespace redistribution, .superpowers/sdd/c1-design-
+    // 20260817.md §6): telemetry counters accumulated directly by maybeAdoptWlRedistribute
+    // (search.cpp) on THIS SearchResult, then summed across sub-runs by runHybridPlacementSearch
+    // (same "whole-struct copy overwritten with the sub-run SUM" precedent iterations/
+    // exact_evaluations/sa_wall_time_sec already use) and across portfolio legs by
+    // PortfolioFold::admit (same precedent again) -- so the final returned result's counters cover
+    // every leg/sub-run that ran, not just the picked one. `wl_rungs_tried` counts every distinct
+    // (placementKey-deduped) candidate handed to exactCached; `wl_adoptions` counts how many of
+    // those were actually adopted as the new best via outlineSweepBetter -- the design's own
+    // adoption-gate decision-gate diagnostic ("firing or pre-gated? adoptions/tried low => channel
+    // destruction"). Both default 0, and stay 0 whenever --wl-redistribute is absent (the call
+    // sites' own `if (problem.wl_redistribute)` gate means maybeAdoptWlRedistribute never even runs
+    // -- design §6: "an `if`, never a no-op call"). Printed in main.cpp stderr ONLY when the flag is
+    // set (no .cfg byte or output is ever affected).
+    int wl_rungs_tried = 0;
+    int wl_adoptions = 0;
 };
 
 // Exact-scoring callback shape used by the elite pass's exact_cache (search.cpp's `exactCached`
@@ -491,6 +507,12 @@ struct PortfolioFold {
     // main.cpp's `sa_wall=` field reports the whole run's SA-vs-machinery split, not just the
     // picked leg's.
     double total_sa_wall_sec = 0.0;
+    // C1a (.superpowers/sdd/c1-design-20260817.md §6): summed wl_rungs_tried/wl_adoptions across
+    // ALL admitted legs (accumulated like total_sa_wall_sec above), stamped into the portfolio
+    // result at the end so main.cpp's telemetry reports the whole run's C1 activity, not just the
+    // picked leg's.
+    int total_wl_rungs_tried = 0;
+    int total_wl_adoptions = 0;
     bool have_result = false;
 
     bool admit(const Problem& problem, const SearchResult& leg_result, const SearchVariant& variant, int leg_seed,

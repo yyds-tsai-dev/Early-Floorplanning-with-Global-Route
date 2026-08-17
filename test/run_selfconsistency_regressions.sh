@@ -33,7 +33,7 @@ make >/dev/null
 g++ -std=c++17 -O2 -Wall -Wextra -pedantic -I. \
     tools/rescore.cpp \
     src/cfg_score.cpp src/eval.cpp src/io.cpp src/placement_engine.cpp src/respace.cpp \
-    src/routing.cpp src/search.cpp src/validate.cpp \
+    src/routing.cpp src/search.cpp src/wl_redistribute.cpp src/validate.cpp \
     -o bin/efgr_rescore >/dev/null
 
 REL_TOL=1e-6

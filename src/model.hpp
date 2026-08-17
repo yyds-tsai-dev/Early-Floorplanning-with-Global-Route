@@ -192,6 +192,19 @@ struct Problem {
     // precedent as route_pricing_official/abutment_credit/ft_pricing_aggressive/edge_soft_anchor/
     // undirected_bundles/edge_free/ft_area_rung/overflow_gated_pads above.
     bool cheap_proxy_v2 = false;
+    // C1a (fixed-topology WL-driven whitespace redistribution, .superpowers/sdd/c1-design-
+    // 20260817.md): solver-internal knob gating wl_redistribute.cpp's iterated per-axis Gauss-Seidel
+    // weighted-median sweeps (wlRedistributeIterates), invoked by search.cpp's
+    // maybeAdoptWlRedistribute at both maybeAdoptCapacityGapRungs call sites, BEFORE that B7 call
+    // (design §2: C1 tightens toward wire-weighted median, B7 widens for capacity -- C1 first so B7
+    // gets the last word on any overflow C1's tightening creates). NEVER parsed from the input CSV
+    // (io.cpp does not touch this field; every parsed Problem keeps the default false) -- exists
+    // purely so main.cpp's hidden --wl-redistribute measurement flag can opt a run into it, the same
+    // flag-gated-variant precedent as cheap_proxy_v2/overflow_gated_pads/ft_area_rung above. Default
+    // false reproduces every pre-C1a code path byte-identically: both call sites' `if
+    // (problem.wl_redistribute) maybeAdoptWlRedistribute(...)` never even calls the function (an
+    // `if`, never a no-op call), so a flag-off run performs zero extra exact evals/allocs/RNG draws.
+    bool wl_redistribute = false;
 };
 
 struct Placement {
