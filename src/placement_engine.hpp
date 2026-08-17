@@ -114,6 +114,24 @@ int netWeightedBundle(const Problem& problem, std::mt19937& rng);
 // are no movable blocks. O(bundles).
 int worstBlock(const Problem& problem, const Placement& placement);
 
+// D3 (snap-to-neighbor soft resize move, .superpowers/sdd/levers-batch2-briefs-20260817.md Brief
+// 1): grow-only, slack-closing resize candidate for SOFT block `idx` along one axis -- the aspect
+// ratio (clamped to [block.ar_min, block.ar_max]) that results from stretching that block's
+// DECLARED area (area-preserving, mirrors dimensionFor's own w*h == area contract) up to its
+// nearest facing neighbour along that axis, or to the outline edge if no neighbour faces it.
+// width_axis=true grows toward +x (target_w = the smallest facing neighbour's x, or outline_w,
+// minus r.x); false grows toward +y (target_h = the smallest facing neighbour's y, or outline_h,
+// minus r.y) -- symmetric. "Facing" means the neighbour's rect overlaps `idx`'s rect in the
+// OTHER axis's band (y-band for the width axis, x-band for the height axis) and sits at or past
+// `idx`'s own far edge (kEps tolerance) -- taking the MINIMUM such coordinate keeps the grown
+// block non-critical under the longest-path decode (no push-out of the neighbour). Pure function
+// of (problem, placement, idx, width_axis); no RNG, no mutation of `placement`. Returns -1.0 (never
+// a legal aspect ratio) when `idx` is out of range, not a SOFT block, its placed rect is
+// degenerate (w or h <= 0), the block's declared area is <= 0, or there is no growth room (the
+// resolved target <= the current dimension + kEps) -- callers treat -1.0 as "no snap available" and
+// fall back to the existing soft-aspect move (mutateSnapResize's own fallback contract).
+double snapResizeAspect(const Problem& problem, const Placement& placement, int idx, bool width_axis);
+
 // Which side of `p` the repositioned block ends up on (design §4.2/§4.3's 4-way reinsertion table).
 enum class AdjacentSide { Left, Right, Below, Above };
 

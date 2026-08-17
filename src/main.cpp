@@ -224,6 +224,12 @@ int main(int argc, char** argv) {
         // own default, model.hpp) keeps cheapScore/routeAndScoreAt (eval.cpp) byte-identical to
         // pre-L1 when absent.
         problem.cheap_proxy_v2 = hasFlag(argc, argv, "--cheap-proxy-v2");
+        // D3 (snap-to-neighbor soft resize move, .superpowers/sdd/levers-batch2-briefs-20260817.md
+        // Brief 1): hidden/undocumented measurement flag, same precedent as --cheap-proxy-v2 above
+        // -- intentionally NOT in the usage banner. Default false (Problem.snap_resize_move's own
+        // default, model.hpp) keeps both engines' mutate() byte-identical to pre-D3 when absent (the
+        // flag-gated `if` never fires, so zero extra RNG draws).
+        problem.snap_resize_move = hasFlag(argc, argv, "--snap-resize");
         // C1a (fixed-topology WL-driven whitespace redistribution, .superpowers/sdd/c1-design-
         // 20260817.md §6): hidden/undocumented measurement flag, same precedent as above --
         // intentionally NOT in the usage banner. Default false (Problem.wl_redistribute's own

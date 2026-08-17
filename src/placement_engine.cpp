@@ -510,6 +510,42 @@ void mutateSoftAspect(const Problem& problem, PlacementState& state, std::mt1993
                                       std::min(problem.blocks[idx].ar_max, state.soft_aspect[idx] * factor(rng)));
 }
 
+// D3 (snap-to-neighbor soft resize move, .superpowers/sdd/levers-batch2-briefs-20260817.md Brief
+// 1): probability mutate() reaches for mutateSnapResize below instead of the engine's normal move
+// set, when problem.snap_resize_move is true. Same scale as the other B5c/G4 per-move probabilities
+// (kEdgeAnchorMoveProb, B5c's own move-portfolio weights) -- a tuning knob, not scorer-derived.
+constexpr double kSnapResizeMoveProb = 0.10;
+
+// D3: only ever invoked when problem.snap_resize_move is true (each engine's mutate() gates the
+// call with an `if`, not a probability folded into the existing move draws), so a flag-off run's
+// mutate() RNG stream is completely untouched by this function's existence. Draws a random SOFT
+// block and a random axis (2 draws, mirroring mutateSoftAspect's own 2-draw shape), then adopts
+// snapResizeAspect's result directly into state.soft_aspect -- the SAME field mutateSoftAspect
+// itself mutates, so this move competes for the same SA degree of freedom, just picked by neighbor
+// geometry instead of a random multiplicative nudge. Degenerates to mutateSoftAspect (consuming
+// further draws from the same `rng`) whenever the drawn (block, axis) pair has no growth room --
+// the same infeasible-move-degrades-to-an-existing-move contract every other B5c geometric move
+// follows (see fallbackSwap's doc comment on both engines).
+void mutateSnapResize(const Problem& problem, PlacementState& state, const Placement& placement,
+                      std::mt19937& rng) {
+    std::vector<int> softs;
+    for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
+        if (isSoft(problem.blocks[i].type)) softs.push_back(static_cast<int>(i));
+    }
+    if (softs.empty()) return;
+    if (state.soft_aspect.size() < problem.blocks.size()) state.soft_aspect = initialAspect(problem);
+    std::uniform_int_distribution<int> pick(0, static_cast<int>(softs.size()) - 1);
+    std::uniform_int_distribution<int> axis_pick(0, 1);
+    int idx = softs[pick(rng)];
+    bool width_axis = axis_pick(rng) == 0;
+    double ar = snapResizeAspect(problem, placement, idx, width_axis);
+    if (ar < 0.0) {
+        mutateSoftAspect(problem, state, rng);
+        return;
+    }
+    state.soft_aspect[idx] = ar;
+}
+
 void mutateEdgeChoice(const Problem& problem, PlacementState& state, std::mt19937& rng) {
     std::vector<int> edges;
     for (std::size_t i = 0; i < problem.blocks.size(); ++i) {
@@ -716,6 +752,17 @@ public:
             std::uniform_real_distribution<double> gate(0.0, 1.0);
             if (gate(rng) < kEdgeAnchorMoveProb) {
                 mutateEdgeAnchorShift(problem, state, rng);
+                return;
+            }
+        }
+        // D3 (snap-to-neighbor soft resize move): a flag-gated `if`, not a probability folded into
+        // the move_dist/unit draws below -- a flag-off run's mutate() RNG stream is completely
+        // unaffected by this branch's existence (byte-identical mutate()).
+        if (problem.snap_resize_move) {
+            std::uniform_real_distribution<double> gate(0.0, 1.0);
+            if (gate(rng) < kSnapResizeMoveProb) {
+                Placement pl = decode(problem, state);
+                mutateSnapResize(problem, state, pl, rng);
                 return;
             }
         }
@@ -956,6 +1003,17 @@ public:
             std::uniform_real_distribution<double> gate(0.0, 1.0);
             if (gate(rng) < kEdgeAnchorMoveProb) {
                 mutateEdgeAnchorShift(problem, state, rng);
+                return;
+            }
+        }
+        // D3 (snap-to-neighbor soft resize move): a flag-gated `if`, not a probability folded into
+        // the move_dist/unit draws below -- a flag-off run's mutate() RNG stream is completely
+        // unaffected by this branch's existence (byte-identical mutate()).
+        if (problem.snap_resize_move) {
+            std::uniform_real_distribution<double> gate(0.0, 1.0);
+            if (gate(rng) < kSnapResizeMoveProb) {
+                Placement pl = decode(problem, state);
+                mutateSnapResize(problem, state, pl, rng);
                 return;
             }
         }
@@ -1365,6 +1423,54 @@ int worstBlock(const Problem& problem, const Placement& placement) {
         }
     }
     return best;
+}
+
+// D3 (snap-to-neighbor soft resize move, .superpowers/sdd/levers-batch2-briefs-20260817.md Brief
+// 1): see the doc comment in placement_engine.hpp for the full contract. Outer namespace (external
+// linkage, declared in the header) so it is directly unit-testable, mirroring wireMedianTarget/
+// netWeightedBundle/worstBlock above.
+double snapResizeAspect(const Problem& problem, const Placement& placement, int idx, bool width_axis) {
+    if (idx < 0 || static_cast<std::size_t>(idx) >= problem.blocks.size()) return -1.0;
+    if (static_cast<std::size_t>(idx) >= placement.rects.size()) return -1.0;
+    const Block& block = problem.blocks[idx];
+    if (!isSoft(block.type)) return -1.0;
+    if (block.area <= 0.0) return -1.0;
+    const Rect& r = placement.rects[idx];
+    if (r.w <= kEps || r.h <= kEps) return -1.0;
+    double outline_w = placement.outline_w > 0.0 ? placement.outline_w : problem.outline_w;
+    double outline_h = placement.outline_h > 0.0 ? placement.outline_h : problem.outline_h;
+
+    if (width_axis) {
+        double best_x = std::numeric_limits<double>::infinity();
+        for (std::size_t j = 0; j < placement.rects.size(); ++j) {
+            if (static_cast<int>(j) == idx) continue;
+            const Rect& o = placement.rects[j];
+            if (o.w <= 0.0 || o.h <= 0.0) continue;
+            bool y_overlap = r.y + kEps < o.top() && o.y + kEps < r.top();
+            if (!y_overlap) continue;
+            if (o.x < r.right() - kEps) continue;  // not facing (behind or overlapping in x)
+            best_x = std::min(best_x, o.x);
+        }
+        double target_w = std::isfinite(best_x) ? best_x - r.x : outline_w - r.x;
+        if (target_w <= r.w + kEps) return -1.0;
+        double ar = (target_w * target_w) / block.area;
+        return std::max(block.ar_min, std::min(block.ar_max, ar));
+    }
+
+    double best_y = std::numeric_limits<double>::infinity();
+    for (std::size_t j = 0; j < placement.rects.size(); ++j) {
+        if (static_cast<int>(j) == idx) continue;
+        const Rect& o = placement.rects[j];
+        if (o.w <= 0.0 || o.h <= 0.0) continue;
+        bool x_overlap = r.x + kEps < o.right() && o.x + kEps < r.right();
+        if (!x_overlap) continue;
+        if (o.y < r.top() - kEps) continue;  // not facing (below or overlapping in y)
+        best_y = std::min(best_y, o.y);
+    }
+    double target_h = std::isfinite(best_y) ? best_y - r.y : outline_h - r.y;
+    if (target_h <= r.h + kEps) return -1.0;
+    double ar = block.area / (target_h * target_h);
+    return std::max(block.ar_min, std::min(block.ar_max, ar));
 }
 
 void reinsertSPAdjacent(PlacementState& state, int x, int p, AdjacentSide side) {

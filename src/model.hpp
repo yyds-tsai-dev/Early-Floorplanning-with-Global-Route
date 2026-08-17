@@ -192,6 +192,19 @@ struct Problem {
     // precedent as route_pricing_official/abutment_credit/ft_pricing_aggressive/edge_soft_anchor/
     // undirected_bundles/edge_free/ft_area_rung/overflow_gated_pads above.
     bool cheap_proxy_v2 = false;
+    // D3 (snap-to-neighbor soft resize move, .superpowers/sdd/levers-batch2-briefs-20260817.md
+    // Brief 1): solver-internal knob gating a new SA move -- placement_engine.cpp's
+    // mutateSnapResize -- that resizes one randomly-drawn soft block along one randomly-drawn axis
+    // (width or height) to exactly close the gap to its nearest facing neighbour (or the outline
+    // edge, if none), area-preserving (recomputes the aspect ratio, clamped to [ar_min, ar_max],
+    // same contract as mutateSoftAspect). Grow-only, slack-closing: degenerates to the existing
+    // mutateSoftAspect move whenever the drawn (block, axis) pair has no growth room. Consumed by
+    // both engines' mutate() via a flag-gated `if` (G4 pattern) BEFORE any of the existing move
+    // draws, so a flag-off run's mutate() RNG stream is completely unaffected. NEVER parsed from
+    // the input CSV (io.cpp does not touch this field; every parsed Problem keeps the default
+    // false) -- exists purely so main.cpp's hidden --snap-resize measurement flag can opt a run
+    // into it, the same flag-gated-variant precedent as cheap_proxy_v2 above.
+    bool snap_resize_move = false;
     // C1a (fixed-topology WL-driven whitespace redistribution, .superpowers/sdd/c1-design-
     // 20260817.md): solver-internal knob gating wl_redistribute.cpp's iterated per-axis Gauss-Seidel
     // weighted-median sweeps (wlRedistributeIterates), invoked by search.cpp's
