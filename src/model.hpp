@@ -236,6 +236,19 @@ struct Problem {
     // routing.cpp code path byte-identically: both the decay guard and the bump-site branch are `if`s
     // on this flag, never a no-op call or a multiply-by-one.
     bool route_const_gap = false;
+    // D4/A5 pack (notch/pocket whitespace penalty, .superpowers/sdd/levers-batch2-briefs-
+    // 20260817.md Brief 3): solver-internal knob gating eval.cpp's notchPocketPenalty -- an
+    // additive regularizer over the outline's empty area that charges small, roughly-square
+    // whitespace pockets (both dimensions under a tenth of the outline) that no channel routing
+    // can realistically use, while leaving genuine long-thin channels untouched. Hooked OUTSIDE
+    // cheapScore/routeAndScoreAt's existing v1/v2 route-aware-proxy branch (orthogonal to
+    // cheap_proxy_v2), so it composes with either proxy generation. NEVER parsed from the input
+    // CSV (io.cpp does not touch this field; every parsed Problem keeps the default false) --
+    // exists purely so main.cpp's hidden --notch-penalty measurement flag can opt a run into it,
+    // the same flag-gated-variant precedent as route_const_gap/snap_resize_move above. Default
+    // false reproduces every pre-D4/A5 eval.cpp code path byte-identically: both hook sites are
+    // `if`s on this flag, never a no-op call or a multiply-by-one.
+    bool notch_penalty = false;
 };
 
 struct Placement {

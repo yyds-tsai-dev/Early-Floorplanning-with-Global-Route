@@ -233,6 +233,127 @@ double routeAwareProxyPenaltyV2(const Problem& problem, const Placement& placeme
     return officialOverflowPenalty(R, w * h) + kBetaFt * std::max(0.0, est_ft_area_sum - w * h);
 }
 
+// D4/A5 pack (notch/pocket whitespace penalty, .superpowers/sdd/levers-batch2-briefs-20260817.md
+// Brief 3): additive regularizer over the OUTLINE's empty (uncovered) area -- charges small,
+// roughly-square pockets of whitespace that no bundle's channel routing can realistically use
+// (both dimensions well under a tenth of the outline), while leaving genuine channels (long, thin
+// in one dimension) untouched. OUR ADAPTATION of the notch/pocket recipe's single-dimension rule:
+// counts a component only when BOTH bbox_w < w/10 AND bbox_h < h/10 -- a single-dim rule would
+// punish legitimate long-thin channels. Orthogonal to v1/v2 (routeAwareProxyPenalty/V2 above):
+// hooked OUTSIDE that branch by both call sites (cheapScore/routeAndScoreAt below), an independent
+// additive term. MUST NOT read problem.outline_w/h (only the explicit w,h arguments) -- the
+// cancellation invariant (cheapScore's addend at (w,h) exactly cancelling routeAndScoreAt's
+// subtraction at the same (w,h), on a `scoped` Problem that differs from `problem` ONLY in
+// outline_w/h) depends on this function being blind to which Problem it was handed; the `problem`
+// parameter is unnamed for exactly this reason (nothing in the body may read it). Pure and
+// deterministic: no RNG, no mutation.
+//
+// Algorithm: coordinate-compress the outline into a grid using every rect's clamped x/y edges (plus
+// the outline's own 0/w and 0/h bounds) as cut lines -- at most 62x62 cells (kEps-deduped, a grid-
+// size guard: a placement with a pathological number of distinct edges is not this regularizer's
+// problem to solve, so it returns 0 rather than blow up an O(cells) fill); mark each cell covered by
+// some block's rect as occupied (index-range fill per block, O(n + cells)); 4-connected flood fill
+// over the UNoccupied cells finds empty connected components, each with a real-coordinate bounding
+// box; a component "counts" (is a notch/pocket, not a channel) iff BOTH its bbox dimensions are
+// under a tenth of the corresponding outline dimension; each counted component contributes
+// kNotchWeight*sqrt(w*h*bbox_w*bbox_h) (the recipe's sublinear shape, scaled by the pocket's own
+// footprint against the whole outline).
+constexpr double kNotchWeight = 0.25;
+
+double notchPocketPenalty(const Problem&, const Placement& placement, double w, double h) {
+    if (w <= 0.0 || h <= 0.0) return 0.0;
+
+    std::vector<double> xs = {0.0, w};
+    std::vector<double> ys = {0.0, h};
+    for (const auto& r : placement.rects) {
+        if (r.w <= 0.0 || r.h <= 0.0) continue;
+        xs.push_back(std::clamp(r.x, 0.0, w));
+        xs.push_back(std::clamp(r.right(), 0.0, w));
+        ys.push_back(std::clamp(r.y, 0.0, h));
+        ys.push_back(std::clamp(r.top(), 0.0, h));
+    }
+    auto uniqSort = [](std::vector<double>& v) {
+        std::sort(v.begin(), v.end());
+        v.erase(std::unique(v.begin(), v.end(),
+                             [](double a, double b) { return std::abs(a - b) < kEps; }),
+                v.end());
+    };
+    uniqSort(xs);
+    uniqSort(ys);
+    if (xs.size() < 2 || ys.size() < 2 || xs.size() > 63 || ys.size() > 63) return 0.0;
+
+    const int nx = static_cast<int>(xs.size()) - 1;
+    const int ny = static_cast<int>(ys.size()) - 1;
+    std::vector<char> occ(static_cast<std::size_t>(nx) * static_cast<std::size_t>(ny), 0);
+
+    auto edgeIndex = [](const std::vector<double>& v, double target) {
+        auto it = std::lower_bound(v.begin(), v.end(), target - kEps);
+        return static_cast<int>(it - v.begin());
+    };
+
+    for (const auto& r : placement.rects) {
+        if (r.w <= 0.0 || r.h <= 0.0) continue;
+        double x0 = std::clamp(r.x, 0.0, w);
+        double x1 = std::clamp(r.right(), 0.0, w);
+        double y0 = std::clamp(r.y, 0.0, h);
+        double y1 = std::clamp(r.top(), 0.0, h);
+        if (x1 - x0 <= kEps || y1 - y0 <= kEps) continue;
+        int cx0 = edgeIndex(xs, x0);
+        int cx1 = edgeIndex(xs, x1);
+        int cy0 = edgeIndex(ys, y0);
+        int cy1 = edgeIndex(ys, y1);
+        for (int cy = cy0; cy < cy1; ++cy) {
+            for (int cx = cx0; cx < cx1; ++cx) {
+                occ[static_cast<std::size_t>(cy) * nx + cx] = 1;
+            }
+        }
+    }
+
+    std::vector<char> visited(occ.size(), 0);
+    std::vector<int> stack;
+    double penalty = 0.0;
+    for (int scan_y = 0; scan_y < ny; ++scan_y) {
+        for (int scan_x = 0; scan_x < nx; ++scan_x) {
+            std::size_t start = static_cast<std::size_t>(scan_y) * nx + scan_x;
+            if (occ[start] || visited[start]) continue;
+            stack.clear();
+            stack.push_back(scan_y * nx + scan_x);
+            visited[start] = 1;
+            double bbox_x0 = xs[scan_x];
+            double bbox_x1 = xs[scan_x + 1];
+            double bbox_y0 = ys[scan_y];
+            double bbox_y1 = ys[scan_y + 1];
+            while (!stack.empty()) {
+                int cell = stack.back();
+                stack.pop_back();
+                int cx = cell % nx;
+                int cy = cell / nx;
+                bbox_x0 = std::min(bbox_x0, xs[cx]);
+                bbox_x1 = std::max(bbox_x1, xs[cx + 1]);
+                bbox_y0 = std::min(bbox_y0, ys[cy]);
+                bbox_y1 = std::max(bbox_y1, ys[cy + 1]);
+                const int dx[4] = {-1, 1, 0, 0};
+                const int dy[4] = {0, 0, -1, 1};
+                for (int d = 0; d < 4; ++d) {
+                    int ncx = cx + dx[d];
+                    int ncy = cy + dy[d];
+                    if (ncx < 0 || ncx >= nx || ncy < 0 || ncy >= ny) continue;
+                    std::size_t nidx = static_cast<std::size_t>(ncy) * nx + ncx;
+                    if (occ[nidx] || visited[nidx]) continue;
+                    visited[nidx] = 1;
+                    stack.push_back(ncy * nx + ncx);
+                }
+            }
+            double bbox_w = bbox_x1 - bbox_x0;
+            double bbox_h = bbox_y1 - bbox_y0;
+            if (bbox_w < w / 10.0 && bbox_h < h / 10.0) {
+                penalty += kNotchWeight * std::sqrt(w * h * bbox_w * bbox_h);
+            }
+        }
+    }
+    return penalty;
+}
+
 // Crude v1 whitespace/channel-demand proxy (design p1-design.md §1.3): for each bundle, reserve
 // area proportional to net count and the *aligned* axis distance between source/target centers
 // (min(dx,dy) -- zero when the pair is already adjacent on one axis, so no margin is charged).
@@ -337,6 +458,10 @@ Score cheapScore(const Problem& problem, const Placement& placement) {
     } else {
         score.penalty = penalty + routeAwareProxyPenalty(problem, placement);
     }
+    // D4/A5 pack (notch/pocket whitespace penalty): orthogonal to v1/v2 above -- hooked OUTSIDE
+    // that branch, an independent additive term. An `if`, never a multiply-by-one, so flag-off
+    // stays byte-identical to pre-D4/A5.
+    if (problem.notch_penalty) score.penalty += notchPocketPenalty(problem, placement, w, h);
     score.value = score.outline_area + problem.alpha * wire_proxy + score.penalty;
     return score;
 }
@@ -373,6 +498,12 @@ Score routeAndScoreAt(const Problem& problem, const Placement& placement, double
     } else {
         score.penalty -= routeAwareProxyPenalty(scoped, placement);
     }
+    // D4/A5 pack (notch/pocket whitespace penalty): mirrors cheapScore's own addend above at the
+    // SAME (w,h) -- notchPocketPenalty never reads problem.outline_w/h (only the explicit
+    // arguments), so this subtraction is bit-identical to what cheapScore(scoped, placement)
+    // resolved internally, cancelling the addend exactly (design invariant: the exact tier is
+    // provably unchanged by this lever either way).
+    if (problem.notch_penalty) score.penalty -= notchPocketPenalty(scoped, placement, w, h);
     // C1 milestone: explicit plain W*H (the declared outline this call is scoping/scoring at),
     // overriding whatever cheapScore computed -- channels are interior to w*h, and FT expansion is
     // already captured by shrinkWrapOutline, so no margin term belongs in the official OutlineArea.

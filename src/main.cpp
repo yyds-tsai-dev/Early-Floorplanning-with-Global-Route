@@ -243,6 +243,12 @@ int main(int argc, char** argv) {
         // default, model.hpp) keeps routing.cpp's negotiation-round history pricing byte-identical
         // to pre-B1 when absent.
         problem.route_const_gap = hasFlag(argc, argv, "--const-gap-negotiation");
+        // D4/A5 pack (notch/pocket whitespace penalty, .superpowers/sdd/levers-batch2-briefs-
+        // 20260817.md Brief 3): hidden/undocumented measurement flag, same precedent as
+        // --const-gap-negotiation above -- intentionally NOT in the usage banner. Default false
+        // (Problem.notch_penalty's own default, model.hpp) keeps cheapScore/routeAndScoreAt
+        // (eval.cpp) byte-identical to pre-D4/A5 when absent.
+        problem.notch_penalty = hasFlag(argc, argv, "--notch-penalty");
 
         // B4.1 (route-pricing portfolio, b4-report.md): runs the requested engine under both the
         // official (B4) and retained pre-B4 router pricing, folding by value -- restores the
