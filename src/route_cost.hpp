@@ -429,4 +429,25 @@ constexpr double kHistoryDecay = 0.5;
 // the scorer's own units the way kOverflowAreaWeight/kFtMismatchWeight are.
 constexpr double kHistoryBump = 1.0;
 
+// B1 (constant-gap negotiation pricing, .superpowers/sdd/levers-batch2-briefs-20260817.md Brief 2):
+// what escalates today (kHistoryBump above, bumped additively per round and halved at the start of
+// every later round) is a surcharge sized as a multiple of the RELATIVE overuse rho =
+// (usage-cap)/cap -- for a resource barely over capacity (rho ~ 0.01, the common case) that surcharge
+// is ~1% of the official per-overflow-net price p_ovf, orders of magnitude below alpha*(W+H) (the
+// cost of any real detour across the outline), so 3 negotiation rounds cannot redirect demand off it;
+// for a badly-overused resource the same escalating formula can instead blow up. This gives a
+// STICKY (never decayed under problem.route_const_gap -- see routing.cpp's decay guard),
+// order-independent, size-correct alternative: the history unit such that p_ovf*hist ==
+// kConstGapDetourFactor*alpha*(outline_w+outline_h) EXACTLY -- one unit of overuse out-prices the
+// worst-case legal detour (a full round-trip across the outline) by kConstGapDetourFactor. Assigned
+// (never accumulated) at the same channel-history bump call site kHistoryBump's additive bump used to
+// own (routing.cpp), replacing it entirely under the flag. Pure function of (alpha, outline dims,
+// the current per-net price); 0.0 whenever price<=0 (never divide by zero/negative -- mirrors
+// roundOverflowPrice's own capacity_total<=0 guard above).
+constexpr double kConstGapDetourFactor = 1.0;
+
+inline double constantGapHistoryUnits(double alpha, double outline_w, double outline_h, double price) {
+    return price > 0.0 ? kConstGapDetourFactor * alpha * (outline_w + outline_h) / price : 0.0;
+}
+
 }  // namespace efgr

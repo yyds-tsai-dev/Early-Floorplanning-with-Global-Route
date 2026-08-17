@@ -237,6 +237,12 @@ int main(int argc, char** argv) {
         // false when absent, so maybeAdoptWlRedistribute never runs and every existing
         // caller/regression stays byte-identical to pre-C1a.
         problem.wl_redistribute = hasFlag(argc, argv, "--wl-redistribute");
+        // B1 (constant-gap negotiation pricing, .superpowers/sdd/levers-batch2-briefs-20260817.md
+        // Brief 2): hidden/undocumented measurement flag, same precedent as --wl-redistribute above
+        // -- intentionally NOT in the usage banner. Default false (Problem.route_const_gap's own
+        // default, model.hpp) keeps routing.cpp's negotiation-round history pricing byte-identical
+        // to pre-B1 when absent.
+        problem.route_const_gap = hasFlag(argc, argv, "--const-gap-negotiation");
 
         // B4.1 (route-pricing portfolio, b4-report.md): runs the requested engine under both the
         // official (B4) and retained pre-B4 router pricing, folding by value -- restores the

@@ -218,6 +218,24 @@ struct Problem {
     // (problem.wl_redistribute) maybeAdoptWlRedistribute(...)` never even calls the function (an
     // `if`, never a no-op call), so a flag-off run performs zero extra exact evals/allocs/RNG draws.
     bool wl_redistribute = false;
+    // B1 (constant-gap negotiation pricing, .superpowers/sdd/levers-batch2-briefs-20260817.md
+    // Brief 2): solver-internal knob gating routing.cpp's negotiation-round history pricing --
+    // replaces the escalating, order-dependent kHistoryBump surcharge (bumped additively each round,
+    // halved at the start of every later round) with a STICKY, size-correct constant: each
+    // over-capacity resource's history is ASSIGNED (never accumulated) route_cost.hpp's
+    // constantGapHistoryUnits, sized so the resulting per-net surcharge (p_ovf*hist) equals
+    // kConstGapDetourFactor*alpha*(outline_w+outline_h) -- one unit of overuse out-prices the
+    // worst-case legal detour, regardless of how small the round's relative overuse was. Also
+    // disables the per-round history decay (kHistoryDecay) under this flag: a sticky, correctly-sized
+    // gap does not need PathFinder-style relaxation the way an escalating one does (see route_cost.hpp
+    // constantGapHistoryUnits's own doc comment for the full diagnosis). FT history (history_ft) is
+    // untouched -- explicit v1 scope. NEVER parsed from the input CSV (io.cpp does not touch this
+    // field; every parsed Problem keeps the default false) -- exists purely so main.cpp's hidden
+    // --const-gap-negotiation measurement flag can opt a run into it, the same flag-gated-variant
+    // precedent as wl_redistribute/snap_resize_move above. Default false reproduces every pre-B1
+    // routing.cpp code path byte-identically: both the decay guard and the bump-site branch are `if`s
+    // on this flag, never a no-op call or a multiply-by-one.
+    bool route_const_gap = false;
 };
 
 struct Placement {

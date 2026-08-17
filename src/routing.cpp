@@ -689,7 +689,14 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
         // Decay at the START of each round (round >= 1), design §4.2: standard PathFinder hygiene so
         // a resource that is no longer congested relaxes back instead of staying permanently
         // poisoned by an earlier round's spike. Round 0 has no decay step (nothing accumulated yet).
-        if (round >= 1) {
+        // B1 (constant-gap negotiation pricing, .superpowers/sdd/levers-batch2-briefs-20260817.md
+        // Brief 2): under route_const_gap, history is STICKY -- never decayed. The assigned
+        // constant-gap unit already prices exactly the worst-case detour; decaying it back down
+        // would reintroduce the escalating-gap mis-pricing this lever replaces, and round 2 must
+        // negotiate the UNION of every still-overflowed resource, not a decayed echo of round 1's
+        // bumps (route_cost.hpp's constantGapHistoryUnits doc comment). Flag-off keeps the existing
+        // decay verbatim.
+        if (round >= 1 && !problem.route_const_gap) {
             for (auto& h : history_channel) {
                 h[0] *= kHistoryDecay;
                 h[1] *= kHistoryDecay;
@@ -833,11 +840,25 @@ RoutingResult routeProblem(const Problem& problem, const Placement& placement, b
             double hcap = 25.0 * std::max(1.0, ch.rect.h);
             double vcap = 25.0 * std::max(1.0, ch.rect.w);
             if (ch.horizontal_usage > hcap) {
-                history_channel[c][0] += kHistoryBump * (ch.horizontal_usage - hcap) / hcap;
+                // B1 (constant-gap negotiation pricing): ASSIGN (never accumulate) the sticky,
+                // size-correct constant-gap unit under the flag, replacing the escalating additive
+                // bump entirely -- any_bump semantics are unchanged (still set whenever a resource
+                // is over capacity this round, regardless of which branch priced it).
+                if (problem.route_const_gap) {
+                    history_channel[c][0] = constantGapHistoryUnits(problem.alpha, problem.outline_w,
+                                                                     problem.outline_h, p_ovf);
+                } else {
+                    history_channel[c][0] += kHistoryBump * (ch.horizontal_usage - hcap) / hcap;
+                }
                 any_bump = true;
             }
             if (ch.vertical_usage > vcap) {
-                history_channel[c][1] += kHistoryBump * (ch.vertical_usage - vcap) / vcap;
+                if (problem.route_const_gap) {
+                    history_channel[c][1] = constantGapHistoryUnits(problem.alpha, problem.outline_w,
+                                                                     problem.outline_h, p_ovf);
+                } else {
+                    history_channel[c][1] += kHistoryBump * (ch.vertical_usage - vcap) / vcap;
+                }
                 any_bump = true;
             }
         }
