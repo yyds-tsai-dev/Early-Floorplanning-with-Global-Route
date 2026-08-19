@@ -1,0 +1,678 @@
+[
+  {
+    "case": "case0",
+    "exec_status": "CORRECT",
+    "status": "PASS",
+    "reason": null,
+    "checker_pass": true,
+    "total_wirelength": 1491500.0,
+    "outline_area": 3858480.0,
+    "cost": 4894917.918344436,
+    "overflow": 0.0,
+    "runtime_sec": 599.692,
+    "timeout": false,
+    "first_error_code": null,
+    "cfg": "case0/output.cfg",
+    "report_json": "case0/report.json",
+    "viz_dir": "case0/viz",
+    "viz_paths": [
+      {
+        "idx": 0,
+        "file": "case0/viz/path_0.html",
+        "failed": false
+      },
+      {
+        "idx": 1,
+        "file": "case0/viz/path_1.html",
+        "failed": false
+      },
+      {
+        "idx": 2,
+        "file": "case0/viz/path_2.html",
+        "failed": false
+      },
+      {
+        "idx": 3,
+        "file": "case0/viz/path_3.html",
+        "failed": false
+      },
+      {
+        "idx": 4,
+        "file": "case0/viz/path_4.html",
+        "failed": false
+      }
+    ],
+    "failed_path_idxs": [],
+    "fail_root_cause": null,
+    "fail_root_detail": null,
+    "fail_evidence": null,
+    "edge_penalty": 0,
+    "base_cost": 4305930.0,
+    "edge_location_violation_count": 0,
+    "warning_codes": [],
+    "overflow_rate": 0.0,
+    "overflow_ft_penalty": 0.0,
+    "cost_breakdown": {
+      "outline_area": 3858480.0,
+      "alpha_times_wl": 447450.0,
+      "alpha": 0.3,
+      "total_wirelength": 1491500.0,
+      "channel_overflow_total": 0.0,
+      "channel_total_capacity": 144975.0,
+      "channel_overflow_rate": 0.0,
+      "ft_area_excess": 0.0,
+      "beta_lin": 20.0,
+      "beta_tail": 1.5,
+      "beta_ft": 3.0,
+      "threshold": 0.05,
+      "overflow_penalty": 0.0,
+      "ft_penalty": 0.0,
+      "overflow_ft_penalty": 0.0,
+      "edge_penalty": 0.0,
+      "illegal_ft_delta_area": 0.0,
+      "lambda_ft": 10.0,
+      "illegal_ft_penalty": 0.0,
+      "gamma": 1.0,
+      "edge_penalty_component": 0.0,
+      "runtime_sec": 599.692,
+      "delta": 0.5,
+      "runtime_penalty": 588987.9183444357,
+      "cost": 4894917.918344436
+    }
+  },
+  {
+    "case": "case1",
+    "exec_status": "CORRECT",
+    "status": "PASS",
+    "reason": null,
+    "checker_pass": true,
+    "total_wirelength": 10545985.0,
+    "outline_area": 5687600.0,
+    "cost": 7985034.756551095,
+    "overflow": 0.0,
+    "runtime_sec": 600.064,
+    "timeout": false,
+    "first_error_code": null,
+    "cfg": "case1/output.cfg",
+    "report_json": "case1/report.json",
+    "viz_dir": "case1/viz",
+    "viz_paths": [
+      {
+        "idx": 0,
+        "file": "case1/viz/path_0.html",
+        "failed": false
+      },
+      {
+        "idx": 1,
+        "file": "case1/viz/path_1.html",
+        "failed": false
+      },
+      {
+        "idx": 2,
+        "file": "case1/viz/path_2.html",
+        "failed": false
+      },
+      {
+        "idx": 3,
+        "file": "case1/viz/path_3.html",
+        "failed": false
+      },
+      {
+        "idx": 4,
+        "file": "case1/viz/path_4.html",
+        "failed": false
+      }
+    ],
+    "failed_path_idxs": [],
+    "fail_root_cause": null,
+    "fail_root_detail": null,
+    "fail_evidence": null,
+    "edge_penalty": 0,
+    "base_cost": 7269497.75,
+    "edge_location_violation_count": 0,
+    "warning_codes": [],
+    "overflow_rate": 0.0,
+    "overflow_ft_penalty": 0.0,
+    "cost_breakdown": {
+      "outline_area": 5687600.0,
+      "alpha_times_wl": 1581897.75,
+      "alpha": 0.15,
+      "total_wirelength": 10545985.0,
+      "channel_overflow_total": 0.0,
+      "channel_total_capacity": 218350.0,
+      "channel_overflow_rate": 0.0,
+      "ft_area_excess": 0.0,
+      "beta_lin": 20.0,
+      "beta_tail": 1.5,
+      "beta_ft": 3.0,
+      "threshold": 0.05,
+      "overflow_penalty": 0.0,
+      "ft_penalty": 0.0,
+      "overflow_ft_penalty": 0.0,
+      "edge_penalty": 0.0,
+      "illegal_ft_delta_area": 0.0,
+      "lambda_ft": 10.0,
+      "illegal_ft_penalty": 0.0,
+      "gamma": 1.0,
+      "edge_penalty_component": 0.0,
+      "runtime_sec": 600.064,
+      "delta": 0.5,
+      "runtime_penalty": 715537.0065510954,
+      "cost": 7985034.756551095
+    }
+  },
+  {
+    "case": "case2",
+    "exec_status": "CORRECT",
+    "status": "PASS",
+    "reason": null,
+    "checker_pass": true,
+    "total_wirelength": 93861473.5,
+    "outline_area": 27243702.0,
+    "cost": 38167155.57646167,
+    "overflow": 0.0,
+    "runtime_sec": 589.057,
+    "timeout": false,
+    "first_error_code": null,
+    "cfg": "case2/output.cfg",
+    "report_json": "case2/report.json",
+    "viz_dir": "case2/viz",
+    "viz_paths": [
+      {
+        "idx": 0,
+        "file": "case2/viz/path_0.html",
+        "failed": false
+      },
+      {
+        "idx": 1,
+        "file": "case2/viz/path_1.html",
+        "failed": false
+      },
+      {
+        "idx": 2,
+        "file": "case2/viz/path_2.html",
+        "failed": false
+      },
+      {
+        "idx": 3,
+        "file": "case2/viz/path_3.html",
+        "failed": false
+      },
+      {
+        "idx": 4,
+        "file": "case2/viz/path_4.html",
+        "failed": false
+      }
+    ],
+    "failed_path_idxs": [],
+    "fail_root_cause": null,
+    "fail_root_detail": null,
+    "fail_evidence": null,
+    "edge_penalty": 0,
+    "base_cost": 36629849.35,
+    "edge_location_violation_count": 0,
+    "warning_codes": [],
+    "overflow_rate": 0.0,
+    "overflow_ft_penalty": 0.0,
+    "cost_breakdown": {
+      "outline_area": 27243702.0,
+      "alpha_times_wl": 9386147.35,
+      "alpha": 0.1,
+      "total_wirelength": 93861473.5,
+      "channel_overflow_total": 0.0,
+      "channel_total_capacity": 918950.0,
+      "channel_overflow_rate": 0.0,
+      "ft_area_excess": 0.0,
+      "beta_lin": 20.0,
+      "beta_tail": 1.5,
+      "beta_ft": 3.0,
+      "threshold": 0.05,
+      "overflow_penalty": 0.0,
+      "ft_penalty": 0.0,
+      "overflow_ft_penalty": 0.0,
+      "edge_penalty": 0.0,
+      "illegal_ft_delta_area": 0.0,
+      "lambda_ft": 10.0,
+      "illegal_ft_penalty": 0.0,
+      "gamma": 1.0,
+      "edge_penalty_component": 0.0,
+      "runtime_sec": 589.057,
+      "delta": 0.5,
+      "runtime_penalty": 1537306.2264616701,
+      "cost": 38167155.57646167
+    }
+  },
+  {
+    "case": "case3",
+    "exec_status": "CORRECT",
+    "status": "PASS",
+    "reason": null,
+    "checker_pass": true,
+    "total_wirelength": 71893227.5,
+    "outline_area": 15891043.0,
+    "cost": 27998097.261033427,
+    "overflow": 0.0,
+    "runtime_sec": 587.553,
+    "timeout": false,
+    "first_error_code": null,
+    "cfg": "case3/output.cfg",
+    "report_json": "case3/report.json",
+    "viz_dir": "case3/viz",
+    "viz_paths": [
+      {
+        "idx": 0,
+        "file": "case3/viz/path_0.html",
+        "failed": false
+      },
+      {
+        "idx": 1,
+        "file": "case3/viz/path_1.html",
+        "failed": false
+      },
+      {
+        "idx": 2,
+        "file": "case3/viz/path_2.html",
+        "failed": false
+      },
+      {
+        "idx": 3,
+        "file": "case3/viz/path_3.html",
+        "failed": false
+      },
+      {
+        "idx": 4,
+        "file": "case3/viz/path_4.html",
+        "failed": false
+      }
+    ],
+    "failed_path_idxs": [],
+    "fail_root_cause": null,
+    "fail_root_detail": null,
+    "fail_evidence": null,
+    "edge_penalty": 0,
+    "base_cost": 23080365.75,
+    "edge_location_violation_count": 0,
+    "warning_codes": [],
+    "overflow_rate": 0.0,
+    "overflow_ft_penalty": 3746633.471818786,
+    "cost_breakdown": {
+      "outline_area": 15891043.0,
+      "alpha_times_wl": 7189322.75,
+      "alpha": 0.1,
+      "total_wirelength": 71893227.5,
+      "channel_overflow_total": 0.0,
+      "channel_total_capacity": 505450.0,
+      "channel_overflow_rate": 0.0,
+      "ft_area_excess": 1248877.8239395954,
+      "beta_lin": 20.0,
+      "beta_tail": 1.5,
+      "beta_ft": 3.0,
+      "threshold": 0.05,
+      "overflow_penalty": 0.0,
+      "ft_penalty": 3746633.471818786,
+      "overflow_ft_penalty": 3746633.471818786,
+      "edge_penalty": 0.0,
+      "illegal_ft_delta_area": 0.0,
+      "lambda_ft": 10.0,
+      "illegal_ft_penalty": 0.0,
+      "gamma": 1.0,
+      "edge_penalty_component": 0.0,
+      "runtime_sec": 587.553,
+      "delta": 0.5,
+      "runtime_penalty": 1171098.0392146418,
+      "cost": 27998097.261033427
+    }
+  },
+  {
+    "case": "case4",
+    "exec_status": "CORRECT",
+    "status": "PASS",
+    "reason": null,
+    "checker_pass": true,
+    "total_wirelength": 140303704.0,
+    "outline_area": 24816540.0,
+    "cost": 41185708.95034772,
+    "overflow": 2521.0,
+    "runtime_sec": 587.962,
+    "timeout": false,
+    "first_error_code": null,
+    "cfg": "case4/output.cfg",
+    "report_json": "case4/report.json",
+    "viz_dir": "case4/viz",
+    "viz_paths": [
+      {
+        "idx": 0,
+        "file": "case4/viz/path_0.html",
+        "failed": false
+      },
+      {
+        "idx": 1,
+        "file": "case4/viz/path_1.html",
+        "failed": false
+      },
+      {
+        "idx": 2,
+        "file": "case4/viz/path_2.html",
+        "failed": false
+      },
+      {
+        "idx": 3,
+        "file": "case4/viz/path_3.html",
+        "failed": false
+      },
+      {
+        "idx": 4,
+        "file": "case4/viz/path_4.html",
+        "failed": false
+      }
+    ],
+    "failed_path_idxs": [],
+    "fail_root_cause": null,
+    "fail_root_detail": null,
+    "fail_evidence": null,
+    "edge_penalty": 0,
+    "base_cost": 38846910.4,
+    "edge_location_violation_count": 0,
+    "warning_codes": [
+      "CHANNEL_OVERFLOW",
+      "CHANNEL_OVERFLOW",
+      "CHANNEL_OVERFLOW",
+      "CHANNEL_OVERFLOW"
+    ],
+    "overflow_rate": 0.0017615204555776823,
+    "overflow_ft_penalty": 874296.8569332355,
+    "cost_breakdown": {
+      "outline_area": 24816540.0,
+      "alpha_times_wl": 14030370.4,
+      "alpha": 0.1,
+      "total_wirelength": 140303704.0,
+      "channel_overflow_total": 2521.0,
+      "channel_total_capacity": 1431150.0,
+      "channel_overflow_rate": 0.0017615204555776823,
+      "ft_area_excess": 0.0,
+      "beta_lin": 20.0,
+      "beta_tail": 1.5,
+      "beta_ft": 3.0,
+      "threshold": 0.05,
+      "overflow_penalty": 874296.8569332355,
+      "ft_penalty": 0.0,
+      "overflow_ft_penalty": 874296.8569332355,
+      "edge_penalty": 0.0,
+      "illegal_ft_delta_area": 0.0,
+      "lambda_ft": 10.0,
+      "illegal_ft_penalty": 0.0,
+      "gamma": 1.0,
+      "edge_penalty_component": 0.0,
+      "runtime_sec": 587.962,
+      "delta": 0.5,
+      "runtime_penalty": 1464501.693414484,
+      "cost": 41185708.95034772
+    }
+  },
+  {
+    "case": "case5",
+    "exec_status": "CORRECT",
+    "status": "PASS",
+    "reason": null,
+    "checker_pass": true,
+    "total_wirelength": 980387255.5,
+    "outline_area": 39814170.0,
+    "cost": 184784761.25309035,
+    "overflow": 7838.0,
+    "runtime_sec": 272.982,
+    "timeout": false,
+    "first_error_code": null,
+    "cfg": "case5/output.cfg",
+    "report_json": "case5/report.json",
+    "viz_dir": "case5/viz",
+    "viz_paths": [
+      {
+        "idx": 0,
+        "file": "case5/viz/path_0.html",
+        "failed": false
+      },
+      {
+        "idx": 1,
+        "file": "case5/viz/path_1.html",
+        "failed": false
+      },
+      {
+        "idx": 2,
+        "file": "case5/viz/path_2.html",
+        "failed": false
+      },
+      {
+        "idx": 3,
+        "file": "case5/viz/path_3.html",
+        "failed": false
+      },
+      {
+        "idx": 4,
+        "file": "case5/viz/path_4.html",
+        "failed": false
+      }
+    ],
+    "failed_path_idxs": [],
+    "fail_root_cause": null,
+    "fail_root_detail": null,
+    "fail_evidence": null,
+    "edge_penalty": 0,
+    "base_cost": 88833532.775,
+    "edge_location_violation_count": 0,
+    "warning_codes": [
+      "CHANNEL_OVERFLOW",
+      "CHANNEL_OVERFLOW",
+      "CHANNEL_OVERFLOW",
+      "CHANNEL_OVERFLOW",
+      "CHANNEL_OVERFLOW",
+      "CHANNEL_OVERFLOW",
+      "CHANNEL_OVERFLOW",
+      "CHANNEL_OVERFLOW",
+      "CHANNEL_OVERFLOW",
+      "CHANNEL_OVERFLOW",
+      "CHANNEL_OVERFLOW",
+      "CHANNEL_OVERFLOW",
+      "CHANNEL_OVERFLOW",
+      "CHANNEL_OVERFLOW",
+      "CHANNEL_OVERFLOW",
+      "CHANNEL_OVERFLOW",
+      "CHANNEL_OVERFLOW",
+      "CHANNEL_OVERFLOW",
+      "CHANNEL_OVERFLOW",
+      "CHANNEL_OVERFLOW"
+    ],
+    "overflow_rate": 0.0029042806458485794,
+    "overflow_ft_penalty": 95089991.142165,
+    "cost_breakdown": {
+      "outline_area": 39814170.0,
+      "alpha_times_wl": 49019362.775000006,
+      "alpha": 0.05,
+      "total_wirelength": 980387255.5,
+      "channel_overflow_total": 7838.0,
+      "channel_total_capacity": 2698775.0,
+      "channel_overflow_rate": 0.0029042806458485794,
+      "ft_area_excess": 30925786.891644835,
+      "beta_lin": 20.0,
+      "beta_tail": 1.5,
+      "beta_ft": 3.0,
+      "threshold": 0.05,
+      "overflow_penalty": 2312630.467230503,
+      "ft_penalty": 92777360.6749345,
+      "overflow_ft_penalty": 95089991.142165,
+      "edge_penalty": 0.0,
+      "illegal_ft_delta_area": 0.0,
+      "lambda_ft": 10.0,
+      "illegal_ft_penalty": 0.0,
+      "gamma": 1.0,
+      "edge_penalty_component": 0.0,
+      "runtime_sec": 272.982,
+      "delta": 0.5,
+      "runtime_penalty": 861237.335925329,
+      "cost": 184784761.25309035
+    }
+  },
+  {
+    "case": "case6",
+    "exec_status": "CORRECT",
+    "status": "PASS",
+    "reason": null,
+    "checker_pass": true,
+    "total_wirelength": 7269700.0,
+    "outline_area": 3901350.0,
+    "cost": 5946935.488714531,
+    "overflow": 0.0,
+    "runtime_sec": 599.079,
+    "timeout": false,
+    "first_error_code": null,
+    "cfg": "case6/output.cfg",
+    "report_json": "case6/report.json",
+    "viz_dir": "case6/viz",
+    "viz_paths": [
+      {
+        "idx": 0,
+        "file": "case6/viz/path_0.html",
+        "failed": false
+      },
+      {
+        "idx": 1,
+        "file": "case6/viz/path_1.html",
+        "failed": false
+      },
+      {
+        "idx": 2,
+        "file": "case6/viz/path_2.html",
+        "failed": false
+      },
+      {
+        "idx": 3,
+        "file": "case6/viz/path_3.html",
+        "failed": false
+      },
+      {
+        "idx": 4,
+        "file": "case6/viz/path_4.html",
+        "failed": false
+      }
+    ],
+    "failed_path_idxs": [],
+    "fail_root_cause": null,
+    "fail_root_detail": null,
+    "fail_evidence": null,
+    "edge_penalty": 0,
+    "base_cost": 5355290.0,
+    "edge_location_violation_count": 0,
+    "warning_codes": [],
+    "overflow_rate": 0.0,
+    "overflow_ft_penalty": 0.0,
+    "cost_breakdown": {
+      "outline_area": 3901350.0,
+      "alpha_times_wl": 1453940.0,
+      "alpha": 0.2,
+      "total_wirelength": 7269700.0,
+      "channel_overflow_total": 0.0,
+      "channel_total_capacity": 137325.0,
+      "channel_overflow_rate": 0.0,
+      "ft_area_excess": 0.0,
+      "beta_lin": 20.0,
+      "beta_tail": 1.5,
+      "beta_ft": 3.0,
+      "threshold": 0.05,
+      "overflow_penalty": 0.0,
+      "ft_penalty": 0.0,
+      "overflow_ft_penalty": 0.0,
+      "edge_penalty": 0.0,
+      "illegal_ft_delta_area": 0.0,
+      "lambda_ft": 10.0,
+      "illegal_ft_penalty": 0.0,
+      "gamma": 1.0,
+      "edge_penalty_component": 0.0,
+      "runtime_sec": 599.079,
+      "delta": 0.5,
+      "runtime_penalty": 591645.4887145311,
+      "cost": 5946935.488714531
+    }
+  },
+  {
+    "case": "case7",
+    "exec_status": "CORRECT",
+    "status": "PASS",
+    "reason": null,
+    "checker_pass": true,
+    "total_wirelength": 35090090.0,
+    "outline_area": 5040000.0,
+    "cost": 11139824.568337537,
+    "overflow": 580.0,
+    "runtime_sec": 598.701,
+    "timeout": false,
+    "first_error_code": null,
+    "cfg": "case7/output.cfg",
+    "report_json": "case7/report.json",
+    "viz_dir": "case7/viz",
+    "viz_paths": [
+      {
+        "idx": 0,
+        "file": "case7/viz/path_0.html",
+        "failed": false
+      },
+      {
+        "idx": 1,
+        "file": "case7/viz/path_1.html",
+        "failed": false
+      },
+      {
+        "idx": 2,
+        "file": "case7/viz/path_2.html",
+        "failed": false
+      },
+      {
+        "idx": 3,
+        "file": "case7/viz/path_3.html",
+        "failed": false
+      },
+      {
+        "idx": 4,
+        "file": "case7/viz/path_4.html",
+        "failed": false
+      }
+    ],
+    "failed_path_idxs": [],
+    "fail_root_cause": null,
+    "fail_root_detail": null,
+    "fail_evidence": null,
+    "edge_penalty": 0,
+    "base_cost": 10303513.5,
+    "edge_location_violation_count": 0,
+    "warning_codes": [
+      "CHANNEL_OVERFLOW"
+    ],
+    "overflow_rate": 0.0016296712559707783,
+    "overflow_ft_penalty": 164270.86260185443,
+    "cost_breakdown": {
+      "outline_area": 5040000.0,
+      "alpha_times_wl": 5263513.5,
+      "alpha": 0.15,
+      "total_wirelength": 35090090.0,
+      "channel_overflow_total": 580.0,
+      "channel_total_capacity": 355900.0,
+      "channel_overflow_rate": 0.0016296712559707783,
+      "ft_area_excess": 0.0,
+      "beta_lin": 20.0,
+      "beta_tail": 1.5,
+      "beta_ft": 3.0,
+      "threshold": 0.05,
+      "overflow_penalty": 164270.86260185443,
+      "ft_penalty": 0.0,
+      "overflow_ft_penalty": 164270.86260185443,
+      "edge_penalty": 0.0,
+      "illegal_ft_delta_area": 0.0,
+      "lambda_ft": 10.0,
+      "illegal_ft_penalty": 0.0,
+      "gamma": 1.0,
+      "edge_penalty_component": 0.0,
+      "runtime_sec": 598.701,
+      "delta": 0.5,
+      "runtime_penalty": 672040.2057356837,
+      "cost": 11139824.568337537
+    }
+  }
+]

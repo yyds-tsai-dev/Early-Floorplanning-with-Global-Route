@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="zh-TW"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>cade0002 - 評測結果</title>
+<style>
+ *{margin:0;padding:0;box-sizing:border-box}
+ body{font-family:'Segoe UI',Tahoma,sans-serif;background:#f4f4f9;padding:26px;color:#222}
+ .wrap{max-width:1080px;margin:0 auto}
+ h1{font-size:1.7em}
+ h2{font-size:1.2em;color:#4c1d95;margin:20px 0 10px;border-bottom:2px solid #4c1d95;padding-bottom:4px}
+ .exec{display:inline-block;color:#fff;background:#16a34a;padding:3px 14px;border-radius:18px;font-weight:700;margin:8px 0}
+ .meta{color:#555;margin:8px 0 16px} .meta b{color:#222}
+ table{width:100%;border-collapse:collapse;background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 6px 20px rgba(0,0,0,.08)}
+ th,td{padding:9px 10px;border-bottom:1px solid #eee;font-size:.9em;text-align:left}
+ th{background:#4c1d95;color:#fff}
+ td.num{text-align:right;font-variant-numeric:tabular-nums}
+ a{color:#667eea;text-decoration:none} a:hover{text-decoration:underline}
+ .back{display:inline-block;margin-bottom:14px}
+ .hints{margin-top:24px}
+</style></head><body><div class="wrap">
+<a class="back" href="../summary.html">← 回 summary</a>
+<h1>cade0002</h1>
+<span class="exec">CORRECT</span>
+<p class="meta">
+ Pass: <b>8/8</b> ·
+ total wirelength: <b>1,340,842,936</b> ·
+ total area: <b>126,252,885</b> ·
+ total cost: <b>322,102,436</b> <span style="color:#6b7280;font-size:.9em">rt penalty: 7,602,354</span> ·
+ overflow: <b>10,939</b> ·
+ runtime: <b>4,435.1s</b><br>
+ main reason: <b>-</b>
+</p>
+<div style="margin:14px 0;padding:10px 14px;background:#1e3a5f;border-left:4px solid #38bdf8;border-radius:4px;"><a href="calculation.html" style="color:#7dd3fc;text-decoration:none;font-weight:700;font-size:.95em;">🧮 查看成本計算範例</a> &nbsp;<span style="color:#94a3b8;font-size:.85em;">(逐 case cost breakdown + ONE PATH 線長範例 + SVG)</span></div>
+<h2>📊 各 Case 結果</h2>
+<table>
+ <thead><tr>
+  <th>Case</th><th>Status</th><th>wirelength</th><th>outline_area</th>
+  <th>overflow</th><th>cost</th><th>runtime(s)</th><th>reason</th>
+  <th>first_error / warnings</th><th>執行失敗根因</th><th>viz</th>
+ </tr></thead>
+ <tbody>
+      <tr>
+        <td>case0</td>
+        <td style="color:#16a34a;font-weight:700">PASS</td>
+        <td class="num">1,491,500</td>
+        <td class="num">3,858,480</td>
+        <td class="num">-</td>
+        <td class="num">4,894,918</td>
+        <td class="num">599.69</td>
+        <td></td>
+        <td></td>
+        <td></td>
+        <td><a href="case0/viz/floorplan.html">floorplan</a> · <a href="case0/viz/channel_overflow.html">overflow</a> · <a href="case0/viz/path_0.html">path0</a> · <a href="case0/viz/path_1.html">path1</a> · <a href="case0/viz/path_2.html">path2</a> · <a href="case0/viz/path_3.html">path3</a> · <a href="case0/viz/path_4.html">path4</a></td>
+      </tr>
+      <tr>
+        <td>case1</td>
+        <td style="color:#16a34a;font-weight:700">PASS</td>
+        <td class="num">10,545,985</td>
+        <td class="num">5,687,600</td>
+        <td class="num">-</td>
+        <td class="num">7,985,035</td>
+        <td class="num">600.06</td>
+        <td></td>
+        <td></td>
+        <td></td>
+        <td><a href="case1/viz/floorplan.html">floorplan</a> · <a href="case1/viz/channel_overflow.html">overflow</a> · <a href="case1/viz/path_0.html">path0</a> · <a href="case1/viz/path_1.html">path1</a> · <a href="case1/viz/path_2.html">path2</a> · <a href="case1/viz/path_3.html">path3</a> · <a href="case1/viz/path_4.html">path4</a></td>
+      </tr>
+      <tr>
+        <td>case2</td>
+        <td style="color:#16a34a;font-weight:700">PASS</td>
+        <td class="num">93,861,474</td>
+        <td class="num">27,243,702</td>
+        <td class="num">-</td>
+        <td class="num">38,167,156</td>
+        <td class="num">589.06</td>
+        <td></td>
+        <td></td>
+        <td></td>
+        <td><a href="case2/viz/floorplan.html">floorplan</a> · <a href="case2/viz/channel_overflow.html">overflow</a> · <a href="case2/viz/path_0.html">path0</a> · <a href="case2/viz/path_1.html">path1</a> · <a href="case2/viz/path_2.html">path2</a> · <a href="case2/viz/path_3.html">path3</a> · <a href="case2/viz/path_4.html">path4</a></td>
+      </tr>
+      <tr>
+        <td>case3</td>
+        <td style="color:#16a34a;font-weight:700">PASS</td>
+        <td class="num">71,893,228</td>
+        <td class="num">15,891,043</td>
+        <td class="num">-</td>
+        <td class="num">27,998,097</td>
+        <td class="num">587.55</td>
+        <td></td>
+        <td></td>
+        <td></td>
+        <td><a href="case3/viz/floorplan.html">floorplan</a> · <a href="case3/viz/channel_overflow.html">overflow</a> · <a href="case3/viz/path_0.html">path0</a> · <a href="case3/viz/path_1.html">path1</a> · <a href="case3/viz/path_2.html">path2</a> · <a href="case3/viz/path_3.html">path3</a> · <a href="case3/viz/path_4.html">path4</a></td>
+      </tr>
+      <tr>
+        <td>case4</td>
+        <td style="color:#16a34a;font-weight:700">PASS</td>
+        <td class="num">140,303,704</td>
+        <td class="num">24,816,540</td>
+        <td class="num">2,521</td>
+        <td class="num">41,185,709</td>
+        <td class="num">587.96</td>
+        <td></td>
+        <td><br><span style="color:#666">📋 CH overflow ×4 (penalty applied)</span></td>
+        <td></td>
+        <td><a href="case4/viz/floorplan.html">floorplan</a> · <a href="case4/viz/channel_overflow.html">overflow</a> · <a href="case4/viz/path_0.html">path0</a> · <a href="case4/viz/path_1.html">path1</a> · <a href="case4/viz/path_2.html">path2</a> · <a href="case4/viz/path_3.html">path3</a> · <a href="case4/viz/path_4.html">path4</a></td>
+      </tr>
+      <tr>
+        <td>case5</td>
+        <td style="color:#16a34a;font-weight:700">PASS</td>
+        <td class="num">980,387,256</td>
+        <td class="num">39,814,170</td>
+        <td class="num">7,838</td>
+        <td class="num">184,784,761</td>
+        <td class="num">272.98</td>
+        <td></td>
+        <td><br><span style="color:#666">📋 CH overflow ×20 (penalty applied)</span></td>
+        <td></td>
+        <td><a href="case5/viz/floorplan.html">floorplan</a> · <a href="case5/viz/channel_overflow.html">overflow</a> · <a href="case5/viz/path_0.html">path0</a> · <a href="case5/viz/path_1.html">path1</a> · <a href="case5/viz/path_2.html">path2</a> · <a href="case5/viz/path_3.html">path3</a> · <a href="case5/viz/path_4.html">path4</a></td>
+      </tr>
+      <tr>
+        <td>case6</td>
+        <td style="color:#16a34a;font-weight:700">PASS</td>
+        <td class="num">7,269,700</td>
+        <td class="num">3,901,350</td>
+        <td class="num">-</td>
+        <td class="num">5,946,935</td>
+        <td class="num">599.08</td>
+        <td></td>
+        <td></td>
+        <td></td>
+        <td><a href="case6/viz/floorplan.html">floorplan</a> · <a href="case6/viz/channel_overflow.html">overflow</a> · <a href="case6/viz/path_0.html">path0</a> · <a href="case6/viz/path_1.html">path1</a> · <a href="case6/viz/path_2.html">path2</a> · <a href="case6/viz/path_3.html">path3</a> · <a href="case6/viz/path_4.html">path4</a></td>
+      </tr>
+      <tr>
+        <td>case7</td>
+        <td style="color:#16a34a;font-weight:700">PASS</td>
+        <td class="num">35,090,090</td>
+        <td class="num">5,040,000</td>
+        <td class="num">580</td>
+        <td class="num">11,139,825</td>
+        <td class="num">598.70</td>
+        <td></td>
+        <td><br><span style="color:#666">📋 CH overflow ×1 (penalty applied)</span></td>
+        <td></td>
+        <td><a href="case7/viz/floorplan.html">floorplan</a> · <a href="case7/viz/channel_overflow.html">overflow</a> · <a href="case7/viz/path_0.html">path0</a> · <a href="case7/viz/path_1.html">path1</a> · <a href="case7/viz/path_2.html">path2</a> · <a href="case7/viz/path_3.html">path3</a> · <a href="case7/viz/path_4.html">path4</a></td>
+      </tr></tbody>
+</table>
+
+
+</div></body></html>
