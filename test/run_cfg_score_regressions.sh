@@ -10,7 +10,7 @@ g++ -std=c++17 -O2 -Wall -Wextra -pedantic \
     -I. \
     test/regression_cfg_score.cpp \
     src/cfg_score.cpp src/eval.cpp src/io.cpp src/placement_engine.cpp src/respace.cpp \
-    src/routing.cpp src/search.cpp src/wl_redistribute.cpp src/validate.cpp \
+    src/routing.cpp src/search.cpp src/lns_polish.cpp src/wl_redistribute.cpp src/validate.cpp \
     -o test/cfg_score_regression_bin
 
 ./test/cfg_score_regression_bin

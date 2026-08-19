@@ -12,7 +12,7 @@ make >/dev/null
 g++ -std=c++17 -O2 -Wall -Wextra -pedantic -I. \
     test/regression_b5_20260724.cpp \
     src/cfg_score.cpp src/routing.cpp src/eval.cpp src/io.cpp src/validate.cpp \
-    src/placement_engine.cpp src/search.cpp src/wl_redistribute.cpp src/respace.cpp \
+    src/placement_engine.cpp src/search.cpp src/lns_polish.cpp src/wl_redistribute.cpp src/respace.cpp \
     -o test/b5_regression_bin
 
 ./test/b5_regression_bin

@@ -237,6 +237,13 @@ int main(int argc, char** argv) {
         // false when absent, so maybeAdoptWlRedistribute never runs and every existing
         // caller/regression stays byte-identical to pre-C1a.
         problem.wl_redistribute = hasFlag(argc, argv, "--wl-redistribute");
+        // C3 (exact local-group LNS re-placement, .superpowers/sdd/c3-wlrec-briefs-20260817.md
+        // BRIEF A): hidden/undocumented measurement flag, same precedent as --wl-redistribute above
+        // -- intentionally NOT in the usage banner. Default false (Problem.lns_polish's own default,
+        // model.hpp) keeps both search.cpp call sites' `if (problem.lns_polish)` gate false when
+        // absent, so maybeAdoptLnsPolish never runs and every existing caller/regression stays
+        // byte-identical to pre-C3.
+        problem.lns_polish = hasFlag(argc, argv, "--lns-polish");
         // B1 (constant-gap negotiation pricing, .superpowers/sdd/levers-batch2-briefs-20260817.md
         // Brief 2): hidden/undocumented measurement flag, same precedent as --wl-redistribute above
         // -- intentionally NOT in the usage banner. Default false (Problem.route_const_gap's own
@@ -339,6 +346,16 @@ int main(int argc, char** argv) {
         if (problem.wl_redistribute) {
             std::cerr << " wl_rungs_tried=" << result.wl_rungs_tried
                       << " wl_adoptions=" << result.wl_adoptions;
+        }
+        // C3 (exact local-group LNS re-placement, .superpowers/sdd/c3-wlrec-briefs-20260817.md
+        // BRIEF A §A6): additive stderr fields, printed ONLY when --lns-polish is set -- a flag-off
+        // run's summary line is byte-identical to pre-C3 (no .cfg byte is ever affected either way;
+        // this is stderr-only telemetry).
+        if (problem.lns_polish) {
+            std::cerr << " lns_groups_tried=" << result.lns_groups_tried
+                      << " lns_rungs_tried=" << result.lns_rungs_tried
+                      << " lns_adoptions=" << result.lns_adoptions
+                      << " lns_nodes_expanded=" << result.lns_nodes_expanded;
         }
         std::cerr << "\n";
         for (const auto& msg : validation.messages) std::cerr << "validate: " << msg << "\n";

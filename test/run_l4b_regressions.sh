@@ -12,7 +12,7 @@ make >/dev/null
 g++ -std=c++17 -O2 -Wall -Wextra -pedantic -I. \
     test/regression_l4b_20260815.cpp \
     src/cfg_score.cpp src/eval.cpp src/io.cpp src/placement_engine.cpp src/respace.cpp \
-    src/routing.cpp src/search.cpp src/validate.cpp src/wl_redistribute.cpp \
+    src/routing.cpp src/search.cpp src/lns_polish.cpp src/validate.cpp src/wl_redistribute.cpp \
     -o test/l4b_regression_bin
 
 ./test/l4b_regression_bin

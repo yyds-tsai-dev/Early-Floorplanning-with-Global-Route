@@ -248,6 +248,22 @@ struct SearchResult {
     // set (no .cfg byte or output is ever affected).
     int wl_rungs_tried = 0;
     int wl_adoptions = 0;
+    // C3 (exact local-group LNS re-placement, .superpowers/sdd/c3-wlrec-briefs-20260817.md BRIEF A
+    // §A6): telemetry counters accumulated directly by maybeAdoptLnsPolish (search.cpp) on THIS
+    // SearchResult, then summed across sub-runs by runHybridPlacementSearch and across portfolio legs
+    // by PortfolioFold::admit -- same "whole-struct copy overwritten with the sub-run SUM" precedent
+    // wl_rungs_tried/wl_adoptions above already established. `lns_groups_tried` counts how many
+    // (round, group) pairs actually reached the B&B (group size >= 2 after A7's drops);
+    // `lns_rungs_tried` counts every distinct (placementKey-deduped) candidate handed to exactCached;
+    // `lns_adoptions` counts how many of those were actually adopted via outlineSweepBetter;
+    // `lns_nodes_expanded` sums LnsPolishStats::nodes_expanded across every lnsPolishIterates call.
+    // All default 0, and stay 0 whenever --lns-polish is absent (the call sites' own
+    // `if (problem.lns_polish)` gate means maybeAdoptLnsPolish never even runs). Printed in main.cpp
+    // stderr ONLY when the flag is set (no .cfg byte or output is ever affected).
+    int lns_groups_tried = 0;
+    int lns_rungs_tried = 0;
+    int lns_adoptions = 0;
+    int lns_nodes_expanded = 0;
 };
 
 // Exact-scoring callback shape used by the elite pass's exact_cache (search.cpp's `exactCached`
@@ -513,6 +529,12 @@ struct PortfolioFold {
     // picked leg's.
     int total_wl_rungs_tried = 0;
     int total_wl_adoptions = 0;
+    // C3 (.superpowers/sdd/c3-wlrec-briefs-20260817.md BRIEF A §A6): summed lns_* telemetry across
+    // ALL admitted legs, same precedent as total_wl_rungs_tried/total_wl_adoptions above.
+    int total_lns_groups_tried = 0;
+    int total_lns_rungs_tried = 0;
+    int total_lns_adoptions = 0;
+    int total_lns_nodes_expanded = 0;
     bool have_result = false;
 
     bool admit(const Problem& problem, const SearchResult& leg_result, const SearchVariant& variant, int leg_seed,

@@ -218,6 +218,20 @@ struct Problem {
     // (problem.wl_redistribute) maybeAdoptWlRedistribute(...)` never even calls the function (an
     // `if`, never a no-op call), so a flag-off run performs zero extra exact evals/allocs/RNG draws.
     bool wl_redistribute = false;
+    // C3 (exact local-group LNS re-placement, .superpowers/sdd/c3-wlrec-briefs-20260817.md BRIEF A):
+    // solver-internal knob gating lns_polish.cpp's node-capped exact branch-and-bound over a small
+    // connectivity-driven group of movable blocks' joint position assignment (lnsPolishIterates),
+    // invoked by search.cpp's maybeAdoptLnsPolish at both maybeAdoptWlRedistribute/
+    // maybeAdoptCapacityGapRungs call sites, BEFORE both (BRIEF A §A4: C3 relocates whole groups, C1a
+    // re-spaces neighbours around the hole that relocation frees, B7 gets the last word on any
+    // overflow either creates). NEVER parsed from the input CSV (io.cpp does not touch this field;
+    // every parsed Problem keeps the default false) -- exists purely so main.cpp's hidden
+    // --lns-polish measurement flag can opt a run into it, the same flag-gated-variant precedent as
+    // wl_redistribute/snap_resize_move above. Default false reproduces every pre-C3 code path
+    // byte-identically: both call sites' `if (problem.lns_polish) maybeAdoptLnsPolish(...)` never
+    // even call the function (an `if`, never a no-op call), so a flag-off run performs zero extra
+    // exact evals/allocs/RNG draws.
+    bool lns_polish = false;
     // B1 (constant-gap negotiation pricing, .superpowers/sdd/levers-batch2-briefs-20260817.md
     // Brief 2): solver-internal knob gating routing.cpp's negotiation-round history pricing --
     // replaces the escalating, order-dependent kHistoryBump surcharge (bumped additively each round,

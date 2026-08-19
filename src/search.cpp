@@ -10,6 +10,7 @@
 
 #include "eval.hpp"
 #include "ft.hpp"
+#include "lns_polish.hpp"
 #include "rank_stats.hpp"
 #include "respace.hpp"
 #include "validate.hpp"
@@ -199,6 +200,56 @@ void maybeAdoptCapacityGapRungs(const Problem& problem, const ExactCachedFn& exa
             result.best_placement = candidate_effective;
             result.best_routing = candidate_routing;
         }
+    }
+}
+
+// C3 (exact local-group LNS re-placement, .superpowers/sdd/c3-wlrec-briefs-20260817.md BRIEF A §A4):
+// picks a connectivity-driven group (lnsSelectGroup) for each of kLnsRounds distinct rounds, runs the
+// node-capped exact B&B (lnsPolishIterates) over that group's joint position assignment, and tries
+// its up-to-3 chronological incumbent rungs PLUS one shrink-wrap variant of the best (last) rung --
+// the SAME "placementKey-dedup before exactCached, adopt via outlineSweepBetter" discipline
+// maybeAdoptWlRedistribute below already uses (mirrored deliberately: both are Pareto-safe by
+// construction, and lnsPolishIterates' own incumbent seed is the CURRENT assignment, so a round that
+// finds nothing returns {} at zero exact-eval cost, same "pre-gate" pattern). At most
+// (3 incumbents + 1 shrink-wrap) * kLnsRounds = 8 real exact evals per call site (A5 budget). ONLY
+// ever called from behind `if (problem.lns_polish)` at both call sites below -- never gated
+// internally -- so a flag-off run never even enters this function.
+void maybeAdoptLnsPolish(const Problem& problem, const ExactCachedFn& exactCached, SearchResult& result) {
+    for (int round = 0; round < kLnsRounds; ++round) {
+        std::vector<int> group = lnsSelectGroup(problem, result.best_routing, round);
+        if (group.size() < 2) continue;
+        ++result.lns_groups_tried;
+
+        LnsPolishStats stats;
+        std::vector<Placement> iterates = lnsPolishIterates(problem, result.best_placement, group, &stats);
+        result.lns_nodes_expanded += stats.nodes_expanded;
+        if (iterates.empty()) continue;  // pre-gate: no improvement found under the proxy -- zero evals
+
+        std::vector<std::string> tried_keys;
+        auto tryCandidate = [&](const Placement& candidate) {
+            std::string key = placementKey(candidate);
+            for (const auto& seen : tried_keys) {
+                if (seen == key) return;
+            }
+            tried_keys.push_back(key);
+            ++result.lns_rungs_tried;
+            RoutingResult candidate_routing;
+            Placement candidate_effective;
+            Score candidate_score = exactCached(candidate, &candidate_routing, &candidate_effective);
+            if (outlineSweepBetter(candidate_routing, candidate_score.value, result.best_routing, result.best_score.value)) {
+                result.best_score = candidate_score;
+                result.best_placement = candidate_effective;
+                result.best_routing = candidate_routing;
+                ++result.lns_adoptions;
+            }
+        };
+
+        for (const auto& iterate : iterates) tryCandidate(iterate);
+
+        Placement shrink_wrapped = iterates.back();  // A5: shrink-wrap of the best (final) incumbent
+        shrink_wrapped.outline_w = 0.0;
+        shrink_wrapped.outline_h = 0.0;
+        tryCandidate(shrink_wrapped);
     }
 }
 
@@ -1024,6 +1075,11 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
 
     (void)best_state;
     (void)current_place;
+    // C3 (.superpowers/sdd/c3-wlrec-briefs-20260817.md BRIEF A §A4): BEFORE C1a/B7 below -- C3
+    // relocates whole groups via exact re-placement, C1a re-spaces neighbours around the hole C3's
+    // relocation frees, B7 gets the last word on any overflow either tightening lever creates. `if`,
+    // never a no-op call: a flag-off run never enters maybeAdoptLnsPolish at all.
+    if (problem.lns_polish) maybeAdoptLnsPolish(problem, exactCached, result);
     // C1a (fixed-topology WL-driven whitespace redistribution, .superpowers/sdd/c1-design-
     // 20260817.md §2): BEFORE the B7 capacity rungs below -- C1 tightens toward the wire-weighted
     // median, B7 widens interior gaps for capacity; running C1 first means B7's profit key reads
@@ -1074,6 +1130,10 @@ SearchResult runPlacementSearch(const Problem& problem, const PlacementEngine& e
         result.best_routing = post_finalize_swept_compacted.routing;
     }
 
+    // C3: second (post-finalize) pass, same "before C1a/B7" ordering as the elite-loop call site
+    // above -- finalizeFeedthrough + the B3.1 sweeps above may have moved best_placement again, so
+    // re-select/re-polish groups against the FINAL committed geometry before C1a/B7 run against it.
+    if (problem.lns_polish) maybeAdoptLnsPolish(problem, exactCached, result);
     // C1a: second (post-finalize) pass, same "before B7" ordering as the elite-loop call site above
     // -- finalizeFeedthrough + the B3.1 sweeps above may have moved best_placement again, so
     // re-redistribute against the FINAL committed geometry before B7 re-ranks its own gap rungs
@@ -1194,6 +1254,16 @@ SearchResult runHybridPlacementSearch(const Problem& problem, const SearchOption
                            (legacy_diverged ? bstar_b_result.wl_rungs_tried : 0);
     result.wl_adoptions = sp_result.wl_adoptions + bstar_a_result.wl_adoptions +
                          (legacy_diverged ? bstar_b_result.wl_adoptions : 0);
+    // C3 (.superpowers/sdd/c3-wlrec-briefs-20260817.md BRIEF A §A6): same "sum across executed
+    // sub-runs" rule as wl_rungs_tried/wl_adoptions above.
+    result.lns_groups_tried = sp_result.lns_groups_tried + bstar_a_result.lns_groups_tried +
+                             (legacy_diverged ? bstar_b_result.lns_groups_tried : 0);
+    result.lns_rungs_tried = sp_result.lns_rungs_tried + bstar_a_result.lns_rungs_tried +
+                            (legacy_diverged ? bstar_b_result.lns_rungs_tried : 0);
+    result.lns_adoptions = sp_result.lns_adoptions + bstar_a_result.lns_adoptions +
+                          (legacy_diverged ? bstar_b_result.lns_adoptions : 0);
+    result.lns_nodes_expanded = sp_result.lns_nodes_expanded + bstar_a_result.lns_nodes_expanded +
+                               (legacy_diverged ? bstar_b_result.lns_nodes_expanded : 0);
     return result;
 }
 
@@ -1301,6 +1371,12 @@ bool PortfolioFold::admit(const Problem& problem, const SearchResult& leg_result
     // total_sa_wall_sec above does -- every leg's own contribution, not just the picked leg's.
     total_wl_rungs_tried += leg_result.wl_rungs_tried;
     total_wl_adoptions += leg_result.wl_adoptions;
+    // C3 (.superpowers/sdd/c3-wlrec-briefs-20260817.md BRIEF A §A6): accumulate telemetry the same
+    // way total_wl_rungs_tried/total_wl_adoptions above do -- every leg's own contribution.
+    total_lns_groups_tried += leg_result.lns_groups_tried;
+    total_lns_rungs_tried += leg_result.lns_rungs_tried;
+    total_lns_adoptions += leg_result.lns_adoptions;
+    total_lns_nodes_expanded += leg_result.lns_nodes_expanded;
     ++legs_run;
     bool improved = !have_result || paydownBetter(leg_result.best_routing, leg_result.best_score.value,
                                                    result.best_routing, result.best_score.value);
@@ -1663,6 +1739,12 @@ SearchResult runPricingPortfolio(const Problem& problem, const std::string& engi
     // overwriting the picked leg's own stamp" discipline as sa_wall_time_sec above.
     result.wl_rungs_tried = fold.total_wl_rungs_tried;
     result.wl_adoptions = fold.total_wl_adoptions;
+    // C3 (.superpowers/sdd/c3-wlrec-briefs-20260817.md BRIEF A §A6): same "summed across all folded
+    // legs, overwriting the picked leg's own stamp" discipline as wl_rungs_tried/wl_adoptions above.
+    result.lns_groups_tried = fold.total_lns_groups_tried;
+    result.lns_rungs_tried = fold.total_lns_rungs_tried;
+    result.lns_adoptions = fold.total_lns_adoptions;
+    result.lns_nodes_expanded = fold.total_lns_nodes_expanded;
     return result;
 }
 

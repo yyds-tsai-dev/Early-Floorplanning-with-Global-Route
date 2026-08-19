@@ -40,3 +40,4 @@ test/cheap_proxy_v2_regression_bin
 test/l3bc_regression_bin
 test/l4b_regression_bin
 test/c1_regression_bin
+test/lns_regression_bin
