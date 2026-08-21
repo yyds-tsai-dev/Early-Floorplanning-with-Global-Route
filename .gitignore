@@ -41,3 +41,7 @@ test/l3bc_regression_bin
 test/l4b_regression_bin
 test/c1_regression_bin
 test/lns_regression_bin
+test/const_gap_regression_bin
+test/notch_regression_bin
+test/snap_resize_regression_bin
+test/plateau_regression_bin
