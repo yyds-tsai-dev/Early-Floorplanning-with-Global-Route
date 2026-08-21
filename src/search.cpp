@@ -1332,6 +1332,59 @@ bool shouldRunPhase2Leg(double remaining_sec, double leg_phase1_wall_time_sec) {
     return remaining_sec >= kPhase2LegMargin * leg_phase1_wall_time_sec;
 }
 
+namespace {
+// P1 (plateau-stop, .superpowers/sdd/p1-plateau-stop-design-20260819.md §10.3): file-local helper
+// wrapping the portfolio-clock read runPricingPortfolio's phase-1/deep/ladder/phase-2 blocks all
+// need, so the pattern is not duplicated by hand at every new call site.
+double secondsSince(const std::chrono::steady_clock::time_point& start) {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+}
+}  // namespace
+
+// P1 §5.3: see the doc comment in search.hpp.
+double runtimeSecondPrice(double outline_area) {
+    return outline_area > 0.0 ? kRuntimeCostDelta * std::sqrt(outline_area) : 0.0;
+}
+
+// P1 §5.2: see the doc comment in search.hpp. Each condition its own early return, in the S1..S5
+// order the design pins.
+bool plateauStopDecision(const PlateauInputs& in) {
+    if (!in.have_best) return false;                          // S1 legality (no result yet)
+    if (in.best_open_routes != 0) return false;                // S1 legality (open routes)
+    if (in.phase2_legs_launched < in.min_legs) return false;   // S2 evidence floor
+    if (in.legal_leg_samples < in.min_legs) return false;      // S3 enough legal samples
+    if (in.margin <= 0.0) return false;                        // S4 disable path
+    const double price = runtimeSecondPrice(in.best_outline_area);
+    if (price <= 0.0) return false;                             // S4 well-defined price
+    const double patience = std::max(in.margin * in.leg_value_spread / price, in.round_wall_sec);
+    return in.drought_sec >= patience;                          // S5 patience
+}
+
+// P1 §10.1: see the doc comment in search.hpp.
+void PlateauTracker::observeLeg(double leg_value, int leg_open_routes, bool improved, double elapsed_sec) {
+    if (leg_open_routes == 0) leg_values.push_back(leg_value);
+    if (improved) last_improve_sec = elapsed_sec;
+}
+
+void PlateauTracker::beginPhase2(double elapsed_sec) {
+    phase2_start_sec = elapsed_sec;
+    last_improve_sec = std::max(last_improve_sec, elapsed_sec);
+}
+
+void PlateauTracker::notePhase2LegLaunched() { ++phase2_legs_launched; }
+
+double PlateauTracker::legValueSpread() const {
+    if (leg_values.size() < 2) return 0.0;
+    std::vector<double> sorted = leg_values;
+    std::sort(sorted.begin(), sorted.end());
+    const double median = sorted[sorted.size() / 2];  // upper median for even sizes (pinned by test)
+    return std::max(0.0, median - sorted.front());
+}
+
+double PlateauTracker::droughtSec(double elapsed_sec) const {
+    return elapsed_sec - std::max(last_improve_sec, phase2_start_sec);
+}
+
 // L3c.1 (M3 verdict, docs/research/2026-08-15-case5-l1-m2-verdict-and-m1-wall-breakdown.md §4):
 // the design's original "fits once" trigger (factor 1.0) left case5@600s in a measured bad middle
 // regime -- T0~50s on a fast machine makes 10*T0 <= 600 so deep mode stayed off, yet the registry
@@ -1472,6 +1525,10 @@ SearchResult runPricingPortfolio(const Problem& problem, const std::string& engi
     };
 
     PortfolioFold fold;
+    // P1 (plateau-stop, .superpowers/sdd/p1-plateau-stop-design-20260819.md §10.3): accumulates the
+    // leg-value dispersion + last-improvement clock the phase-2 stop predicate needs, fed from the
+    // SAME admit stream `fold` sees (every phase: phase 1, deep legs, ladder legs, phase 2).
+    PlateauTracker plateau;
 
     // Phase 1 (B5a.2; per-leg timing + streaming fold added by B2): the ENTIRE registry at
     // options.iters, time budget forced OFF -- exactly the default (budget-off) run. This is the
@@ -1524,7 +1581,10 @@ SearchResult runPricingPortfolio(const Problem& problem, const std::string& engi
         SearchResult leg_result = runLeg(variants[i], phase1_options);
         leg_wall_times[i] = std::chrono::duration<double>(std::chrono::steady_clock::now() - leg_start).count();
         phase1_max_leg_wall = std::max(phase1_max_leg_wall, leg_wall_times[i]);
-        fold.admit(problem, leg_result, variants[i], options.seed, on_improved);
+        const bool phase1_improved = fold.admit(problem, leg_result, variants[i], options.seed, on_improved);
+        // P1: feed the SAME admit stream into the dispersion/last-improvement tracker.
+        plateau.observeLeg(leg_result.best_score.value, leg_result.best_routing.open_routes, phase1_improved,
+                           secondsSince(phase1_start));
         phase1_legs_run = static_cast<int>(i) + 1;
         if (i == 0) {
             leg0_sa_wall_sec = leg_result.sa_wall_time_sec;
@@ -1604,7 +1664,10 @@ SearchResult runPricingPortfolio(const Problem& problem, const std::string& engi
                 static_cast<std::size_t>(d) < shelf_seeds.size() ? &shelf_seeds[static_cast<std::size_t>(d)] : nullptr;
             SearchResult leg_result = runLeg(variant, leg_options, /*force_gated_pads=*/true, shelf,
                                              /*force_proxy_v2=*/shelf != nullptr);
-            fold.admit(problem, leg_result, variant, options.seed, on_improved);
+            const bool deep_improved = fold.admit(problem, leg_result, variant, options.seed, on_improved);
+            // P1: deep legs are folded into the SAME admit stream, so they contribute to X too.
+            plateau.observeLeg(leg_result.best_score.value, leg_result.best_routing.open_routes, deep_improved,
+                               secondsSince(phase1_start));
             ++deep_legs_run;
         }
     }
@@ -1669,7 +1732,11 @@ SearchResult runPricingPortfolio(const Problem& problem, const std::string& engi
             Score true_score = exactScore(problem, leg_result.best_placement, &true_routing);
             leg_result.best_score = true_score;
             leg_result.best_routing = true_routing;
-            fold.admit(problem, leg_result, fold.winner, leg_options.seed, on_improved);
+            const bool ladder_improved = fold.admit(problem, leg_result, fold.winner, leg_options.seed, on_improved);
+            // P1: observed with the ALREADY re-scored true-alpha value above, so the leg population
+            // the dispersion is computed over stays comparable across legs.
+            plateau.observeLeg(leg_result.best_score.value, leg_result.best_routing.open_routes, ladder_improved,
+                               secondsSince(phase1_start));
             ++ladder_legs_run;
         }
         ladder_wall_sec =
@@ -1688,6 +1755,18 @@ SearchResult runPricingPortfolio(const Problem& problem, const std::string& engi
     // round 1 admits zero legs and the sweep ends immediately, the same net effect.
     constexpr int kPhase2SeedStep = 1000;  // b2-brief.md item 1: far from hybrid's internal +1
     bool budget_phase2 = false;
+    // P1 (plateau-stop, .superpowers/sdd/p1-plateau-stop-design-20260819.md §10.2/§10.3): declared
+    // here (not inside the `if` below) so they stamp onto `result` at 0.0/false even when phase 2
+    // never runs at all (budget off, or phase 1 stopped early). `plateau_fire_sec == 0.0` is the
+    // "never fired" sentinel (matches time_budget_sec's own "0 = off" convention); `plateau_spread`
+    // tracks the MOST RECENTLY measured dispersion at any phase-2 decision point, frozen the instant
+    // the predicate first fires so it reports "S at that instant" -- and simply left at its last
+    // observed value if the predicate never fires (design §10.2: "final S if it never fired").
+    double plateau_fire_sec = 0.0;
+    double plateau_fire_value = 0.0;
+    double plateau_spread = 0.0;
+    bool plateau_fired = false;   // internal: true once plateau_spread has been frozen by a fire
+    bool plateau_stopped = false;
     // P0a: additionally gated on phase1_complete -- see its own doc comment above for why an
     // early-stopped phase 1 must skip phase 2 entirely rather than let shouldRunPhase2Leg see the
     // never-run legs' zeroed leg_wall_times entries.
@@ -1696,6 +1775,9 @@ SearchResult runPricingPortfolio(const Problem& problem, const std::string& engi
     // already false), but load-bearing for a 1-variant registry, where both could otherwise be true.
     if (options.time_budget_sec > 0.0 && phase1_complete && !deep_mode) {
         const auto phase2_start = std::chrono::steady_clock::now();
+        // P1: phase-2 start is also the reference point droughtSec measures against (raises
+        // last_improve_sec to at least this instant, per PlateauTracker::beginPhase2's contract).
+        plateau.beginPhase2(secondsSince(phase1_start));
         for (int round = 1;; ++round) {
             const int seed_for_round = options.seed + kPhase2SeedStep * round;
             bool any_leg_ran = false;
@@ -1705,15 +1787,48 @@ SearchResult runPricingPortfolio(const Problem& problem, const std::string& engi
                 // D2: also subtract the ladder block's own wall-clock spend (0 when --wl-ladder is
                 // absent) -- see ladder_wall_sec's own doc comment above.
                 const double remaining = options.time_budget_sec - t0 - ladder_wall_sec - elapsed_phase2;
+                // P1 §10.3 edit 3: the stop decision lives HERE, immediately BEFORE the
+                // shouldRunPhase2Leg fit gate -- every phase-2 leg-launch decision point, not just
+                // ones that pass the fit gate, so the predicate observes the true portfolio clock.
+                const double t_now = secondsSince(phase1_start);
+                PlateauInputs pin;
+                pin.have_best = fold.have_result;
+                pin.best_open_routes = fold.result.best_routing.open_routes;
+                pin.best_outline_area = fold.result.best_score.outline_area;
+                pin.leg_value_spread = plateau.legValueSpread();
+                pin.legal_leg_samples = static_cast<int>(plateau.leg_values.size());
+                pin.phase2_legs_launched = plateau.phase2_legs_launched;
+                pin.min_legs = static_cast<int>(variants.size());
+                pin.drought_sec = plateau.droughtSec(t_now);
+                pin.round_wall_sec = t0;
+                pin.margin = options.plateau_margin;
+                if (!plateau_fired) plateau_spread = pin.leg_value_spread;
+                if (plateauStopDecision(pin)) {
+                    if (plateau_fire_sec == 0.0) {  // record the FIRST fire, observe-mode included
+                        plateau_fire_sec = t_now;
+                        plateau_fire_value = fold.result.best_score.value;
+                        plateau_spread = pin.leg_value_spread;
+                        plateau_fired = true;
+                    }
+                    if (options.plateau_stop) {  // STAGE 1: only an explicit --plateau-stop breaks
+                        plateau_stopped = true;
+                        break;
+                    }
+                }
                 if (!shouldRunPhase2Leg(remaining, leg_wall_times[i])) continue;
+                plateau.notePhase2LegLaunched();
                 SearchOptions leg_options = options;
                 leg_options.time_budget_sec = 0.0;  // independent restart: run to completion
                 leg_options.seed = seed_for_round;
                 SearchResult leg_result = runLeg(variants[i], leg_options);
                 any_leg_ran = true;
                 budget_phase2 = true;
-                fold.admit(problem, leg_result, variants[i], seed_for_round, on_improved);
+                const bool phase2_improved =
+                    fold.admit(problem, leg_result, variants[i], seed_for_round, on_improved);
+                plateau.observeLeg(leg_result.best_score.value, leg_result.best_routing.open_routes,
+                                   phase2_improved, secondsSince(phase1_start));
             }
+            if (plateau_stopped) break;
             if (!any_leg_ran) break;
         }
     }
@@ -1732,6 +1847,13 @@ SearchResult runPricingPortfolio(const Problem& problem, const std::string& engi
     result.deep_mode = deep_mode;
     result.deep_legs_run = deep_legs_run;
     result.ladder_legs_run = ladder_legs_run;
+    // P1 (plateau-stop, .superpowers/sdd/p1-plateau-stop-design-20260819.md §10.2/§10.3): telemetry
+    // stamped unconditionally -- stage 1 computes it whenever phase 2 runs regardless of
+    // options.plateau_stop; plateau_stopped is only true when a fire actually broke the loop.
+    result.plateau_stopped = plateau_stopped;
+    result.plateau_fire_sec = plateau_fire_sec;
+    result.plateau_fire_value = plateau_fire_value;
+    result.plateau_spread = plateau_spread;
     // L3c: report the SUMMED SA wall across all folded legs (PortfolioFold accumulates it like
     // total_iterations), overwriting the picked leg's own stamp the whole-struct copy carried.
     result.sa_wall_time_sec = fold.total_sa_wall_sec;

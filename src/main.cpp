@@ -127,6 +127,37 @@ int main(int argc, char** argv) {
         std::cerr << "budget_parse: iters_explicit=" << (has_iters ? 1 : 0)
                   << " time_budget_explicit=" << (has_budget ? 1 : 0)
                   << " resolved_time_budget_sec=" << options.time_budget_sec << "\n";
+        // P1 (plateau-stop, .superpowers/sdd/p1-plateau-stop-design-20260819.md §7): resolution
+        // mirrors the existing 3-mode P0b `undirected_arm` precedent below (`--no-plateau-stop`
+        // highest precedence, then `--plateau-stop`, else the default). STAGE 1 (this landing,
+        // design §9 "stage 1 lands everything ... with the bare default resolving to false"): unlike
+        // the design's own §7 target end-state, a BARE invocation resolves to OBSERVE-ONLY (false)
+        // here -- stage 2 is the one that flips this bare resolution to true; only the explicit
+        // `--plateau-stop` flag turns the lever on in this stage. `plateau_arm` records which
+        // resolution fired, printed on the plateau_parse: marker below purely for the regression/
+        // battery to grep -- it does not affect behavior.
+        const bool bare = !has_iters && !has_budget;
+        const bool plateau_forced_off = hasFlag(argc, argv, "--no-plateau-stop");
+        const bool plateau_flag_on = hasFlag(argc, argv, "--plateau-stop");
+        std::string plateau_arm;
+        if (plateau_forced_off) {
+            options.plateau_stop = false;
+            plateau_arm = "forced-off";
+        } else if (plateau_flag_on) {
+            options.plateau_stop = true;
+            plateau_arm = "flag";
+        } else {
+            options.plateau_stop = false;  // stage 1: bare stays observe-only, see comment above
+            plateau_arm = bare ? "bare" : "off";
+        }
+        options.plateau_margin = argDouble(argc, argv, "--plateau-margin", kPlateauMarginDefault);
+        // Same "cheap marker printed before the (possibly long) search" rationale as budget_parse:
+        // above -- a test can timeout-kill a bare/long invocation and still observe the resolved
+        // arm/margin without waiting out the search. NOT appended to budget_parse: itself (that line
+        // is matched with `^...$` anchors by test/run_f1_regressions.sh's existing greps).
+        std::cerr << "plateau_parse: plateau_stop=" << (options.plateau_stop ? 1 : 0)
+                  << " plateau_margin=" << options.plateau_margin
+                  << " arm=" << plateau_arm << "\n";
         // B6 (flag-gated adaptive interval, .superpowers/sdd/b6-brief.md): DEFAULT OFF -- absent,
         // runPlacementSearch's exact_interval stays constant exactly as before B6 (hard byte-
         // identity acceptance gate). See SearchOptions.adaptive_interval's doc comment (search.hpp).
@@ -316,6 +347,17 @@ int main(int argc, char** argv) {
                   // (SearchOptions.wl_ladder defaults false) or the ladder block's own gate never
                   // fires.
                   << " ladder_legs=" << result.ladder_legs_run
+                  // P1 (plateau-stop, .superpowers/sdd/p1-plateau-stop-design-20260819.md §10.4):
+                  // telemetry -- additive stderr fields only (no .cfg byte is affected); always
+                  // plateau=0 plateau_t=0 plateau_v=0 plateau_spread=0 whenever phase 2 never runs.
+                  // Naming: plateau_v= (never plateau_score=) so no field name contains an existing
+                  // grep target (score=, wirelength=, channel_overflow_nets=, open_routes=, iters=,
+                  // validation=, engine=) that scripts/sweep.sh / run_selfconsistency_regressions.sh
+                  // grep out of this line.
+                  << " plateau=" << (result.plateau_stopped ? 1 : 0)
+                  << " plateau_t=" << result.plateau_fire_sec
+                  << " plateau_v=" << result.plateau_fire_value
+                  << " plateau_spread=" << result.plateau_spread
                   // sa_wall: the picked/folded result's summed SA-loop wall (search.hpp) -- gives
                   // the M1 SA-vs-machinery split directly from one run's summary instead of
                   // subtracting two differently-loaded runs (case5-l3bc-brief.md M1-completion).

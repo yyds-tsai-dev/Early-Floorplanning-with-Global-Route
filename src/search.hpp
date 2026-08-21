@@ -11,6 +11,12 @@
 
 namespace efgr {
 
+// P1 (plateau-stop, .superpowers/sdd/p1-plateau-stop-design-20260819.md): the official V5 cost
+// charges delta * Runtime * sqrt(OutlineArea); delta is an OFFICIAL constant, verified digit-level
+// against docs/official/beta_test/case_result.json on all 8 beta rows.
+constexpr double kRuntimeCostDelta = 0.5;
+constexpr double kPlateauMarginDefault = 1.0;
+
 struct SearchOptions {
     int iters = 1000;
     int seed = 1;
@@ -76,6 +82,19 @@ struct SearchOptions {
     // entered and every existing caller/regression stays byte-identical to pre-D2 (hard acceptance
     // gate, same discipline as this struct's other flags).
     bool wl_ladder = false;
+    // P1 (plateau-stop, .superpowers/sdd/p1-plateau-stop-design-20260819.md): runPricingPortfolio's
+    // phase-2 loop ALWAYS computes the plateauStopDecision predicate + telemetry at every leg-launch
+    // decision point (regardless of this flag) once budget-on/phase1_complete/!deep_mode hold -- this
+    // field only gates whether a fire actually BREAKS the loop. DEFAULT FALSE: keeps every existing
+    // caller/regression byte-identical (observe-only; telemetry is still stamped onto SearchResult,
+    // but nothing about the fold/search/`.cfg` output changes). STAGE 1 (this landing, design §9):
+    // main.cpp resolves a BARE invocation to false too (observe-only default) -- stage 2 is the one
+    // that flips the bare resolution to true; only the explicit `--plateau-stop` CLI flag sets this
+    // true in stage 1 (`--no-plateau-stop` forces false, highest precedence).
+    bool plateau_stop = false;
+    // P1 §5.2 S4/S5: the patience multiplier `m` -- larger = more patient = fewer stops; <= 0
+    // disables the lever entirely (plateauStopDecision's own S4 check).
+    double plateau_margin = kPlateauMarginDefault;
 };
 
 struct SearchResult {
@@ -264,6 +283,21 @@ struct SearchResult {
     int lns_rungs_tried = 0;
     int lns_adoptions = 0;
     int lns_nodes_expanded = 0;
+    // P1 (plateau-stop, .superpowers/sdd/p1-plateau-stop-design-20260819.md §10.2): telemetry only
+    // -- never read by scoring/caching logic, same precedent as deep_legs_run/ladder_legs_run above.
+    // Stamped by runPricingPortfolio regardless of options.plateau_stop (stage-1 observe-only mode
+    // computes and reports these even when the loop never actually stops on them). `plateau_stopped`
+    // is true iff the predicate actually ENDED phase 2 (requires options.plateau_stop AND a fire).
+    // `plateau_fire_sec` is the portfolio-clock time of the FIRST fire (0.0 = never fired, matching
+    // the "0 = disabled/unset" sentinel convention time_budget_sec already uses). `plateau_fire_value`
+    // is the fold-best Score.value at that first-fire instant. `plateau_spread` is the leg-value
+    // dispersion S at that same instant, or -- if the predicate never fired at all -- the LAST S
+    // measured at any phase-2 decision point (0.0 if phase 2 never reached a decision point, e.g.
+    // budget off). All default 0.0/false for any SearchResult not produced by runPricingPortfolio.
+    bool plateau_stopped = false;
+    double plateau_fire_sec = 0.0;
+    double plateau_fire_value = 0.0;
+    double plateau_spread = 0.0;
 };
 
 // Exact-scoring callback shape used by the elite pass's exact_cache (search.cpp's `exactCached`
@@ -551,6 +585,61 @@ struct PortfolioFold {
 // the skip arithmetic itself is directly unit-testable. Equality (`remaining == 1.5*leg_time`)
 // runs the leg (only strictly-less skips), matching the brief's own "<" wording.
 bool shouldRunPhase2Leg(double remaining_sec, double leg_phase1_wall_time_sec);
+
+// P1 (plateau-stop, .superpowers/sdd/p1-plateau-stop-design-20260819.md §5.3): the marginal
+// official cost of ONE wall-clock second, in the same unit as Score.value (um^2): delta * sqrt(
+// outline_area), delta = kRuntimeCostDelta = 0.5 (an OFFICIAL cost-model constant, verified
+// digit-level against docs/official/beta_test/case_result.json on all 8 beta rows). Returns 0.0 for
+// outline_area <= 0 (caller must read that as "price unknown" and never stop -- design §5.3
+// fallback: never stop on an unknown price).
+double runtimeSecondPrice(double outline_area);
+
+// P1 §10.1: the whole stop decision as ONE pure function over measured scalars, so it is
+// unit-testable without running a search (same "hoist the primitive" precedent as
+// shouldRunPhase2Leg/deepLegCount/PortfolioFold above).
+struct PlateauInputs {
+    bool have_best = false;            // fold produced at least one result
+    int best_open_routes = 0;          // fold best legality -- nonzero forbids stopping
+    double best_outline_area = 0.0;    // fold best Score.outline_area (== the .cfg OUTLINE area)
+    double leg_value_spread = 0.0;     // S = median - min over LEGAL leg values
+    int legal_leg_samples = 0;         // |X|
+    int phase2_legs_launched = 0;      // n2
+    int min_legs = 0;                  // N_min = variants.size()
+    double drought_sec = 0.0;          // t - max(last improvement, phase-2 start)
+    double round_wall_sec = 0.0;       // t0 = phase 1's measured aggregate wall (the patience floor)
+    double margin = kPlateauMarginDefault;  // m; larger = MORE patient; <= 0 disables
+};
+// P1 §5.2: STOP iff have_best (S1) AND best_open_routes==0 (S1) AND phase2_legs_launched>=min_legs
+// (S2, >=1 full round) AND legal_leg_samples>=min_legs (S3, enough legal samples for a median) AND
+// margin>0 AND runtimeSecondPrice(best_outline_area)>0 (S4, well-defined/disable path) AND
+// drought_sec >= max(margin*leg_value_spread/price, round_wall_sec) (S5, patience). Each condition
+// its own early `return false`, in that order.
+bool plateauStopDecision(const PlateauInputs& in);
+
+// P1 §10.1: accumulates the two measurements the predicate needs -- the legal legs' own best values
+// (for the dispersion S) and the time of the last fold improvement -- from the SAME admit stream
+// PortfolioFold already sees. Deliberately NOT folded into PortfolioFold: admit()'s signature is
+// pinned by test/regression_b2_20260725.cpp and by three other call sites.
+struct PlateauTracker {
+    std::vector<double> leg_values;   // legal legs only, insertion order, any phase
+    double phase2_start_sec = 0.0;
+    double last_improve_sec = 0.0;
+    int phase2_legs_launched = 0;
+
+    // If leg_open_routes == 0, records leg_value into leg_values. If improved, sets
+    // last_improve_sec = elapsed_sec unconditionally -- an improvement is an improvement even if the
+    // new best is illegal (S1 blocks stopping in that case anyway).
+    void observeLeg(double leg_value, int leg_open_routes, bool improved, double elapsed_sec);
+    // Sets phase2_start_sec = elapsed_sec and raises last_improve_sec to at least elapsed_sec.
+    void beginPhase2(double elapsed_sec);
+    void notePhase2LegLaunched();           // ++phase2_legs_launched
+    // median - min over leg_values; 0.0 when leg_values.size() < 2. Upper median for even sizes
+    // (fixed and documented so the test can pin it).
+    double legValueSpread() const;
+    // elapsed_sec - max(last_improve_sec, phase2_start_sec); may be <= 0 early (plateauStopDecision
+    // then fails S5 since P >= round_wall_sec > 0 whenever price is well-defined).
+    double droughtSec(double elapsed_sec) const;
+};
 
 // B4.1 (route-pricing portfolio, b4-report.md) + B5a.1 (elite-admission dimension,
 // b5a-report.md) + B5a.2 (variant registry + default-first budget mode, b5a-report.md "B5a.2
